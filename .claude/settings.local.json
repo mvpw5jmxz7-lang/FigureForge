@@ -28,7 +28,11 @@
       "Bash(python3 -c \"d=open\\('CLAUDE.md','rb'\\).read\\(\\); print\\('NULs in CLAUDE.md:', d.count\\(b'\\\\x00'\\)\\)\")",
       "Bash(python3 -c \"d=open\\('CLAUDE.md','rb'\\).read\\(\\); print\\('NULs:', d.count\\(b'\\\\x00'\\)\\)\")",
       "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ed27c7d2-1c8a-4952-8c51-4a1f5673c1b2/scratchpad/commitmsg.txt)",
-      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q --amend --no-edit)"
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q --amend --no-edit)",
+      "Bash(podman exec figureforge-web node -e ' *)",
+      "Bash(grep -oE '`make [a-z-]+`' GUIDE.md)",
+      "Bash(grep -oE '`docker compose [a-z -]+`' GUIDE.md)",
+      "Bash(grep -oE '\\(localhost:[0-9]+|port [0-9]+|[0-9]{4,5}\\)' GUIDE.md)"
     ]
   }
 }

@@ -6,6 +6,9 @@ neither of them offers.
 
 Built from [`build-a-nature-style-platform.md`](build-a-nature-style-platform.md).
 
+> **New here, or not a developer?** This document is technical. For plain-language
+> setup and usage instructions (including macOS), see **[GUIDE.md](GUIDE.md)**.
+
 ---
 
 ## Running it
