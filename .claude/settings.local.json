@@ -52,7 +52,8 @@
       "Bash(node /tmp/claude-1000/-home-comet-Projects-SciencePlatform/fc548e16-78e5-43aa-94ef-10ad4fcf74d0/scratchpad/t.mjs)",
       "Bash(git symbolic-ref *)",
       "Bash(git check-ignore *)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(git commit *)"
     ]
   }
 }
