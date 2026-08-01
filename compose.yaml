@@ -1,0 +1,35 @@
+# Equivalent to the Makefile pod, for anyone running Docker proper.
+# On this host use `make up` instead — podman here has no compose provider.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    volumes:
+      - ./services/api:/app:z
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    volumes:
+      - .:/app:z
+      - node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      # Under compose the API is a separate network namespace, unlike the pod.
+      VITE_API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  node-modules:

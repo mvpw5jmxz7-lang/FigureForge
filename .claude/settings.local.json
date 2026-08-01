@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 180 podman pull --quiet docker.io/library/node:22-bookworm-slim)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(timeout 300 podman pull --quiet docker.io/library/python:3.12-slim)",
+      "Bash(podman build *)",
+      "Bash(podman images *)",
+      "Bash(podman run --rm -v /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ed27c7d2-1c8a-4952-8c51-4a1f5673c1b2/scratchpad:/probe:z figureforge-api bash -c ' *)",
+      "Bash(podman run *)",
+      "Bash(make up *)",
+      "Bash(curl -s --max-time 10 http://localhost:8000/health)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" --max-time 10 http://localhost:5173/)",
+      "Bash(podman ps *)",
+      "Bash(podman logs *)",
+      "Bash(podman pod *)",
+      "Bash(podman port *)",
+      "Bash(podman exec *)",
+      "Bash(make down *)",
+      "Bash(make acceptance *)",
+      "Bash(awk 'NR==304||NR==306||NR==423||NR==425' figureforge/stats/tests.py)",
+      "Bash(git add *)",
+      "Bash(python3 -)",
+      "Bash(git rm *)"
+    ]
+  }
+}

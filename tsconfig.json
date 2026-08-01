@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/doc-model" },
+    { "path": "./packages/theme" },
+    { "path": "./packages/render" },
+    { "path": "./packages/plots" },
+    { "path": "./apps/web" }
+  ]
+}

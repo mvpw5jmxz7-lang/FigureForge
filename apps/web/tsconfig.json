@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node", "react", "vite/client"],
+    "noEmit": false
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/doc-model" },
+    { "path": "../../packages/theme" },
+    { "path": "../../packages/plots" },
+    { "path": "../../packages/render" }
+  ]
+}
