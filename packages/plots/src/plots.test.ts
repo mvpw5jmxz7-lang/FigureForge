@@ -1,15 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
   beeswarmOffsets,
+  binCountFor,
+  categoricalMarks,
   errorInterval,
   formatTick,
+  histogramBins,
+  histogramMarks,
+  kernelDensity,
   makeBandScale,
   makeScale,
   mulberry32,
   resolveDomain,
+  silvermanBandwidth,
   summarize,
   tCritical95,
   tickCountForLength,
+  xyMarks,
+  type MarkOptions,
+  type XyMarkOptions,
 } from './index.js';
 
 describe('summary statistics', () => {
@@ -161,6 +170,237 @@ describe('scales', () => {
     const centres = ['A', 'B', 'C'].map((n) => band.center(n));
     expect(centres[1]! - centres[0]!).toBeCloseTo(centres[2]! - centres[1]!, 6);
     expect(band.bandwidth).toBeGreaterThan(0);
+  });
+});
+
+describe('kernel density', () => {
+  const values = [1, 2, 3, 4, 5];
+  const summary = summarize(values);
+
+  it('matches Silverman\'s rule of thumb', () => {
+    // 0.9 * min(sd, IQR/1.349) * n^(-1/5). Here sd = sqrt(2.5) ≈ 1.5811 and
+    // IQR/1.349 = 2/1.349 ≈ 1.4826, so the robust estimate is the smaller one —
+    // which is the point of taking the minimum: one wild value cannot widen it.
+    expect(silvermanBandwidth(summary)).toBeCloseTo(
+      0.9 * (2 / 1.349) * Math.pow(5, -1 / 5),
+      10,
+    );
+  });
+
+  it('trims the profile to the observed range', () => {
+    // Drawn past the extremes, a violin tapers into values that were never
+    // measured and a reader takes the taper for data.
+    const density = kernelDensity(values, summary, 16);
+    expect(density).toHaveLength(17);
+    expect(density[0]!.value).toBeCloseTo(summary.min, 10);
+    expect(density[density.length - 1]!.value).toBeCloseTo(summary.max, 10);
+  });
+
+  it('peaks in the middle of a symmetric sample', () => {
+    const density = kernelDensity(values, summary, 16);
+    const middle = density[8]!.density;
+    expect(middle).toBeGreaterThan(density[0]!.density);
+    expect(middle).toBeGreaterThan(density[density.length - 1]!.density);
+    // Symmetric data, symmetric estimate.
+    expect(density[0]!.density).toBeCloseTo(density[density.length - 1]!.density, 10);
+  });
+
+  it('returns nothing rather than a spike for a degenerate spread', () => {
+    // Every value identical: there is no density to estimate, and drawing a
+    // zero-width violin would imply one.
+    expect(kernelDensity([7, 7, 7], summarize([7, 7, 7]))).toEqual([]);
+    expect(kernelDensity([7], summarize([7]))).toEqual([]);
+  });
+});
+
+describe('mark geometry', () => {
+  // Chosen so the R-7 quartiles land exactly on data points: q1 = 2, median = 3,
+  // q3 = 4, and the Tukey fences at -1 and 7 leave every value inside.
+  const values = [1, 2, 3, 4, 5];
+
+  /** scale(v) = 50 − 5v, so a value of 2 sits at 40 mm. */
+  const y = makeScale({ domain: { min: 0, max: 10 }, rangeMm: [50, 0], tickStep: null, kind: 'linear' });
+  const band = makeBandScale(['A'], [0, 60]);
+
+  const options = (overrides: Partial<MarkOptions> = {}): MarkOptions => ({
+    band,
+    y,
+    center: 'mean',
+    errorBars: 'sem',
+    barWidthFraction: 0.8,
+    showBar: false,
+    showBox: false,
+    showViolin: false,
+    showPoints: false,
+    pointSizeMm: 1,
+    jitterMm: 0.8,
+    pointLayout: 'jitter',
+    colors: ['#000000'],
+    seed: 1,
+    ...overrides,
+  });
+
+  it('places box hinges and whiskers on the scaled quartiles', () => {
+    const [mark] = categoricalMarks([{ name: 'A', values }], options({ showBox: true }));
+    const box = mark!.box!;
+    expect(box.q1Mm).toBeCloseTo(40, 6);
+    expect(box.q3Mm).toBeCloseTo(30, 6);
+    expect(box.medianMm).toBeCloseTo(35, 6);
+    expect(box.lowerWhiskerMm).toBeCloseTo(45, 6);
+    expect(box.upperWhiskerMm).toBeCloseTo(25, 6);
+    // y is inverted, so q3 is the top edge and the IQR is the height.
+    expect(Math.abs(box.q1Mm - box.q3Mm)).toBeCloseTo(10, 6);
+  });
+
+  it('clears a bracket above the whisker, not the hinge', () => {
+    const [mark] = categoricalMarks([{ name: 'A', values }], options({ showBox: true }));
+    // The upper whisker at 5 → 25 mm, above both q3 (30) and the mean (35).
+    expect(mark!.topMm).toBeCloseTo(25, 6);
+  });
+
+  it('lifts topMm clear of an outlier drawn beyond the whisker', () => {
+    const withOutlier = [1, 2, 3, 4, 5, 9];
+    const [mark] = categoricalMarks(
+      [{ name: 'A', values: withOutlier }],
+      options({ showBox: true }),
+    );
+    expect(mark!.outliers.map((o) => o.value)).toEqual([9]);
+    // 9 → 5 mm, minus half the point size. A bracket placed off the whisker
+    // instead would be drawn straight through the outlier.
+    expect(mark!.topMm).toBeCloseTo(4.5, 6);
+  });
+
+  it('suppresses the error bar when the distribution is already drawn', () => {
+    // An SEM bar through a box states the precision of a centre the reader
+    // cannot see; both types drop it even though errorBars is set to 'sem'.
+    for (const kind of ['showBox', 'showViolin'] as const) {
+      const [mark] = categoricalMarks([{ name: 'A', values }], options({ [kind]: true }));
+      expect(mark!.errorBar).toBeNull();
+    }
+  });
+
+  it('drops the separate outlier marks when every point is overlaid', () => {
+    const withOutlier = [1, 2, 3, 4, 5, 9];
+    const [mark] = categoricalMarks(
+      [{ name: 'A', values: withOutlier }],
+      options({ showBox: true, showPoints: true }),
+    );
+    // Otherwise the outlier is drawn twice, once as a point and once as a ring.
+    expect(mark!.outliers).toEqual([]);
+    expect(mark!.points).toHaveLength(6);
+  });
+
+  it('scales the violin so its widest point fills the band', () => {
+    const [mark] = categoricalMarks([{ name: 'A', values }], options({ showViolin: true }));
+    const violin = mark!.violin!;
+    const widest = Math.max(...violin.profile.map((p) => p.halfWidthMm));
+    expect(widest).toBeCloseTo((band.bandwidth * 0.8) / 2, 6);
+    expect(violin.centerX).toBeCloseTo(band.center('A'), 6);
+  });
+
+  it('leaves box and violin null for the categorical types', () => {
+    const [mark] = categoricalMarks([{ name: 'A', values }], options({ showBar: true }));
+    expect(mark!.box).toBeNull();
+    expect(mark!.violin).toBeNull();
+    expect(mark!.outliers).toEqual([]);
+  });
+});
+
+describe('continuous marks', () => {
+  /** scale(v) = 5v horizontally, scale(v) = 50 − 5v vertically. */
+  const x = makeScale({ domain: { min: 0, max: 20 }, rangeMm: [0, 100], tickStep: null, kind: 'linear' });
+  const y = makeScale({ domain: { min: 0, max: 10 }, rangeMm: [50, 0], tickStep: null, kind: 'linear' });
+
+  const xyOptions = (overrides: Partial<XyMarkOptions> = {}): XyMarkOptions => ({
+    x,
+    y,
+    showLine: false,
+    showPoints: true,
+    pointSizeMm: 1,
+    colors: ['#000000'],
+    ...overrides,
+  });
+
+  it('places a point at its own paired x, not its index', () => {
+    const [mark] = xyMarks([{ name: 'A', values: [2, 4], x: [10, 20] }], xyOptions());
+    expect(mark!.points.map((p) => [p.x, p.y])).toEqual([
+      [50, 40],
+      [100, 30],
+    ]);
+  });
+
+  it('orders the line by x rather than by row', () => {
+    // Drawn in row order these three points make a zig-zag; the data is
+    // monotonic and the line has to say so.
+    const [mark] = xyMarks(
+      [{ name: 'A', values: [2, 6, 4], x: [10, 30, 20] }],
+      xyOptions({ showLine: true }),
+    );
+    expect(mark!.linePath!.map((p) => p.x)).toEqual([50, 100, 150]);
+  });
+
+  it('drops a pair when either coordinate is missing', () => {
+    // Dropping the pair keeps x and y aligned. Dropping one side would shift
+    // every later point onto the wrong x.
+    const [mark] = xyMarks(
+      [{ name: 'A', values: [2, Number.NaN, 4], x: [10, 15, 20] }],
+      xyOptions(),
+    );
+    expect(mark!.n).toBe(2);
+    expect(mark!.points.map((p) => p.x)).toEqual([50, 100]);
+  });
+
+  it('yields nothing when the series carries no x at all', () => {
+    const [mark] = xyMarks([{ name: 'A', values: [2, 4] }], xyOptions());
+    expect(mark!.n).toBe(0);
+    expect(mark!.points).toEqual([]);
+  });
+});
+
+describe('histogram bins', () => {
+  it('keeps the maximum value inside the last bin', () => {
+    // With half-open bins the maximum falls outside every one of them and
+    // vanishes from its own histogram.
+    const bins = histogramBins([0, 1, 2, 3, 4], 4);
+    expect(bins.map((b) => b.count)).toEqual([1, 1, 1, 2]);
+    expect(bins.reduce((sum, b) => sum + b.count, 0)).toBe(5);
+  });
+
+  it('spans exactly the observed range', () => {
+    const bins = histogramBins([2, 4, 6, 8, 10], 4);
+    expect(bins[0]!.x0).toBeCloseTo(2, 10);
+    expect(bins[bins.length - 1]!.x1).toBeCloseTo(10, 10);
+  });
+
+  it('prefers the IQR to the range when choosing a bin count', () => {
+    // One extreme value must not collapse the histogram into a single bar,
+    // which is what a range-based rule (Sturges) does here.
+    const skewed = [1, 2, 2, 3, 3, 3, 4, 4, 5, 1000];
+    expect(binCountFor(skewed)).toBeGreaterThan(1);
+    // Never more bins than observations — that says nothing about the shape.
+    expect(binCountFor(skewed)).toBeLessThanOrEqual(skewed.length);
+  });
+
+  it('falls back to Sturges when every value is identical in the middle', () => {
+    // IQR of zero leaves Freedman–Diaconis with no width to offer.
+    const flatMiddle = [0, 5, 5, 5, 5, 5, 5, 10];
+    expect(binCountFor(flatMiddle)).toBe(Math.ceil(Math.log2(8)) + 1);
+  });
+
+  it('draws bars from the count baseline', () => {
+    const yScale = makeScale({ domain: { min: 0, max: 4 }, rangeMm: [40, 0], tickStep: null, kind: 'linear' });
+    const xScale = makeScale({ domain: { min: 0, max: 4 }, rangeMm: [0, 40], tickStep: null, kind: 'linear' });
+    const bins = histogramMarks({
+      x: xScale,
+      y: yScale,
+      bins: [{ x0: 0, x1: 2, count: 3 }, { x0: 2, x1: 4, count: 1 }],
+      barWidthFraction: 1,
+    });
+    // count 3 of a 0–4 domain on a 40 mm axis: top at 10 mm, height 30 mm.
+    expect(bins[0]!.y).toBeCloseTo(10, 6);
+    expect(bins[0]!.height).toBeCloseTo(30, 6);
+    expect(bins[0]!.width).toBeCloseTo(20, 6);
+    expect(bins[1]!.height).toBeCloseTo(10, 6);
   });
 });
 

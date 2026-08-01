@@ -24,6 +24,7 @@ import {
   type LayoutOptions,
 } from './layout.js';
 import type { LayoutTemplate } from './templates.js';
+import { CONTINUOUS_X_PLOT_TYPES } from './nodes.js';
 import type {
   AxisSpec,
   BracketNode,
@@ -162,8 +163,10 @@ export function addPlot(
     palette: options.palette ?? 'okabe-ito',
   };
 
-  // A categorical x axis needs no line of its own; the bars carry the reading.
-  plot.x.showTicks = false;
+  // A categorical x axis needs no ticks of its own; the category labels sit
+  // under their bands and the bars carry the reading. A numeric x axis is the
+  // opposite: without ticks there is nothing to read a position against.
+  plot.x.showTicks = CONTINUOUS_X_PLOT_TYPES.has(plot.plotType);
 
   draft.nodes[id] = plot;
   return plot;

@@ -7,7 +7,13 @@
  */
 
 import type { BandScale, NumericScale } from './scales.js';
-import { errorInterval, summarize, type CenterKind, type ErrorBarKind } from './summary.js';
+import {
+  errorInterval,
+  kernelDensity,
+  summarize,
+  type CenterKind,
+  type ErrorBarKind,
+} from './summary.js';
 
 export interface BarGeometry {
   x: number;
@@ -34,12 +40,38 @@ export interface PointGeometry {
   value: number;
 }
 
+export interface BoxGeometry {
+  /** Left edge of the box. */
+  x: number;
+  width: number;
+  /** Hinges in mm. y is inverted, so q3Mm is the visual top of the box. */
+  q1Mm: number;
+  q3Mm: number;
+  medianMm: number;
+  lowerWhiskerMm: number;
+  upperWhiskerMm: number;
+  capHalfWidthMm: number;
+}
+
+export interface ViolinGeometry {
+  centerX: number;
+  /**
+   * Half-width in mm at each grid position, ordered by increasing mm (visually
+   * top to bottom). The renderer mirrors this about `centerX` to close the path.
+   */
+  profile: { yMm: number; halfWidthMm: number }[];
+}
+
 export interface SeriesMarks {
   name: string;
   color: string;
   bar: BarGeometry | null;
   errorBar: ErrorBarGeometry | null;
+  box: BoxGeometry | null;
+  violin: ViolinGeometry | null;
   points: PointGeometry[];
+  /** Tukey outliers, drawn only by box plots — empty for every other type. */
+  outliers: PointGeometry[];
   centerMm: number;
   /** Highest drawn feature in mm — where a significance bracket must clear. */
   topMm: number;
@@ -54,6 +86,8 @@ export interface MarkOptions {
   errorBars: ErrorBarKind;
   barWidthFraction: number;
   showBar: boolean;
+  showBox: boolean;
+  showViolin: boolean;
   showPoints: boolean;
   pointSizeMm: number;
   jitterMm: number;
@@ -149,8 +183,13 @@ export function categoricalMarks(
         }
       : null;
 
+    // A box or violin already shows the whole distribution; an SEM bar drawn
+    // through one states the precision of a centre the reader cannot see, so the
+    // error bar is suppressed rather than layered on.
+    const distributionShown = options.showBox || options.showViolin;
+
     const errorBar: ErrorBarGeometry | null =
-      options.errorBars === 'none' || !Number.isFinite(interval.low)
+      distributionShown || options.errorBars === 'none' || !Number.isFinite(interval.low)
         ? null
         : {
             x: centerX,
@@ -160,6 +199,47 @@ export function categoricalMarks(
             // Hiding the lower cap under a bar is the standard convention.
             lowerInsideBar: options.showBar,
           };
+
+    const box: BoxGeometry | null =
+      options.showBox && stats.n > 0
+        ? {
+            x: centerX - barWidth / 2,
+            width: barWidth,
+            q1Mm: options.y.scale(stats.q1),
+            q3Mm: options.y.scale(stats.q3),
+            medianMm: options.y.scale(stats.median),
+            lowerWhiskerMm: options.y.scale(stats.lowerWhisker),
+            upperWhiskerMm: options.y.scale(stats.upperWhisker),
+            capHalfWidthMm: Math.max(0.5, barWidth * 0.25),
+          }
+        : null;
+
+    let violin: ViolinGeometry | null = null;
+    if (options.showViolin) {
+      const density = kernelDensity(s.values, stats);
+      const peak = Math.max(...density.map((d) => d.density), 0);
+      if (density.length > 0 && peak > 0) {
+        const halfMax = barWidth / 2;
+        violin = {
+          centerX,
+          // Scaled so the widest point of each violin fills its band. Widths are
+          // therefore comparable *within* a series, not across them — the same
+          // convention as every violin implementation.
+          profile: density.map((d) => ({
+            yMm: options.y.scale(d.value),
+            halfWidthMm: (d.density / peak) * halfMax,
+          })),
+        };
+      }
+    }
+
+    // Outliers are the box plot's points — but only when the plot is not already
+    // showing every point, or each outlier would be drawn twice, once here and
+    // once in the overlay.
+    const outliers: PointGeometry[] =
+      box && !options.showPoints
+        ? stats.outliers.map((value) => ({ x: centerX, y: options.y.scale(value), value }))
+        : [];
 
     let points: PointGeometry[] = [];
     if (options.showPoints) {
@@ -182,14 +262,20 @@ export function categoricalMarks(
     const candidates = [centerMm];
     if (bar) candidates.push(bar.y);
     if (errorBar) candidates.push(errorBar.topMm);
-    for (const p of points) candidates.push(p.y - options.pointSizeMm / 2);
+    // The whisker cap, not the hinge — a bracket placed off q3 sits inside the plot.
+    if (box) candidates.push(box.upperWhiskerMm);
+    if (violin) for (const p of violin.profile) candidates.push(p.yMm);
+    for (const p of [...points, ...outliers]) candidates.push(p.y - options.pointSizeMm / 2);
 
     return {
       name: s.name,
       color,
       bar,
       errorBar,
+      box,
+      violin,
       points,
+      outliers,
       centerMm,
       // y is inverted, so the visual top is the minimum.
       topMm: Math.min(...candidates),
@@ -197,6 +283,18 @@ export function categoricalMarks(
       errorLabel: interval.label,
     };
   });
+}
+
+/**
+ * Where a bracket end should land, whichever mark family the plot uses. Every
+ * variant is centred on its band slot, so this is the one place that has to know
+ * which geometry is present.
+ */
+function markCenterX(mark: SeriesMarks): number {
+  if (mark.bar) return mark.bar.x + mark.bar.width / 2;
+  if (mark.box) return mark.box.x + mark.box.width / 2;
+  if (mark.violin) return mark.violin.centerX;
+  return mark.errorBar?.x ?? 0;
 }
 
 /** Keep a swarm inside its slot rather than letting it bleed into the neighbour. */
@@ -209,6 +307,177 @@ function clampOffsets(offsets: readonly number[], limitMm: number): number[] {
 
 function clampToDomain(value: number, scale: NumericScale): number {
   return Math.max(scale.domain.min, Math.min(scale.domain.max, value));
+}
+
+// ---------------------------------------------------------------------------
+// Continuous x: scatter, line, histogram
+// ---------------------------------------------------------------------------
+
+export interface XySeriesMarks {
+  name: string;
+  color: string;
+  points: PointGeometry[];
+  /**
+   * Vertices of the connecting line in mm, already ordered by x — or null when
+   * the plot draws no line. Sorting is not cosmetic: a line drawn in row order
+   * over unsorted x values is a scribble, not a trend.
+   */
+  linePath: { x: number; y: number }[] | null;
+  n: number;
+  topMm: number;
+}
+
+export interface XyMarkOptions {
+  x: NumericScale;
+  y: NumericScale;
+  showLine: boolean;
+  showPoints: boolean;
+  pointSizeMm: number;
+  colors: readonly string[];
+}
+
+/** Paired (x, y) marks for scatter and line plots. */
+export function xyMarks(
+  series: readonly { name: string; values: readonly number[]; x?: readonly number[] }[],
+  options: XyMarkOptions,
+): XySeriesMarks[] {
+  return series.map((s, index) => {
+    const color = options.colors[index % Math.max(1, options.colors.length)] ?? '#000000';
+
+    // Only pairs where both coordinates are real. Dropping the pair rather than
+    // the value keeps x and y aligned; dropping one side would shift every
+    // subsequent point onto the wrong x.
+    const pairs: { xValue: number; yValue: number }[] = [];
+    for (let i = 0; i < s.values.length; i++) {
+      const xValue = s.x?.[i];
+      const yValue = s.values[i];
+      if (xValue === undefined || yValue === undefined) continue;
+      if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) continue;
+      pairs.push({ xValue, yValue });
+    }
+
+    const points: PointGeometry[] = pairs.map((p) => ({
+      x: options.x.scale(p.xValue),
+      y: options.y.scale(p.yValue),
+      value: p.yValue,
+    }));
+
+    const linePath = options.showLine
+      ? [...pairs]
+          .sort((a, b) => a.xValue - b.xValue)
+          .map((p) => ({ x: options.x.scale(p.xValue), y: options.y.scale(p.yValue) }))
+      : null;
+
+    const tops = points.map((p) => p.y - (options.showPoints ? options.pointSizeMm / 2 : 0));
+
+    return {
+      name: s.name,
+      color,
+      points: options.showPoints ? points : [],
+      linePath,
+      n: pairs.length,
+      // y is inverted, so the visual top is the minimum.
+      topMm: tops.length > 0 ? Math.min(...tops) : 0,
+    };
+  });
+}
+
+export interface HistogramBin {
+  /** Bin bounds in data units, half-open [x0, x1). */
+  x0: number;
+  x1: number;
+  count: number;
+  /** Bar geometry in mm. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Freedman–Diaconis bin count, falling back to Sturges.
+ *
+ * FD keys the bin width off the IQR rather than the range, so a single extreme
+ * value cannot collapse the whole histogram into one tall bar — which is exactly
+ * what Sturges does on skewed data. When the IQR is zero FD has no width to
+ * offer and Sturges takes over.
+ */
+export function binCountFor(values: readonly number[]): number {
+  const stats = summarize(values);
+  if (stats.n < 2 || stats.max <= stats.min) return 1;
+
+  const iqr = stats.q3 - stats.q1;
+  const width = iqr > 0 ? 2 * iqr * Math.pow(stats.n, -1 / 3) : 0;
+
+  const count =
+    width > 0
+      ? Math.ceil((stats.max - stats.min) / width)
+      : Math.ceil(Math.log2(stats.n)) + 1;
+
+  // A histogram with more bins than points says nothing; one with hundreds of
+  // bars is unreadable at journal column width.
+  return Math.max(1, Math.min(count, 50, Math.max(1, stats.n)));
+}
+
+export interface HistogramMarkOptions {
+  x: NumericScale;
+  y: NumericScale;
+  bins: readonly { x0: number; x1: number; count: number }[];
+  /** Fraction of the bin width the bar fills; 1 leaves no gap, as is conventional. */
+  barWidthFraction: number;
+}
+
+/** Uniform-width bins over the observed range. */
+export function histogramBins(
+  values: readonly number[],
+  binCount?: number | null,
+): { x0: number; x1: number; count: number }[] {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (clean.length === 0) return [];
+
+  const stats = summarize(clean);
+  const count = Math.max(1, Math.floor(binCount ?? binCountFor(clean)));
+  const step = (stats.max - stats.min) / count || 1;
+
+  const bins = Array.from({ length: count }, (_, i) => ({
+    x0: stats.min + i * step,
+    x1: stats.min + (i + 1) * step,
+    count: 0,
+  }));
+
+  for (const v of clean) {
+    // Half-open bins, except the last: without this the maximum value falls
+    // outside every bin and silently vanishes from its own histogram.
+    let index = Math.floor((v - stats.min) / step);
+    if (index >= count) index = count - 1;
+    if (index < 0) index = 0;
+    bins[index]!.count++;
+  }
+
+  return bins;
+}
+
+/** Bar geometry for a histogram, against a numeric x scale. */
+export function histogramMarks(options: HistogramMarkOptions): HistogramBin[] {
+  const baseline = options.y.scale(clampToDomain(0, options.y));
+
+  return options.bins.map((b) => {
+    const left = options.x.scale(b.x0);
+    const right = options.x.scale(b.x1);
+    const full = Math.abs(right - left);
+    const width = full * options.barWidthFraction;
+    const top = options.y.scale(b.count);
+
+    return {
+      x0: b.x0,
+      x1: b.x1,
+      count: b.count,
+      x: Math.min(left, right) + (full - width) / 2,
+      y: Math.min(top, baseline),
+      width,
+      height: Math.abs(baseline - top),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +517,8 @@ export function stackBrackets(
     const b = marks[comparison.indexB];
     if (!a || !b) continue;
 
-    const xA = a.bar ? a.bar.x + a.bar.width / 2 : a.errorBar?.x ?? 0;
-    const xB = b.bar ? b.bar.x + b.bar.width / 2 : b.errorBar?.x ?? 0;
+    const xA = markCenterX(a);
+    const xB = markCenterX(b);
 
     const spanned = marks.slice(
       Math.min(comparison.indexA, comparison.indexB),

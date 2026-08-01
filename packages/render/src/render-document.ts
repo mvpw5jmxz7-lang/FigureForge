@@ -7,6 +7,7 @@
  */
 
 import {
+  CONTINUOUS_X_PLOT_TYPES,
   absoluteFrame,
   isEffectivelyLocked,
   childrenOf,
@@ -32,9 +33,13 @@ import {
 import { paletteColors, type Theme } from '@figureforge/theme';
 import {
   categoricalMarks,
+  histogramBins,
+  histogramMarks,
   makeBandScale,
   makeScale,
   resolveDomain,
+  tickCountForLength,
+  xyMarks,
   type NumericScale,
 } from '@figureforge/plots';
 import { el, group, round, text, translate, type SceneNode } from './scene.js';
@@ -497,14 +502,159 @@ function renderScaleBar(node: ScaleBarNode, doc: FigureDocument, theme: Theme): 
  * use the renderer's own band scale rather than approximating it — an
  * approximation puts the bracket ends visibly off the bars it refers to.
  */
-export interface PlotGeometry {
+interface PlotGeometryBase {
   margin: { top: number; right: number; bottom: number; left: number };
   plotWidth: number;
   plotHeight: number;
-  band: ReturnType<typeof makeBandScale>;
   yScale: NumericScale;
+}
+
+/** Band-scaled x: bar, dot, bar-dot, beeswarm, box, violin. */
+export interface CategoricalPlotGeometry extends PlotGeometryBase {
+  kind: 'categorical';
+  band: ReturnType<typeof makeBandScale>;
   marks: ReturnType<typeof categoricalMarks>;
   categories: string[];
+}
+
+/**
+ * Numeric x: scatter, line, histogram.
+ *
+ * A separate arm rather than optional fields on one shape, because almost
+ * nothing is shared — there is no band, no category list, and the marks are a
+ * different type. Optional fields would push a null check onto every reader and
+ * let a categorical-only assumption compile against a continuous plot.
+ */
+export interface ContinuousPlotGeometry extends PlotGeometryBase {
+  kind: 'continuous';
+  xScale: NumericScale;
+  series: ReturnType<typeof xyMarks>;
+  bins: ReturnType<typeof histogramMarks>;
+}
+
+export type PlotGeometry = CategoricalPlotGeometry | ContinuousPlotGeometry;
+
+
+/**
+ * Geometry for the numeric-x types.
+ *
+ * Returns null rather than approximating when the data cannot support the mark —
+ * a scatter needs paired x values, a histogram needs a single distribution. The
+ * Inspector only offers a type its dataset supports, so this is the guard for a
+ * type set some other way (a loaded file, a dataset swapped underneath a plot).
+ * Drawing *something* here is how the five unimplemented types shipped wrong
+ * output for two phases.
+ */
+function continuousGeometry(
+  node: PlotNode,
+  series: ReturnType<typeof toSeries>,
+  frame: { margin: PlotGeometryBase['margin']; plotWidth: number; plotHeight: number },
+): ContinuousPlotGeometry | null {
+  const { margin, plotWidth, plotHeight } = frame;
+  const colors = paletteColors(node.palette, series.length);
+
+  if (node.plotType === 'histogram') {
+    // One distribution only. Pooling several groups into one histogram invents a
+    // bimodal shape that belongs to neither of them.
+    if (series.length !== 1) return null;
+    const values = series[0]!.values.filter(Number.isFinite);
+    if (values.length === 0) return null;
+
+    const rawBins = histogramBins(values, node.histogramBins ?? null);
+    if (rawBins.length === 0) return null;
+
+    // The x domain comes from the bin edges, not the raw values: a domain padded
+    // past the outermost edge would leave the end bars floating off the axis.
+    const xScale = makeScale({
+      domain: { min: rawBins[0]!.x0, max: rawBins[rawBins.length - 1]!.x1 },
+      rangeMm: [0, plotWidth],
+      tickStep: node.x.tickStep,
+      kind: 'linear',
+    });
+
+    /*
+     * A count axis is discrete. Left to the generic tick chooser a histogram
+     * peaking at 3 gets labelled 0, 0.5, 1, 1.5 … — half an observation, which
+     * is not a thing. Step by whole counts instead, chosen so the tick density
+     * still suits the axis length.
+     */
+    const maxCount = Math.max(...rawBins.map((b) => b.count), 1);
+    const countStep = Math.max(1, Math.ceil(maxCount / tickCountForLength(plotHeight)));
+
+    const yScale = makeScale({
+      domain: resolveDomain(rawBins.map((b) => b.count), {
+        min: node.y.min,
+        max: node.y.max,
+        // Counts are magnitudes drawn as bars; a truncated baseline misleads.
+        includeZero: true,
+        padFraction: 0.08,
+        kind: node.y.scale,
+      }),
+      rangeMm: [plotHeight, 0],
+      tickStep: node.y.tickStep ?? countStep,
+      kind: node.y.scale,
+    });
+
+    return {
+      kind: 'continuous',
+      margin,
+      plotWidth,
+      plotHeight,
+      xScale,
+      yScale,
+      series: [],
+      bins: histogramMarks({ x: xScale, y: yScale, bins: rawBins, barWidthFraction: 1 }),
+    };
+  }
+
+  // scatter and line: every series must carry its own paired x values.
+  const xValues = series.flatMap((s) => [...(s.x ?? [])]).filter(Number.isFinite);
+  if (xValues.length === 0) return null;
+
+  const xScale = makeScale({
+    domain: resolveDomain(xValues, {
+      min: node.x.min,
+      max: node.x.max,
+      includeZero: false,
+      padFraction: 0.08,
+      kind: node.x.scale,
+    }),
+    rangeMm: [0, plotWidth],
+    tickStep: node.x.tickStep,
+    kind: node.x.scale,
+  });
+
+  const yScale = makeScale({
+    domain: resolveDomain(series.flatMap((s) => s.values), {
+      min: node.y.min,
+      max: node.y.max,
+      includeZero: false,
+      padFraction: 0.08,
+      kind: node.y.scale,
+    }),
+    rangeMm: [plotHeight, 0],
+    tickStep: node.y.tickStep,
+    kind: node.y.scale,
+  });
+
+  return {
+    kind: 'continuous',
+    margin,
+    plotWidth,
+    plotHeight,
+    xScale,
+    yScale,
+    series: xyMarks(series, {
+      x: xScale,
+      y: yScale,
+      showLine: node.plotType === 'line',
+      // A line plot hides its points by default; a scatter is nothing but points.
+      showPoints: node.plotType === 'scatter' || node.showPoints,
+      pointSizeMm: node.pointSizeMm,
+      colors,
+    }),
+    bins: [],
+  };
 }
 
 function computePlotGeometry(
@@ -522,6 +672,10 @@ function computePlotGeometry(
   const plotWidth = Math.max(0, node.frame.width - margin.left - margin.right);
   const plotHeight = Math.max(0, node.frame.height - margin.top - margin.bottom);
   if (plotWidth <= 0 || plotHeight <= 0) return null;
+
+  if (CONTINUOUS_X_PLOT_TYPES.has(node.plotType)) {
+    return continuousGeometry(node, series, { margin, plotWidth, plotHeight });
+  }
 
   const yDomain = resolveDomain(series.flatMap((s) => s.values), {
     min: node.y.min,
@@ -549,6 +703,8 @@ function computePlotGeometry(
     errorBars: node.errorBars,
     barWidthFraction: node.barWidthFraction,
     showBar: node.plotType === 'bar' || node.plotType === 'bar-dot',
+    showBox: node.plotType === 'box',
+    showViolin: node.plotType === 'violin',
     showPoints: node.showPoints || node.plotType === 'dot' || node.plotType === 'beeswarm',
     pointSizeMm: node.pointSizeMm,
     jitterMm: node.jitterMm,
@@ -559,6 +715,7 @@ function computePlotGeometry(
   });
 
   return {
+    kind: 'categorical',
     margin,
     plotWidth,
     plotHeight,
@@ -615,6 +772,15 @@ export function measurePlot(
   const categoryX = new Map<string, number>();
   const categoryTop = new Map<string, number>();
 
+  // A continuous plot has no categories to anchor a bracket to. Empty
+  // measurements are the honest answer: `addBracket` then has nothing to place
+  // against, and the Stats tab refuses group comparisons on these plots.
+  if (geometry.kind !== 'categorical') {
+    const empty: PlotMeasurements = { categoryX, categoryTop };
+    measureCache.set(plot, { dataset, theme, result: empty });
+    return empty;
+  }
+
   geometry.categories.forEach((name, index) => {
     const mark = geometry.marks[index];
     categoryX.set(name, geometry.margin.left + geometry.band.center(name));
@@ -649,7 +815,20 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
   const geometry = computePlotGeometry(node, doc, theme);
   if (!geometry) return null;
 
-  const { margin, plotWidth, plotHeight, band, yScale, marks } = geometry;
+  const { margin } = geometry;
+
+  if (geometry.kind === 'continuous') {
+    return group(
+      { transform: translate(margin.left, margin.top) },
+      [
+        ...renderAxes(node, theme, geometry),
+        ...renderContinuousMarks(node, theme, geometry),
+      ],
+      { role: 'plot-area' },
+    );
+  }
+
+  const { marks } = geometry;
   const content: SceneNode[] = [];
 
   for (const mark of marks) {
@@ -665,6 +844,68 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
           fill: mark.color,
           stroke: 'none',
         }, undefined, { role: 'bar' }),
+      );
+    }
+
+    if (mark.violin) {
+      const v = mark.violin;
+      // Up the right flank, then back down the left, mirrored about the centre.
+      const right = v.profile.map(
+        (p, i) => `${i === 0 ? 'M' : 'L'}${round(v.centerX + p.halfWidthMm)} ${round(p.yMm)}`,
+      );
+      const left = [...v.profile]
+        .reverse()
+        .map((p) => `L${round(v.centerX - p.halfWidthMm)} ${round(p.yMm)}`);
+      markChildren.push(
+        el('path', {
+          d: `${right.join(' ')} ${left.join(' ')} Z`,
+          fill: mark.color,
+          'fill-opacity': 0.55,
+          stroke: mark.color,
+          'stroke-width': theme.stroke.dataMm,
+          'stroke-linejoin': 'round',
+        }, undefined, { role: 'violin' }),
+      );
+    }
+
+    if (mark.box) {
+      const b = mark.box;
+      markChildren.push(
+        el('path', {
+          d:
+            `M${round(b.x + b.width / 2)} ${round(b.q3Mm)} L${round(b.x + b.width / 2)} ${round(b.upperWhiskerMm)} ` +
+            `M${round(b.x + b.width / 2 - b.capHalfWidthMm)} ${round(b.upperWhiskerMm)} L${round(b.x + b.width / 2 + b.capHalfWidthMm)} ${round(b.upperWhiskerMm)} ` +
+            `M${round(b.x + b.width / 2)} ${round(b.q1Mm)} L${round(b.x + b.width / 2)} ${round(b.lowerWhiskerMm)} ` +
+            `M${round(b.x + b.width / 2 - b.capHalfWidthMm)} ${round(b.lowerWhiskerMm)} L${round(b.x + b.width / 2 + b.capHalfWidthMm)} ${round(b.lowerWhiskerMm)}`,
+          fill: 'none',
+          stroke: theme.foreground,
+          'stroke-width': theme.stroke.errorBarMm,
+          'stroke-linecap': 'butt',
+        }, undefined, { role: 'whisker' }),
+      );
+      markChildren.push(
+        el('rect', {
+          x: b.x,
+          // y is inverted, so q3 is the top edge and the height is the IQR.
+          y: b.q3Mm,
+          width: b.width,
+          height: Math.abs(b.q1Mm - b.q3Mm),
+          fill: mark.color,
+          'fill-opacity': 0.55,
+          stroke: theme.foreground,
+          'stroke-width': theme.stroke.dataMm,
+        }, undefined, { role: 'box' }),
+      );
+      markChildren.push(
+        el('path', {
+          d: `M${round(b.x)} ${round(b.medianMm)} L${round(b.x + b.width)} ${round(b.medianMm)}`,
+          fill: 'none',
+          stroke: theme.foreground,
+          // The median is the box plot's headline number; it has to read against
+          // the fill rather than disappear into the outline.
+          'stroke-width': theme.stroke.dataMm * 1.6,
+          'stroke-linecap': 'butt',
+        }, undefined, { role: 'line' }),
       );
     }
 
@@ -703,25 +944,163 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       );
     }
 
+    for (const outlier of mark.outliers) {
+      markChildren.push(
+        el('circle', {
+          cx: outlier.x,
+          cy: outlier.y,
+          r: node.pointSizeMm / 2,
+          // Hollow, so an outlier is never mistaken for a plotted data point in
+          // a box-plus-points figure.
+          fill: 'none',
+          stroke: theme.foreground,
+          'stroke-width': theme.stroke.hairlineMinMm,
+        }, undefined, { role: 'outlier' }),
+      );
+    }
+
     content.push(group({}, markChildren));
   }
 
-  const axes = renderAxes(node, theme, yScale, band, plotWidth, plotHeight, geometry.categories);
+  const axes = renderAxes(node, theme, geometry);
 
   return group({ transform: translate(margin.left, margin.top) }, [...axes, ...content], {
     role: 'plot-area',
   });
 }
 
-function renderAxes(
+/** Scatter points, line paths and histogram bars. */
+function renderContinuousMarks(
   node: PlotNode,
   theme: Theme,
-  yScale: NumericScale,
-  band: ReturnType<typeof makeBandScale>,
-  plotWidth: number,
-  plotHeight: number,
-  categories: readonly string[],
+  geometry: ContinuousPlotGeometry,
 ): SceneNode[] {
+  const content: SceneNode[] = [];
+
+  for (const bin of geometry.bins) {
+    content.push(
+      el('rect', {
+        x: bin.x,
+        y: bin.y,
+        width: bin.width,
+        height: bin.height,
+        fill: paletteColors(node.palette, 1)[0] ?? theme.foreground,
+        stroke: theme.background,
+        'stroke-width': theme.stroke.hairlineMinMm,
+      }, undefined, { role: 'bar' }),
+    );
+  }
+
+  for (const s of geometry.series) {
+    const markChildren: SceneNode[] = [];
+
+    if (s.linePath && s.linePath.length > 1) {
+      markChildren.push(
+        el('path', {
+          d: s.linePath
+            .map((p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.y)}`)
+            .join(' '),
+          fill: 'none',
+          stroke: s.color,
+          'stroke-width': theme.stroke.dataMm,
+          'stroke-linejoin': 'round',
+          'stroke-linecap': 'round',
+        }, undefined, { role: 'line' }),
+      );
+    }
+
+    for (const point of s.points) {
+      markChildren.push(
+        el('circle', {
+          cx: point.x,
+          cy: point.y,
+          r: node.pointSizeMm / 2,
+          fill: s.color,
+          stroke: 'none',
+        }, undefined, { role: 'point' }),
+      );
+    }
+
+    content.push(group({}, markChildren));
+  }
+
+  return content;
+}
+
+/**
+ * Ticks and labels for a numeric x axis.
+ *
+ * The mirror of the y axis's thinning rule, measured by *width* rather than
+ * height — and, like it, measured through the static tables in `text-width.ts`.
+ * Measuring in the browser would thin labels on screen and leave them
+ * overlapping in the export, which is precisely the divergence the DOM-free
+ * invariant exists to prevent.
+ */
+function renderNumericXTicks(
+  node: PlotNode,
+  theme: Theme,
+  geometry: ContinuousPlotGeometry,
+): SceneNode[] {
+  const { xScale, plotWidth, plotHeight } = geometry;
+  const out: SceneNode[] = [];
+  const tickLen = theme.spacing.tickLengthMm;
+  const tickLabelPt = theme.type.tickLabelPt;
+  const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
+
+  const visible = xScale.ticks.filter(
+    (tick) => xScale.scale(tick) >= -0.01 && xScale.scale(tick) <= plotWidth + 0.01,
+  );
+  if (visible.length === 0) return out;
+
+  const widest = visible.reduce(
+    (max, tick) => Math.max(max, estimateTextWidthMm(xScale.format(tick), tickLabelPt)),
+    0,
+  );
+  // A gap of a quarter of the widest label keeps neighbours from touching.
+  const maxLabels = widest > 0 ? Math.max(2, Math.floor(plotWidth / (widest * 1.25))) : visible.length;
+  const stride = visible.length > maxLabels ? Math.ceil(visible.length / maxLabels) : 1;
+
+  visible.forEach((tick, index) => {
+    const x = xScale.scale(tick);
+
+    if (node.x.showTicks) {
+      out.push(
+        el('path', {
+          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickLen)}`,
+          ...axisStroke,
+        }, undefined, { role: 'tick' }),
+      );
+    }
+
+    // Ticks stay put; only their labels thin out, so the scale still reads.
+    if (!node.x.showLabels || index % stride !== 0) return;
+
+    /*
+     * Anchor the end labels inward. The theme reserves only 2 mm to the right of
+     * the plot, so a centred label on the last tick overhangs the panel and, on
+     * the rightmost panel of a figure, the page itself.
+     */
+    const isFirst = index === 0;
+    const isLast = index === visible.length - 1;
+    const anchor = isFirst ? 'start' : isLast ? 'end' : 'middle';
+
+    out.push(
+      text(xScale.format(tick), {
+        x,
+        y: plotHeight + tickLen + theme.spacing.tickLabelGapMm + ptToMm(tickLabelPt) * 0.8,
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(tickLabelPt),
+        fill: theme.foreground,
+        'text-anchor': anchor,
+      }, { role: 'tick-label' }),
+    );
+  });
+
+  return out;
+}
+
+function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
+  const { yScale, plotWidth, plotHeight } = geometry;
   const out: SceneNode[] = [];
   const tickLen = theme.spacing.tickLengthMm;
   const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
@@ -805,17 +1184,20 @@ function renderAxes(
     );
   }
 
-  // --- x axis (categorical) ----------------------------------------------
+  // --- x axis --------------------------------------------------------------
   if (node.x.showLine) {
     out.push(
       el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
 
-  // How far below the axis the category labels reach, so the title clears them.
+  // How far below the axis the labels reach, so the title clears them.
   let xLabelDepth = estimateTextHeightMm(tickLabelPt);
 
-  if (node.x.showLabels) {
+  if (geometry.kind === 'continuous') {
+    out.push(...renderNumericXTicks(node, theme, geometry));
+  } else if (node.x.showLabels) {
+    const { band, categories } = geometry;
     const baseY = plotHeight + tickLen + theme.spacing.tickLabelGapMm;
     // Adding a dataset re-runs auto-layout and narrows every panel, so the slot
     // a category label has to fit in shrinks. Measure before drawing.

@@ -102,6 +102,65 @@ export function summarize(values: readonly number[]): SeriesSummary {
   };
 }
 
+export interface DensityPoint {
+  value: number;
+  density: number;
+}
+
+/**
+ * Silverman's rule-of-thumb bandwidth.
+ *
+ * Takes the smaller of the SD and a robust IQR-derived estimate, so one extreme
+ * outlier cannot inflate the bandwidth and smear the whole violin flat.
+ */
+export function silvermanBandwidth(summary: SeriesSummary): number {
+  if (summary.n < 2) return 0;
+  const robust = (summary.q3 - summary.q1) / 1.349;
+  const spread = robust > 0 ? Math.min(summary.sd, robust) : summary.sd;
+  return 0.9 * spread * Math.pow(summary.n, -1 / 5);
+}
+
+/**
+ * Gaussian kernel density, evaluated on a fixed grid.
+ *
+ * **Trimmed to the observed range.** Kernel density is conventionally drawn a
+ * bandwidth or two past the extremes, which renders a smooth taper into values
+ * that were never measured — at the n = 3–20 this app is built for that tail is
+ * pure artefact, and a reader takes it for data. The violin therefore closes at
+ * the true min and max.
+ *
+ * The grid is a fixed step count rather than a fixed resolution so the result is
+ * identical on screen and in the headless export.
+ */
+export function kernelDensity(
+  values: readonly number[],
+  summary: SeriesSummary,
+  steps = 64,
+  bandwidth?: number,
+): DensityPoint[] {
+  const clean = values.filter((v) => Number.isFinite(v));
+  const h = bandwidth ?? silvermanBandwidth(summary);
+
+  // A degenerate spread (n < 2, or every value identical) has no density to
+  // estimate. Returning empty lets the caller draw nothing rather than a spike.
+  if (clean.length < 2 || !(h > 0) || summary.max <= summary.min) return [];
+
+  const grid: DensityPoint[] = [];
+  const span = summary.max - summary.min;
+
+  for (let i = 0; i <= steps; i++) {
+    const value = summary.min + (span * i) / steps;
+    let sum = 0;
+    for (const v of clean) {
+      const u = (value - v) / h;
+      sum += Math.exp(-0.5 * u * u);
+    }
+    grid.push({ value, density: sum / (clean.length * h * Math.sqrt(2 * Math.PI)) });
+  }
+
+  return grid;
+}
+
 export interface ErrorInterval {
   center: number;
   low: number;

@@ -98,6 +98,17 @@ export type PlotType =
   | 'beeswarm'
   | 'histogram';
 
+/**
+ * The plot types whose x axis is a numeric scale rather than a band of
+ * categories. Kept here beside the union so the renderer, the model defaults and
+ * the UI cannot drift on which is which.
+ */
+export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
+  'scatter',
+  'line',
+  'histogram',
+]);
+
 export type ErrorBarKind = 'none' | 'sd' | 'sem' | 'ci95' | 'range' | 'iqr';
 
 export type CenterKind = 'mean' | 'median';
@@ -149,6 +160,12 @@ export interface PlotNode extends NodeBase {
    * the dots. Opt-in rather than default, so existing figures do not change.
    */
   pointsUseSeriesColor?: boolean;
+  /**
+   * Histogram bin count. Unset means Freedman–Diaconis chooses, which is the
+   * right default at the sample sizes this tool sees — but bin count changes
+   * the shape a reader takes away, so it has to be overridable.
+   */
+  histogramBins?: number;
 }
 
 export interface ImageNode extends NodeBase {

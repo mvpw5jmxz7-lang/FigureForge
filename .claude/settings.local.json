@@ -53,7 +53,9 @@
       "Bash(git symbolic-ref *)",
       "Bash(git check-ignore *)",
       "Bash(git log *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(make test-web *)",
+      "Bash(make test-api *)"
     ]
   }
 }

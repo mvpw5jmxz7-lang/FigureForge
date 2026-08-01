@@ -35,7 +35,13 @@ import {
   type FigureDocument,
   type StatResult,
 } from '@figureforge/doc-model';
-import { checkFigure, measurePlot, renderDocument, toSvgString } from '@figureforge/render';
+import {
+  checkFigure,
+  collectByRole,
+  measurePlot,
+  renderDocument,
+  toSvgString,
+} from '@figureforge/render';
 import { NATURE_THEME } from '@figureforge/theme';
 
 const API = process.env['API_URL'] ?? 'http://localhost:8000';
@@ -45,9 +51,12 @@ const VIABILITY = `Treatment,Rep1,Rep2,Rep3,Rep4
 Vehicle,98.2,95.4,101.3,97.8
 Compound X,42.1,38.7,45.3,40.2`;
 
-const EXPRESSION = `Genotype,Rep1,Rep2,Rep3
-WT,1.02,0.98,1.00
-KO,2.41,2.68,2.55`;
+// Six replicates, not three: panel b is drawn as a box plot, and quartiles and
+// Tukey whiskers are not meaningful below about n = 5 — the quality checker
+// says so, and a demo figure should not model the thing it warns about.
+const EXPRESSION = `Genotype,Rep1,Rep2,Rep3,Rep4,Rep5,Rep6
+WT,1.02,0.98,1.00,1.07,0.94,1.03
+KO,2.41,2.68,2.55,2.33,2.72,2.49`;
 
 let failures = 0;
 
@@ -112,7 +121,7 @@ async function main(): Promise<void> {
       frame: { x: 0, y: 0, width: 80, height: 60 },
       name: 'Expression',
       datasetId: expression.id,
-      plotType: 'bar-dot',
+      plotType: 'box',
       yTitle: 'Relative expression',
     });
 
@@ -207,6 +216,13 @@ async function main(): Promise<void> {
   check('SVG declares millimetre dimensions', svg.includes('width="183mm"'));
   check('one user unit is one millimetre', svg.includes('viewBox="0 0 183 75"'));
   check('axis title present as real text', svg.includes('Cell viability (%)'));
+
+  // Panel b is a box plot: prove the distribution marks reach the output rather
+  // than falling through to the categorical dot path, which is what every one of
+  // the declared-but-unimplemented plot types silently did.
+  check('box plot hinges rendered', collectByRole(scene, 'box').length === 2);
+  check('box plot whiskers rendered', collectByRole(scene, 'whisker').length === 2);
+  check('no error bars drawn under a box', collectByRole(scene, 'error-bar').length === 2);
   writeFileSync(`${OUT}figure.svg`, svg);
 
   // -- 5. Quality ----------------------------------------------------------

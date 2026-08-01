@@ -9,6 +9,7 @@
  */
 
 import {
+  CONTINUOUS_X_PLOT_TYPES,
   deleteNode,
   findDataset,
   formatMm,
@@ -30,16 +31,55 @@ import type { DocumentApi } from '../useDocument.js';
 /**
  * Only the plot types that actually render distinctly.
  *
- * `PlotType` also declares scatter, line, box, violin and histogram; those pass
- * the type system but fall through to the categorical dot path, so offering
- * them here would ship a control that produces plausible-looking wrong output.
+ * `PlotType` also declares scatter, line and histogram; those pass the type
+ * system but fall through to the categorical dot path, so offering them here
+ * would ship a control that produces plausible-looking wrong output. They need a
+ * numeric x axis, which does not exist yet — add them as each one lands.
  */
 const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'bar', label: 'Bar' },
   { id: 'dot', label: 'Dot' },
   { id: 'bar-dot', label: 'Bar + points' },
   { id: 'beeswarm', label: 'Beeswarm' },
+  { id: 'box', label: 'Box' },
+  { id: 'violin', label: 'Violin' },
+  { id: 'scatter', label: 'Scatter' },
+  { id: 'line', label: 'Line' },
+  { id: 'histogram', label: 'Histogram' },
 ];
+
+/**
+ * Which types this particular dataset can actually support.
+ *
+ * Scatter and line need paired x values, which `toSeries` supplies only for the
+ * xy-shaped formats; a histogram needs a single distribution, since pooling
+ * several groups invents a bimodal shape belonging to neither. Offering a type
+ * the data cannot support is how the unimplemented plot types shipped
+ * plausible-looking wrong output — so they are withheld rather than approximated.
+ */
+function typesFor(series: readonly { values: number[]; x?: number[] }[]): {
+  offered: typeof OFFERED_PLOT_TYPES;
+  reason: string | null;
+} {
+  const hasX = series.length > 0 && series.every((s) => s.x !== undefined && s.x.length > 0);
+  const single = series.length === 1;
+
+  const blocked: string[] = [];
+  if (!hasX) blocked.push('Scatter and line need a dataset with an x column');
+  if (!single) blocked.push('Histogram needs a single group');
+
+  return {
+    offered: OFFERED_PLOT_TYPES.filter((t) => {
+      if (t.id === 'scatter' || t.id === 'line') return hasX;
+      if (t.id === 'histogram') return single;
+      return true;
+    }),
+    reason: blocked.length > 0 ? `${blocked.join('. ')}.` : null,
+  };
+}
+
+/** Types that draw the whole distribution, so a centre and error bar say nothing extra. */
+const DISTRIBUTION_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(['box', 'violin']);
 
 const ERROR_BARS = [
   { id: 'none', label: 'None' },
@@ -225,6 +265,7 @@ function PlotFields({
   const dataset = findDataset(doc, node.datasetId);
   const series = dataset ? toSeries(dataset) : [];
   const colors = paletteColors(node.palette, Math.max(1, series.length));
+  const { offered, reason } = typesFor(series);
 
   // Warn as colours are picked rather than at export: a pair that collides
   // under colour-vision deficiency is far cheaper to fix now.
@@ -301,42 +342,68 @@ function PlotFields({
         Plot type
         <select
           value={node.plotType}
-          onChange={(e) => setPlot('Change plot type', { plotType: e.target.value as PlotType })}
+          onChange={(e) => {
+            const plotType = e.target.value as PlotType;
+            // A numeric x axis is unreadable without ticks; a categorical one
+            // needs none. The default is set at creation, so switching type
+            // afterwards has to carry it across too.
+            setPlot('Change plot type', {
+              plotType,
+              x: { ...node.x, showTicks: CONTINUOUS_X_PLOT_TYPES.has(plotType) },
+            });
+          }}
         >
-          {OFFERED_PLOT_TYPES.map((t) => (
+          {offered.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}
             </option>
           ))}
         </select>
       </label>
+      {reason && <p className="hint">{reason}</p>}
 
-      <label className="field block">
-        Error bars
-        <select
-          value={node.errorBars}
-          onChange={(e) =>
-            setPlot('Change error bars', { errorBars: e.target.value as PlotNode['errorBars'] })
-          }
-        >
-          {ERROR_BARS.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {DISTRIBUTION_TYPES.has(node.plotType) ? (
+        <p className="hint">
+          A {node.plotType} already shows the full distribution, so the centre and error
+          bars are not drawn. Switch to a bar or dot plot to set them.
+        </p>
+      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) ? (
+        <p className="hint">
+          A {node.plotType} plots every observation against a numeric x axis, so there is
+          no group to summarise with a centre or error bar.
+        </p>
+      ) : (
+        <>
+          <label className="field block">
+            Error bars
+            <select
+              value={node.errorBars}
+              onChange={(e) =>
+                setPlot('Change error bars', { errorBars: e.target.value as PlotNode['errorBars'] })
+              }
+            >
+              {ERROR_BARS.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-      <label className="field block">
-        Centre
-        <select
-          value={node.center}
-          onChange={(e) => setPlot('Change centre', { center: e.target.value as 'mean' | 'median' })}
-        >
-          <option value="mean">Mean</option>
-          <option value="median">Median</option>
-        </select>
-      </label>
+          <label className="field block">
+            Centre
+            <select
+              value={node.center}
+              onChange={(e) =>
+                setPlot('Change centre', { center: e.target.value as 'mean' | 'median' })
+              }
+            >
+              <option value="mean">Mean</option>
+              <option value="median">Median</option>
+            </select>
+          </label>
+        </>
+      )}
 
       <label className="check">
         <input
@@ -344,7 +411,7 @@ function PlotFields({
           checked={node.showPoints}
           onChange={(e) => setPlot('Toggle points', { showPoints: e.target.checked })}
         />
-        Show replicate points
+        {node.plotType === 'box' ? 'Overlay all points' : 'Show replicate points'}
       </label>
 
       <h4>Axes</h4>

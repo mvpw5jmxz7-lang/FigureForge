@@ -158,6 +158,100 @@ describe('adapter parity', () => {
     expect(() => renderToStaticMarkup(toReact(withHandles))).not.toThrow();
   });
 
+  it('draws box and violin marks through both adapters identically', () => {
+    // The distribution types were declared in `PlotType` long before they
+    // rendered, and fell through to the categorical dot path in the meantime.
+    // This pins each one to geometry only it produces.
+    for (const [plotType, role] of [
+      ['box', 'box'],
+      ['violin', 'violin'],
+    ] as const) {
+      const doc = editDocument(makeDocument(), (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') node.plotType = plotType;
+        }
+      });
+      const scene = renderDocument(doc, { theme: NATURE_THEME });
+
+      expect(collectByRole(scene, role).length).toBeGreaterThan(0);
+
+      const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(fromReact).toBe(normalise(toSvgString(scene)));
+
+      // Parity compares two strings, so it cannot catch an attribute React
+      // rejects outright — assert the React path survives the new marks too.
+      expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+    }
+  });
+
+  it('suppresses error bars under a box or violin', () => {
+    // The mark geometry drops them; this proves nothing downstream puts them back.
+    for (const plotType of ['box', 'violin'] as const) {
+      const doc = editDocument(makeDocument(), (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') {
+            node.plotType = plotType;
+            node.errorBars = 'sem';
+          }
+        }
+      });
+      const scene = renderDocument(doc, { theme: NATURE_THEME });
+      expect(collectByRole(scene, 'error-bar')).toEqual([]);
+    }
+  });
+
+  it('draws the continuous types through both adapters identically', () => {
+    // These need a numeric x axis and paired x values, so they get their own
+    // two-column document rather than the replicate CSV above.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8\n5,10.1');
+
+    for (const [plotType, role] of [
+      ['scatter', 'point'],
+      ['line', 'line'],
+      ['histogram', 'bar'],
+    ] as const) {
+      const doc = editDocument(base, (draft) => {
+        const dataset: Dataset = {
+          id: 'ds-xy',
+          name: 'Dose response',
+          format: inferFormat(parsed.columns),
+          columns: parsed.columns,
+          rows: parsed.rows,
+          sourcePath: 'data/xy.csv',
+          sourceFilename: 'xy.csv',
+          importedAt: '2026-01-01T00:00:00.000Z',
+        };
+        draft.datasets = [dataset];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 2, y: 2, width: 80, height: 60 },
+          name: 'Dose response',
+          datasetId: dataset.id,
+          plotType,
+          xTitle: 'Dose (mg)',
+          yTitle: 'Response',
+        });
+      });
+
+      const scene = renderDocument(doc, { theme: NATURE_THEME });
+      expect(collectByRole(scene, role).length).toBeGreaterThan(0);
+
+      const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(fromReact).toBe(normalise(toSvgString(scene)));
+      expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+    }
+  });
+
   it('renders deterministically across repeated calls', () => {
     const a = toSvgString(renderDocument(doc, { theme: NATURE_THEME }));
     const b = toSvgString(renderDocument(doc, { theme: NATURE_THEME }));

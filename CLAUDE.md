@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–2 are done; phases 3–9 are not.**
+could be proven before breadth was added. **Phases 1–3 are done; phases 4–9 are not.**
 
 ---
 
@@ -22,8 +22,8 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 110 TypeScript + 38 Python tests
-make acceptance  # 28-check end-to-end run (needs `make up` first)
+make test        # 150 TypeScript + 38 Python tests
+make acceptance  # 31-check end-to-end run (needs `make up` first)
 make down
 ```
 
@@ -113,6 +113,29 @@ maths in `render`, the split is being eroded.
   reproducibility claim real. Each analysis stores an `inputHash` so a figure can
   never silently display a p-value its data no longer supports.
 
+### Plot type choices
+
+- **`PlotGeometry` is a discriminated union on `kind`, not one shape with
+  optional fields.** The categorical arm carries `band`/`marks`/`categories`; the
+  continuous arm carries `xScale`/`series`/`bins`. Almost nothing is shared, and
+  optional fields would let a categorical-only assumption compile against a
+  scatter — which is exactly how the unimplemented types went unnoticed.
+- **A plot type the data cannot support is withheld, never approximated.**
+  `typesFor` gates the dropdown; `continuousGeometry` returns null. There is no
+  row-index fallback for a scatter without x: it would draw a confident-looking
+  relationship that was never measured.
+- **Brackets are refused on continuous plots rather than placed approximately.**
+  `measurePlot` returns empty measurements — `PlotMeasurements` keeps its
+  category-keyed shape, so `repositionBrackets` in `doc-model` needed no change —
+  and the Stats tab disables group comparisons with a reason.
+- **The numeric x axis thins labels by width, mirroring the y axis's height
+  rule**, and both measure through `text-width.ts`. Measuring in the browser
+  would thin labels on screen and leave them overlapping in the export.
+  End labels anchor `start`/`end` inward: the theme reserves 2 mm to the right of
+  the plot, so a centred last label overhangs the panel and then the page.
+- **A histogram's count axis steps by whole numbers.** The generic tick chooser
+  labels a histogram peaking at 3 as 0, 0.5, 1, 1.5 — half an observation.
+
 ### Statistics choices
 
 Each guards against a specific, common reporting error:
@@ -131,6 +154,14 @@ Each guards against a specific, common reporting error:
   its brackets (`replaceAnalysisForPlot` + `removeBracketsForPlot`) rather than
   appending. Accumulating them stacked new brackets at the same heights as the
   old, since the placement gap restarts each run.
+- **A violin over three replicates is flagged.** Kernel density turns three
+  numbers into a smooth, confident-looking distribution the data cannot support;
+  box quartiles are unstable below about n = 5. `checkDistributionSampleSize` in
+  `quality.ts` warns on both. It is a warning, not a fix — which mark to use
+  instead is the author's call.
+- **The violin KDE is trimmed to the observed range.** Drawn a bandwidth past the
+  extremes, as is conventional, it tapers into values that were never measured
+  and a reader takes the taper for data.
 - **The stored input hash is composed in exactly one place**, `analysisInputHash`.
   Composing it per call site is how a stored hash and a recomputed one come to
   disagree over nothing, which surfaces as "the data changed" on an untouched
@@ -147,18 +178,29 @@ a raw NUL byte with the escape `'\u0000'` — the same character, so every hash 
 byte-identical and nothing behavioural changed (see the trap below). Run
 `git status` before assuming the tree is clean.
 
-**Verified:** 110 TypeScript tests, 38 Python tests, typecheck and lint clean,
-28-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
+**Verified:** 150 TypeScript tests, 38 Python tests, typecheck and lint clean,
+31-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm; PNG exactly 300 dpi.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
-user-supplied dataset name → bar/dot/beeswarm marks with error bars → Welch's
+user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram marks with error bars → Welch's
 t-test and friends with corrections and effect sizes → significance bracket
 placed on measured geometry, which follows the plot when it moves →
 auto-layout with smart guides and snapping, weighted templates, and drag-resize
 handles → panel lettering in reading order → an Inspector for the selected node
 (colours, text, axis titles, frame) with double-click-to-edit on canvas →
 PDF/EPS/SVG/PNG/TIFF export → Publication Readiness Score → project save/load.
+
+### Phase 3 — the remaining plot types
+
+All nine `PlotType` variants render. Box and violin dropped into the existing
+band-scale machinery; scatter, line and histogram needed a numeric x axis, which
+did not exist — see the plot type choices above for the decisions that shaped it.
+New: `kernelDensity`/`silvermanBandwidth` in `summary.ts`, `xyMarks`/
+`histogramBins`/`histogramMarks` in `marks.ts`, `renderNumericXTicks` and
+`continuousGeometry` in `render-document.ts`, `checkDistributionSampleSize` in
+`quality.ts`, and `CONTINUOUS_X_PLOT_TYPES` in `nodes.ts` as the one place that
+says which types are which.
 
 ### The editing iteration (after phases 1–2)
 
@@ -198,7 +240,7 @@ Phases 3–9, with the actual entry points:
 
 | Phase | Scope | Where to start |
 |---|---|---|
-| 3 | box, violin, line, scatter, histogram | `packages/plots/src/marks.ts` (pure functions) + a branch in `computePlotGeometry`/`renderPlot` |
+| 3 | **done** — all 9 plot types render | `PlotGeometry` is now a discriminated union on `kind: 'categorical' \| 'continuous'`; `renderNumericXTicks` is the numeric x axis |
 | 4 | image panels, crop, scale bars, annotations | node types and renderers **already exist** — needs UI and asset plumbing |
 | 5 | remaining stats surface | `services/api/figureforge/stats/tests.py` |
 | 6 | export/QC hardening, autofixes | `packages/render/src/quality.ts` |
@@ -221,21 +263,25 @@ Phases 3–9, with the actual entry points:
   `App.tsx` passes `assetUrls={{}}`. Image panels need blob URLs in the browser
   and data URIs on export — the seam exists, nothing fills it.
 
-### Two declared-but-missing things — check before trusting the types
+### Declared-but-missing things — check before trusting the types
 
-- **`PlotType` declares 9 variants; only 4 render distinctly.** `bar`, `dot`,
-  `bar-dot` and `beeswarm` are real. `scatter`, `line`, `box`, `violin` and
-  `histogram` pass the type system and the zod schema but fall through to the
-  categorical dot path and render as something plausible-looking and wrong.
-  Adding one means: the mark geometry, a renderer branch, and nothing else — the
-  union in `nodes.ts:84` and its mirror in `schema.ts:87` already list them.
-  The Inspector's plot-type dropdown deliberately offers **only the four that
-  work** (`OFFERED_PLOT_TYPES` in `Inspector.tsx`); extend that list as each
-  lands, or the UI starts shipping controls that produce wrong output.
+- **All 9 `PlotType` variants now render distinctly.** The dropdown is gated on
+  what the *dataset* supports rather than on what is implemented (`typesFor` in
+  `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
+  supplies only for `simple-xy`/`prism`/`sigmaplot`; a histogram needs a single
+  series, since pooling groups invents a bimodal shape belonging to neither.
+  `computePlotGeometry` returns null for an unsupported combination, so a type
+  set some other way draws nothing rather than something wrong.
 - **`anova-rm` is in the `StatTest` union and in the `parametric` set
   (`tests.py:250`) but has no dispatch branch**, so calling it raises
   `Unsupported test: anova-rm`. It is not in the UI dropdown, so it is not
   user-reachable — but the type says it works.
+- **`pearson`/`spearman` correlate two y-series against each other, never a
+  series against its own x.** `run()` in `SidePanel.tsx` posts only
+  `Series.values`, and `tests.py` takes `groups[names[0]]` vs `groups[names[1]]`.
+  For a `simple-xy` dataset `toSeries` yields a single series, so the run bails
+  at "at least two groups" — the correlation test is **unreachable for the
+  canonical scatter case**. Both tests are in the UI dropdown today.
 
 ---
 

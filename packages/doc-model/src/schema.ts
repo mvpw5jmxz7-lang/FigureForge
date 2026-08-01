@@ -123,6 +123,7 @@ const plotSchema = z.object({
   palette: z.union([z.string(), z.array(z.string())]),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   pointsUseSeriesColor: z.boolean().optional(),
+  histogramBins: z.number().int().positive().optional(),
 });
 
 const imageSchema = z.object({

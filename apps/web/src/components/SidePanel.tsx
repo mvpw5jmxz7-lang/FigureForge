@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import {
+  CONTINUOUS_X_PLOT_TYPES,
   addBracket,
   addPanelWithPlot,
   analysisInputHash,
@@ -277,7 +278,19 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
   const dataset = activePlot ? doc.datasets.find((d) => d.id === activePlot.datasetId) : undefined;
   const series = dataset ? toSeries(dataset) : [];
 
+  /*
+   * Group comparisons annotate a plot with a bracket spanning two categories.
+   * A scatter, line or histogram has no categories to span — `measurePlot`
+   * returns empty measurements for them — so the test is refused rather than
+   * run and left with nowhere to draw its result.
+   */
+  const continuousPlot = activePlot ? CONTINUOUS_X_PLOT_TYPES.has(activePlot.plotType) : false;
+
   const run = async (): Promise<void> => {
+    if (continuousPlot) {
+      onError('Group comparisons need a categorical plot; this one has a numeric x axis.');
+      return;
+    }
     if (!activePlot || !dataset || series.length < 2) {
       onError('Select a plot with at least two groups.');
       return;
@@ -402,7 +415,18 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         Groups: {series.map((s) => `${s.name} (n=${s.values.length})`).join(', ') || '—'}
       </p>
 
-      <button className="primary" onClick={() => void run()} disabled={series.length < 2}>
+      {continuousPlot && (
+        <p className="hint">
+          This plot has a numeric x axis, so there are no groups to compare and nowhere to
+          anchor a significance bracket. Select a categorical plot to run a test.
+        </p>
+      )}
+
+      <button
+        className="primary"
+        onClick={() => void run()}
+        disabled={series.length < 2 || continuousPlot}
+      >
         Run and annotate
       </button>
 

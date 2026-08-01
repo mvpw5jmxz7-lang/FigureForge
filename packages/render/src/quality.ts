@@ -64,6 +64,9 @@ const CATEGORY_WEIGHTS: Record<string, number> = {
   'Statistics currency': 25,
   'Panel labelling': 15,
   'Colour accessibility': 15,
+  // A violin over three replicates is a figure-level overclaim, not a cosmetic
+  // defect — weighted alongside the other things that get a figure sent back.
+  'Distribution sample size': 15,
   'Font consistency': 10,
   'Plot size': 10,
   'Page dimensions': 5,
@@ -209,7 +212,9 @@ const checkImageResolution: Rule = ({ document, exportDpi = 300 }) => {
 
 const checkColorAccessibility: Rule = ({ scene }) => {
   const seriesColors = new Set<string>();
-  for (const role of ['bar', 'point', 'line'] as const) {
+  // Every role that carries a *series* colour. A new mark family left off this
+  // list still renders, but drops silently out of the colour-vision check.
+  for (const role of ['bar', 'point', 'line', 'box', 'violin', 'outlier'] as const) {
     for (const node of collectByRole(scene, role)) {
       const fill = node.attrs?.['fill'];
       const stroke = node.attrs?.['stroke'];
@@ -398,12 +403,59 @@ const checkPlotSize: Rule = ({ document, theme }) => {
   return findings;
 };
 
+/**
+ * A violin drawn over a handful of replicates.
+ *
+ * Kernel density at n = 3 produces a smooth, confident-looking shape from three
+ * numbers — the reader sees a distribution, the data supports nothing of the
+ * kind. Box plots are milder but share the problem: quartiles and Tukey fences
+ * are not meaningful below about n = 5. Both are common enough in submitted
+ * figures to be worth naming, and neither is fixable without a decision from the
+ * author, so this warns rather than offering to change anything.
+ */
+const MIN_VIOLIN_N = 10;
+const MIN_BOX_N = 5;
+
+const checkDistributionSampleSize: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot') continue;
+    if (node.plotType !== 'violin' && node.plotType !== 'box') continue;
+
+    const dataset = findDataset(document, node.datasetId);
+    if (!dataset) continue;
+
+    const counts = toSeries(dataset).map((s) => s.values.filter(Number.isFinite).length);
+    if (counts.length === 0) continue;
+
+    const smallest = Math.min(...counts);
+    const threshold = node.plotType === 'violin' ? MIN_VIOLIN_N : MIN_BOX_N;
+    if (smallest >= threshold) continue;
+
+    findings.push({
+      id: `distribution-n-${node.id}`,
+      severity: 'warning',
+      title: `${node.plotType === 'violin' ? 'Violin' : 'Box'} plot with n = ${smallest}`,
+      detail:
+        node.plotType === 'violin'
+          ? `A violin implies a distribution shape, and ${smallest} replicates cannot support one. A dot or beeswarm plot shows the same data without the implication.`
+          : `Quartiles and whiskers are unstable at n = ${smallest}. Consider a dot or bar+points plot, which shows every replicate.`,
+      nodeIds: [node.id],
+      autoFixable: false,
+    });
+  }
+
+  return findings;
+};
+
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
   { category: 'Statistics currency', rule: checkStaleAnalyses },
   { category: 'Panel labelling', rule: checkPanelLabels },
   { category: 'Colour accessibility', rule: checkColorAccessibility },
+  { category: 'Distribution sample size', rule: checkDistributionSampleSize },
   { category: 'Font consistency', rule: checkFontConsistency },
   { category: 'Plot size', rule: checkPlotSize },
   { category: 'Page dimensions', rule: checkPageDimensions },
