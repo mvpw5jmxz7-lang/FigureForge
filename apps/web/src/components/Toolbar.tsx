@@ -2,10 +2,14 @@ import {
   applyAutoLayout,
   formatMm,
   relabelPanels,
+  repositionBrackets,
   suggestGrid,
+  templatesForPanelCount,
+  findLayoutTemplate,
   type DisplayUnit,
   type NodeId,
 } from '@figureforge/doc-model';
+import { measureAllPlots } from '@figureforge/render';
 import { PAGE_PRESETS, type Theme } from '@figureforge/theme';
 import { frameOf } from './Canvas.js';
 import type { DocumentApi } from '../useDocument.js';
@@ -39,6 +43,12 @@ export function Toolbar({
   const panelCount = Object.values(doc.nodes).filter((n) => n.type === 'panel').length;
   const grid = suggestGrid(panelCount);
 
+  const layoutOptions = {
+    marginMm: theme.spacing.marginMm,
+    gutterMm: theme.spacing.panelGutterMm,
+    labelGutterMm: 4,
+  };
+
   const applyPreset = (presetId: string): void => {
     const preset = PAGE_PRESETS.find((p) => p.id === presetId);
     if (!preset) return;
@@ -49,23 +59,21 @@ export function Toolbar({
         draft.themeId = preset.themeId;
       });
       commit('Re-layout', (draft) => {
-        applyAutoLayout(draft, {
-          marginMm: theme.spacing.marginMm,
-          gutterMm: theme.spacing.panelGutterMm,
-          labelGutterMm: 4,
-        });
+        applyAutoLayout(draft, layoutOptions);
+        // Brackets sit in absolute page space, so nothing else moves them with
+        // the panels they annotate.
+        repositionBrackets(draft, measureAllPlots(draft, theme));
       });
     });
   };
 
-  const runAutoLayout = (): void => {
-    api.transaction('Auto layout', () => {
+  /** Arrange, reletter, then put the significance brackets back on their bars. */
+  const arrange = (label: string, templateId?: string): void => {
+    const template = templateId ? (findLayoutTemplate(templateId) ?? null) : null;
+
+    api.transaction(label, () => {
       commit('Arrange panels', (draft) => {
-        applyAutoLayout(draft, {
-          marginMm: theme.spacing.marginMm,
-          gutterMm: theme.spacing.panelGutterMm,
-          labelGutterMm: 4,
-        });
+        applyAutoLayout(draft, { ...layoutOptions, template });
       });
       // Panels may have changed order, so the letters must follow.
       commit('Reletter panels', (draft) => {
@@ -75,8 +83,13 @@ export function Toolbar({
           offsetMm: 4,
         });
       });
+      commit('Reposition brackets', (draft) => {
+        repositionBrackets(draft, measureAllPlots(draft, theme));
+      });
     });
   };
+
+  const templates = templatesForPanelCount(panelCount);
 
   const selectedFrame = selectedIds.length === 1 ? frameOf(doc, selectedIds[0]!) : null;
 
@@ -130,9 +143,29 @@ export function Toolbar({
       </div>
 
       <div className="toolbar-group">
-        <button onClick={runAutoLayout} title={`Arrange as ${grid.rows}×${grid.columns}`}>
+        <button onClick={() => arrange('Auto layout')} title={`Arrange as ${grid.rows}×${grid.columns}`}>
           Auto layout ({grid.rows}×{grid.columns})
         </button>
+
+        {/* Arrangement templates, so panels need not all be the same size.
+            Only those matching the panel count are offered — a mismatched
+            template would leave panels unplaced. */}
+        {templates.length > 0 && (
+          <select
+            value=""
+            title="Panel arrangement"
+            onChange={(e) => {
+              if (e.target.value) arrange('Apply layout template', e.target.value);
+            }}
+          >
+            <option value="">Template…</option>
+            {templates.map((template) => (
+              <option key={template.id} value={template.id} title={template.description}>
+                {template.label}
+              </option>
+            ))}
+          </select>
+        )}
         <button onClick={api.undo} disabled={!api.canUndo} title="Undo (Ctrl+Z)">
           Undo
         </button>

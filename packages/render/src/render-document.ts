@@ -8,6 +8,7 @@
 
 import {
   absoluteFrame,
+  isEffectivelyLocked,
   childrenOf,
   findAsset,
   findDataset,
@@ -37,6 +38,7 @@ import {
   type NumericScale,
 } from '@figureforge/plots';
 import { el, group, round, text, translate, type SceneNode } from './scene.js';
+import { estimateTextHeightMm, estimateTextWidthMm, truncateToWidth } from './text-width.js';
 
 export interface RenderOptions {
   theme: Theme;
@@ -567,6 +569,28 @@ function computePlotGeometry(
   };
 }
 
+export interface PlotMeasurements {
+  categoryX: Map<string, number>;
+  categoryTop: Map<string, number>;
+}
+
+/**
+ * Memoisation for `measurePlot`.
+ *
+ * It re-runs the whole geometry pass — scales, marks, summary statistics —
+ * duplicating the render path on every call. That was tolerable when brackets
+ * were measured once at creation; repositioning them on every pointer-move of a
+ * resize drag is not.
+ *
+ * Keyed on object identity, which is sound precisely because edits go through
+ * Immer: any change to the plot, its dataset or the theme produces a new object,
+ * so a stale entry cannot be hit — it simply misses and recomputes.
+ */
+const measureCache = new WeakMap<
+  PlotNode,
+  { dataset: unknown; theme: Theme; result: PlotMeasurements | null }
+>();
+
 /**
  * Where a plot's categories actually sit, in coordinates relative to the plot
  * node's own frame. `topMm` is the highest drawn feature of each category, so
@@ -576,9 +600,17 @@ export function measurePlot(
   doc: FigureDocument,
   plot: PlotNode,
   theme: Theme,
-): { categoryX: Map<string, number>; categoryTop: Map<string, number> } | null {
+): PlotMeasurements | null {
+  const dataset = findDataset(doc, plot.datasetId);
+
+  const cached = measureCache.get(plot);
+  if (cached && cached.dataset === dataset && cached.theme === theme) return cached.result;
+
   const geometry = computePlotGeometry(plot, doc, theme);
-  if (!geometry) return null;
+  if (!geometry) {
+    measureCache.set(plot, { dataset, theme, result: null });
+    return null;
+  }
 
   const categoryX = new Map<string, number>();
   const categoryTop = new Map<string, number>();
@@ -589,7 +621,27 @@ export function measurePlot(
     categoryTop.set(name, geometry.margin.top + (mark?.topMm ?? 0));
   });
 
-  return { categoryX, categoryTop };
+  const result: PlotMeasurements = { categoryX, categoryTop };
+  measureCache.set(plot, { dataset, theme, result });
+  return result;
+}
+
+/**
+ * Measure every plot in the document, keyed by node id.
+ *
+ * The bridge for `repositionBrackets`, which lives in `doc-model` and so cannot
+ * reach the band scale itself — `doc-model` depends on nothing internal, and
+ * importing the renderer there would close a cycle. Measurements travel as data
+ * in this direction instead.
+ */
+export function measureAllPlots(doc: FigureDocument, theme: Theme): Map<string, PlotMeasurements> {
+  const out = new Map<string, PlotMeasurements>();
+  for (const node of Object.values(doc.nodes)) {
+    if (node.type !== 'plot') continue;
+    const measured = measurePlot(doc, node, theme);
+    if (measured) out.set(node.id, measured);
+  }
+  return out;
 }
 
 function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions): SceneNode | null {
@@ -641,7 +693,10 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
           cx: point.x,
           cy: point.y,
           r: node.pointSizeMm / 2,
-          fill: mark.bar ? theme.foreground : mark.color,
+          // Dark points over a coloured bar by default — conventional and
+          // legible, but it means recolouring a series leaves the dots alone,
+          // so the plot can opt into series-coloured points instead.
+          fill: mark.bar && !node.pointsUseSeriesColor ? theme.foreground : mark.color,
           'fill-opacity': mark.bar ? 0.85 : 1,
           stroke: 'none',
         }, undefined, { role: 'point' }),
@@ -682,34 +737,59 @@ function renderAxes(
     );
   }
 
+  const tickLabelPt = theme.type.tickLabelPt;
+
+  // Thin the ticks until their labels stop colliding vertically. The tick count
+  // is chosen from the axis length alone (`tickCountForLength`), so a short axis
+  // still asks for more ticks than its labels can occupy.
+  const visibleTicks = yScale.ticks.filter(
+    (tick) => yScale.scale(tick) >= -0.01 && yScale.scale(tick) <= plotHeight + 0.01,
+  );
+  const labelHeight = estimateTextHeightMm(tickLabelPt);
+  const maxLabels = labelHeight > 0 ? Math.max(2, Math.floor(plotHeight / (labelHeight * 1.25))) : visibleTicks.length;
+  const stride = visibleTicks.length > maxLabels ? Math.ceil(visibleTicks.length / maxLabels) : 1;
+
+  // Widest label actually drawn, so the axis title can clear it.
+  let maxTickLabelWidth = 0;
+
   if (node.y.showTicks || node.y.showLabels) {
-    for (const tick of yScale.ticks) {
+    visibleTicks.forEach((tick, index) => {
       const y = yScale.scale(tick);
-      if (y < -0.01 || y > plotHeight + 0.01) continue;
+      // Ticks stay put; only their labels thin out, so the scale still reads.
+      const labelled = index % stride === 0;
 
       if (node.y.showTicks) {
         out.push(
           el('path', { d: `M${round(-tickLen)} ${round(y)} L0 ${round(y)}`, ...axisStroke }, undefined, { role: 'tick' }),
         );
       }
-      if (node.y.showLabels) {
+      if (node.y.showLabels && labelled) {
+        const label = yScale.format(tick);
+        maxTickLabelWidth = Math.max(maxTickLabelWidth, estimateTextWidthMm(label, tickLabelPt));
         out.push(
-          text(yScale.format(tick), {
+          text(label, {
             x: -(tickLen + theme.spacing.tickLabelGapMm),
             y,
             'font-family': theme.fontFamily,
-            'font-size': ptToMm(theme.type.tickLabelPt),
+            'font-size': ptToMm(tickLabelPt),
             fill: theme.foreground,
             'text-anchor': 'end',
             'dominant-baseline': 'central',
           }, { role: 'tick-label' }),
         );
       }
-    }
+    });
   }
 
   if (node.y.title) {
-    const x = -(tickLen + theme.spacing.tickLabelGapMm + theme.spacing.axisTitleGapMm + 2);
+    // Cleared past the widest tick label rather than a constant, which long
+    // values (say 12500) would otherwise run straight into.
+    const x = -(
+      tickLen +
+      theme.spacing.tickLabelGapMm +
+      maxTickLabelWidth +
+      theme.spacing.axisTitleGapMm
+    );
     out.push(
       text(node.y.title, {
         x: 0,
@@ -732,26 +812,101 @@ function renderAxes(
     );
   }
 
+  // How far below the axis the category labels reach, so the title clears them.
+  let xLabelDepth = estimateTextHeightMm(tickLabelPt);
+
   if (node.x.showLabels) {
-    for (const name of categories) {
-      out.push(
-        text(name, {
-          x: band.center(name),
-          y: plotHeight + tickLen + theme.spacing.tickLabelGapMm + ptToMm(theme.type.tickLabelPt) * 0.8,
-          'font-family': theme.fontFamily,
-          'font-size': ptToMm(theme.type.tickLabelPt),
-          fill: theme.foreground,
-          'text-anchor': 'middle',
-        }, { role: 'tick-label' }),
+    const baseY = plotHeight + tickLen + theme.spacing.tickLabelGapMm;
+    // Adding a dataset re-runs auto-layout and narrows every panel, so the slot
+    // a category label has to fit in shrinks. Measure before drawing.
+    const slot = band.step;
+    const widest = categories.reduce(
+      (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
+      0,
+    );
+    /*
+     * Angle the whole axis or none of it — an axis mixing horizontal and angled
+     * labels reads as a mistake even when each label individually fits.
+     *
+     * Two angles, because one is not enough. At 45° neighbouring baselines are
+     * only slot × √2 apart, so on a really narrow panel every name would have to
+     * be truncated to two or three characters — worse than the overlap it set
+     * out to fix, since a cut-off category name can be genuinely ambiguous.
+     * At 90° the labels are stacked side by side and the clearance stops
+     * depending on the label length at all, so any name fits.
+     */
+    const angle = widest > slot * Math.SQRT2 ? 90 : widest > slot ? 45 : 0;
+
+    /*
+     * Upright labels are bounded by the room below the axis, not by their
+     * neighbours. The theme's bottom margin is sized for horizontal labels and
+     * is far too tight for these, so allow them a share of the plot height
+     * instead — a deep label gutter is the accepted cost of long category
+     * names, and truncating the names would defeat the point.
+     */
+    const budget =
+      angle === 90
+        ? Math.max(slot, plotHeight * 0.45)
+        : angle === 45
+          ? slot * Math.SQRT2
+          : slot;
+
+    if (angle !== 0) {
+      const longest = categories.reduce(
+        (max, name) =>
+          Math.max(max, estimateTextWidthMm(truncateToWidth(name, tickLabelPt, budget), tickLabelPt)),
+        0,
       );
+      // Angled text descends by its own length × sin(angle), plus a line.
+      const sin = angle === 90 ? 1 : Math.SQRT1_2;
+      xLabelDepth = longest * sin + estimateTextHeightMm(tickLabelPt);
+    }
+
+    for (const name of categories) {
+      const x = band.center(name);
+      if (angle !== 0) {
+        out.push(
+          text(truncateToWidth(name, tickLabelPt, budget), {
+            x: 0,
+            y: 0,
+            transform: `translate(${round(x)} ${round(baseY)}) rotate(${-angle})`,
+            'font-family': theme.fontFamily,
+            'font-size': ptToMm(tickLabelPt),
+            fill: theme.foreground,
+            'text-anchor': 'end',
+            'dominant-baseline': 'central',
+          }, { role: 'tick-label' }),
+        );
+      } else {
+        out.push(
+          text(name, {
+            x,
+            y: baseY + ptToMm(tickLabelPt) * 0.8,
+            'font-family': theme.fontFamily,
+            'font-size': ptToMm(tickLabelPt),
+            fill: theme.foreground,
+            'text-anchor': 'middle',
+          }, { role: 'tick-label' }),
+        );
+      }
     }
   }
 
   if (node.x.title) {
+    // Below the labels, not at a fixed inset from the panel edge: angled labels
+    // reach much further down than horizontal ones, and the title would
+    // otherwise be drawn straight through them.
+    const belowLabels =
+      plotHeight + tickLen + theme.spacing.tickLabelGapMm + xLabelDepth + theme.spacing.axisTitleGapMm;
+    const defaultY = plotHeight + theme.spacing.plotMarginMm.bottom - theme.spacing.axisTitleGapMm;
+    // Never past the panel's own bottom edge: on a panel too small for both,
+    // a title crowding the labels is still better than one off the page.
+    const limit = plotHeight + theme.spacing.plotMarginMm.bottom;
+
     out.push(
       text(node.x.title, {
         x: plotWidth / 2,
-        y: plotHeight + theme.spacing.plotMarginMm.bottom - theme.spacing.axisTitleGapMm,
+        y: Math.min(Math.max(defaultY, belowLabels), limit),
         'font-family': theme.fontFamily,
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,
@@ -783,6 +938,33 @@ function renderGrid(doc: FigureDocument): SceneNode {
   return group({ stroke: '#e6e6e6', 'stroke-width': 0.05, fill: 'none' }, lines);
 }
 
+/**
+ * Handle positions as fractions of the frame.
+ *
+ * The cursor is left to CSS, keyed off `data-handle`: the scene carries plain
+ * SVG attributes, and React rejects a `style` string outright.
+ */
+const RESIZE_HANDLES: readonly { id: string; fx: number; fy: number }[] = [
+  { id: 'nw', fx: 0, fy: 0 },
+  { id: 'n', fx: 0.5, fy: 0 },
+  { id: 'ne', fx: 1, fy: 0 },
+  { id: 'e', fx: 1, fy: 0.5 },
+  { id: 'se', fx: 1, fy: 1 },
+  { id: 's', fx: 0.5, fy: 1 },
+  { id: 'sw', fx: 0, fy: 1 },
+  { id: 'w', fx: 0, fy: 0.5 },
+];
+
+/** Half-width of a grab handle, in mm. Small enough not to swamp a panel. */
+const HANDLE_HALF_MM = 0.9;
+
+/**
+ * Selection outline and resize handles.
+ *
+ * Editor chrome: only ever rendered when `chrome.selectedIds` is passed, which
+ * the export path never does. Both adapters read this same tree, so the handles
+ * cost nothing in parity terms.
+ */
 function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): SceneNode {
   const outlines: SceneNode[] = [];
   for (const id of selectedIds) {
@@ -801,6 +983,31 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
         'vector-effect': 'non-scaling-stroke',
       }),
     );
+
+    // No handles on a locked node: offering a grip that cannot move is worse
+    // than offering none.
+    if (isEffectivelyLocked(doc.nodes, id)) continue;
+
+    for (const handle of RESIZE_HANDLES) {
+      outlines.push(
+        el(
+          'rect',
+          {
+            x: frame.x + frame.width * handle.fx - HANDLE_HALF_MM,
+            y: frame.y + frame.height * handle.fy - HANDLE_HALF_MM,
+            width: HANDLE_HALF_MM * 2,
+            height: HANDLE_HALF_MM * 2,
+            fill: '#ffffff',
+            stroke: '#0a84ff',
+            'stroke-width': 0.2,
+            'vector-effect': 'non-scaling-stroke',
+            'data-handle': handle.id,
+          },
+          undefined,
+          { nodeId: id, role: 'resize-handle' },
+        ),
+      );
+    }
   }
   return group({}, outlines);
 }

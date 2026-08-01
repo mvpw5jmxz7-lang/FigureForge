@@ -44,7 +44,15 @@
       "Bash(grep -n \"^## 0\\\\.\\\\|^## 1\\\\.\\\\|^---$\" TestPlan.md)",
       "Bash(python3 -c \"print\\(open\\('TestPlan.md','rb'\\).read\\(\\).count\\(b'\\\\x00'\\)\\)\")",
       "Bash(grep -n \"^## 14\\\\.\\\\|^## 15\\\\.\\\\|^---$\" TestPlan.md)",
-      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ec22e0b7-e5c3-43b3-b541-5a46adc98e92/subagents/commitmsg2.txt)"
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ec22e0b7-e5c3-43b3-b541-5a46adc98e92/subagents/commitmsg2.txt)",
+      "Bash(sed -n '/^const analysisSchema/,/^}\\);/p' packages/doc-model/src/schema.ts)",
+      "Bash(sed -n '/^const panelSchema/,/^}\\);/p' packages/doc-model/src/schema.ts)",
+      "Bash(podman cp *)",
+      "Bash(python3 -c ' *)",
+      "Bash(node /tmp/claude-1000/-home-comet-Projects-SciencePlatform/fc548e16-78e5-43aa-94ef-10ad4fcf74d0/scratchpad/t.mjs)",
+      "Bash(git symbolic-ref *)",
+      "Bash(git check-ignore *)",
+      "Bash(git log *)"
     ]
   }
 }

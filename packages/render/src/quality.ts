@@ -9,9 +9,13 @@
 
 import {
   absoluteFrame,
+  analysisInputHash,
   effectiveDpi,
+  findDataset,
+  isStale,
   mmToPt,
   measureGutters,
+  toSeries,
   type FigureDocument,
   type ImageNode,
 } from '@figureforge/doc-model';
@@ -55,9 +59,13 @@ type Rule = (context: CheckContext) => Finding[];
 const CATEGORY_WEIGHTS: Record<string, number> = {
   'Text size': 25,
   'Image resolution': 25,
+  // A figure annotated with p-values its data no longer supports is worse than
+  // any typographic defect, and it is invisible without this check.
+  'Statistics currency': 25,
   'Panel labelling': 15,
   'Colour accessibility': 15,
   'Font consistency': 10,
+  'Plot size': 10,
   'Page dimensions': 5,
   'Panel spacing': 5,
 };
@@ -313,12 +321,91 @@ const checkPanelSpacing: Rule = ({ document }) => {
   return findings;
 };
 
+/**
+ * Analyses whose data has changed since they were computed.
+ *
+ * The document stores the input hash precisely so this can be detected, and
+ * until now nothing compared it. A figure showing a p-value its data no longer
+ * supports is the most serious defect this checker can find.
+ */
+const checkStaleAnalyses: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+
+  for (const analysis of document.analyses) {
+    if (analysis.result === null) continue;
+
+    const dataset = findDataset(document, analysis.spec.datasetId);
+    if (!dataset) continue;
+
+    const series = toSeries(dataset);
+    const current = analysisInputHash(
+      { test: analysis.test, correction: analysis.options.correction },
+      series.map((s) => s.values),
+    );
+    if (!isStale(analysis, current)) continue;
+
+    const brackets = Object.values(document.nodes).filter(
+      (n) => n.type === 'bracket' && n.analysisId === analysis.id,
+    );
+
+    findings.push({
+      id: `stale-analysis-${analysis.id}`,
+      severity: 'error',
+      title: `"${analysis.name}" no longer matches its data`,
+      detail:
+        'The values feeding this test have changed since it was run, so the ' +
+        'annotated p-values may not reflect what is plotted. Re-run the test.',
+      nodeIds: brackets.map((b) => b.id),
+      autoFixable: false,
+    });
+  }
+
+  return findings;
+};
+
+/**
+ * Panels too narrow for their own axis gutters.
+ *
+ * `computePlotGeometry` returns null once the plot margins exceed the frame, so
+ * the plot renders as nothing at all — a blank panel with no error anywhere.
+ * Easy to reach by importing enough datasets, since each import re-runs the
+ * layout and narrows every panel.
+ */
+const checkPlotSize: Rule = ({ document, theme }) => {
+  const margin = theme.spacing.plotMarginMm;
+  const findings: Finding[] = [];
+
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot') continue;
+
+    const width = node.frame.width - margin.left - margin.right;
+    const height = node.frame.height - margin.top - margin.bottom;
+    if (width > 0 && height > 0) continue;
+
+    findings.push({
+      id: `plot-too-small-${node.id}`,
+      severity: 'error',
+      title: `"${node.name}" is too small to draw`,
+      detail:
+        `The panel leaves no room for the plot once its axis gutters ` +
+        `(${margin.left + margin.right} × ${margin.top + margin.bottom} mm) are taken. ` +
+        'Enlarge the panel, reduce the panel count, or use a taller page.',
+      nodeIds: [node.id],
+      autoFixable: false,
+    });
+  }
+
+  return findings;
+};
+
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
+  { category: 'Statistics currency', rule: checkStaleAnalyses },
   { category: 'Panel labelling', rule: checkPanelLabels },
   { category: 'Colour accessibility', rule: checkColorAccessibility },
   { category: 'Font consistency', rule: checkFontConsistency },
+  { category: 'Plot size', rule: checkPlotSize },
   { category: 'Page dimensions', rule: checkPageDimensions },
   { category: 'Panel spacing', rule: checkPanelSpacing },
 ];

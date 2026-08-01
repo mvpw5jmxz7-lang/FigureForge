@@ -9,7 +9,7 @@
  * Computation itself happens in the Python service; nothing here runs a test.
  */
 
-import type { AnalysisId, DatasetId } from './nodes.js';
+import type { AnalysisId, DatasetId, NodeId } from './nodes.js';
 
 export type StatTest =
   | 'ttest-independent'
@@ -85,6 +85,14 @@ export interface Analysis {
   test: StatTest;
   spec: AnalysisSpec;
   options: AnalysisOptions;
+  /**
+   * The plot this analysis annotates, when it was run from one. A plot carries
+   * at most one analysis: re-running a test on the same panel replaces the
+   * previous result rather than accumulating alongside it.
+   *
+   * Optional so documents predating the field still load unmigrated.
+   */
+  plotId?: NodeId | null;
   /** Hash of (spec + options + the actual input values) at compute time. */
   inputHash: string;
   result: StatResult | null;
@@ -152,3 +160,18 @@ export function hashInputs(...parts: unknown[]): string {
 
 export const isStale = (analysis: Analysis, currentHash: string): boolean =>
   analysis.result !== null && analysis.inputHash !== currentHash;
+
+/**
+ * The hash an analysis should carry, given the values it was run over.
+ *
+ * One definition, used when storing a result and when checking whether it has
+ * drifted. Composing the hash separately at each call site is how a stored hash
+ * and a recomputed one come to disagree over nothing, which reads as "the data
+ * changed" on a figure nobody has touched.
+ */
+export function analysisInputHash(
+  options: { test: StatTest; correction: Correction },
+  values: readonly (readonly number[])[],
+): string {
+  return hashInputs({ test: options.test, correction: options.correction }, values);
+}

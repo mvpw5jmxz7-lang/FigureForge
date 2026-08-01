@@ -22,7 +22,7 @@ import {
   createDocument,
   createIdFactory,
   editDocument,
-  hashInputs,
+  analysisInputHash,
   inferFormat,
   loadArchive,
   parseDelimited,
@@ -170,7 +170,13 @@ async function main(): Promise<void> {
     test: 'ttest-welch',
     spec: { datasetId: viability.id, groups: series.map((s) => s.name) },
     options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
-    inputHash: hashInputs({ test: 'ttest-welch' }, series.map((s) => s.values)),
+    plotId: plot.id,
+    // Through the shared helper, so this matches what the staleness check
+    // recomputes — composing the hash by hand here made it disagree.
+    inputHash: analysisInputHash(
+      { test: 'ttest-welch', correction: 'none' },
+      series.map((s) => s.values),
+    ),
     result,
     computedAt: new Date().toISOString(),
   };
@@ -257,7 +263,10 @@ async function main(): Promise<void> {
     reopened.document.analyses[0]?.result?.comparisons[0]?.p === comparison.p);
 
   // Staleness: editing the data must invalidate the displayed statistic.
-  const tampered = hashInputs({ test: 'ttest-welch' }, [[1, 2, 3], [4, 5, 6]]);
+  const tampered = analysisInputHash({ test: 'ttest-welch', correction: 'none' }, [
+    [1, 2, 3],
+    [4, 5, 6],
+  ]);
   check('edited data marks the analysis stale', tampered !== analysis.inputHash);
 
   console.log(

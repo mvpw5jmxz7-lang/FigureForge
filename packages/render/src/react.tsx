@@ -22,6 +22,13 @@ function toReactAttrName(name: string): string {
 export interface ReactAdapterOptions {
   /** Called with the originating document node id when an element is clicked. */
   onNodePointerDown?: (nodeId: string, event: React.PointerEvent) => void;
+  /**
+   * Called when a selection resize handle is grabbed. Handles are chrome, drawn
+   * only when `chrome.selectedIds` is set, so the export path never sees them.
+   */
+  onHandlePointerDown?: (nodeId: string, handle: string, event: React.PointerEvent) => void;
+  /** Called on double-click, for editing a text node in place. */
+  onNodeDoubleClick?: (nodeId: string, event: React.MouseEvent) => void;
   /** Ids to mark as selected, exposed via a data attribute for styling. */
   selectedIds?: ReadonlySet<string>;
 }
@@ -39,15 +46,32 @@ function toReactProps(
   }
 
   if (node.nodeId) {
-    props['data-node-id'] = node.nodeId;
-    if (options.selectedIds?.has(node.nodeId)) props['data-selected'] = 'true';
-    if (options.onNodePointerDown) {
-      const id = node.nodeId;
+    const id = node.nodeId;
+    props['data-node-id'] = id;
+    if (options.selectedIds?.has(id)) props['data-selected'] = 'true';
+
+    // A resize handle carries the id of the node it resizes, so it must claim
+    // the event before the plain selection path treats it as a click on that
+    // node — otherwise grabbing a corner would start a move, not a resize.
+    const handle = node.attrs?.['data-handle'];
+    if (handle !== undefined && options.onHandlePointerDown) {
+      props['onPointerDown'] = (event: React.PointerEvent) => {
+        event.stopPropagation();
+        options.onHandlePointerDown?.(id, String(handle), event);
+      };
+    } else if (options.onNodePointerDown) {
       props['onPointerDown'] = (event: React.PointerEvent) => {
         // Stop the parent panel from also claiming the event, so clicking a
         // bar selects the bar's node rather than the whole panel.
         event.stopPropagation();
         options.onNodePointerDown?.(id, event);
+      };
+    }
+
+    if (options.onNodeDoubleClick) {
+      props['onDoubleClick'] = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        options.onNodeDoubleClick?.(id, event);
       };
     }
   }

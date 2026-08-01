@@ -2,6 +2,7 @@ export * from './units.js';
 export * from './geometry.js';
 export * from './nodes.js';
 export * from './layout.js';
+export * from './templates.js';
 export * from './data.js';
 export * from './analysis.js';
 export * from './document.js';

@@ -4,11 +4,17 @@ import { useMemo, useState } from 'react';
 import {
   addBracket,
   addPanelWithPlot,
+  analysisInputHash,
   applyAutoLayout,
   defaultAnalysisOptions,
   deleteNode,
-  hashInputs,
+  findDataset,
+  isStale,
   relabelPanels,
+  removeBracketsForPlot,
+  renameDataset,
+  replaceAnalysisForPlot,
+  repositionBrackets,
   toSeries,
   type Analysis,
   type Correction,
@@ -17,13 +23,20 @@ import {
   type PlotNode,
   type StatTest,
 } from '@figureforge/doc-model';
-import { checkFigure, measurePlot, renderDocument, type Finding } from '@figureforge/render';
+import {
+  checkFigure,
+  measureAllPlots,
+  measurePlot,
+  renderDocument,
+  type Finding,
+} from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
+import { InspectorTab } from './Inspector.js';
 import { datasetFromText } from '../sample.js';
 import type { DocumentApi } from '../useDocument.js';
 
-export type Tab = 'data' | 'stats' | 'quality' | 'layers';
+export type Tab = 'data' | 'inspector' | 'stats' | 'quality' | 'layers';
 
 export interface SidePanelProps {
   api: DocumentApi;
@@ -40,7 +53,7 @@ export function SidePanel(props: SidePanelProps) {
   return (
     <aside className="side-panel">
       <nav className="tabs">
-        {(['data', 'stats', 'quality', 'layers'] as const).map((t) => (
+        {(['data', 'inspector', 'stats', 'quality', 'layers'] as const).map((t) => (
           <button key={t} className={t === tab ? 'active' : ''} onClick={() => setTab(t)}>
             {t}
           </button>
@@ -48,6 +61,14 @@ export function SidePanel(props: SidePanelProps) {
       </nav>
       <div className="tab-body">
         {tab === 'data' && <DataTab {...props} />}
+        {tab === 'inspector' && (
+          <InspectorTab
+            api={props.api}
+            theme={props.theme}
+            selectedIds={props.selectedIds}
+            onSelectionChange={props.onSelectionChange}
+          />
+        )}
         {tab === 'stats' && <StatsTab {...props} />}
         {tab === 'quality' && <QualityTab {...props} />}
         {tab === 'layers' && <LayersTab {...props} />}
@@ -63,6 +84,8 @@ export function SidePanel(props: SidePanelProps) {
 function DataTab({ api, theme, onError }: SidePanelProps) {
   const { document: doc, commit, newId } = api;
   const [pasted, setPasted] = useState('');
+  // Blank means "use the default"; the placeholder shows what that will be.
+  const [name, setName] = useState('');
 
   const preview = useMemo(() => {
     if (pasted.trim() === '') return null;
@@ -73,10 +96,12 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
     }
   }, [pasted]);
 
+  const defaultName = `Dataset ${doc.datasets.length + 1}`;
+
   const importDataset = (): void => {
     if (!preview) return;
     const id = newId();
-    const dataset = datasetFromText(pasted, `Dataset ${doc.datasets.length + 1}`, id);
+    const dataset = datasetFromText(pasted, name.trim() || defaultName, id);
 
     api.transaction('Import data', () => {
       commit('Add dataset', (draft) => {
@@ -100,16 +125,22 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
           fontSizePt: theme.type.panelLabelPt,
           offsetMm: 4,
         });
+        // Importing re-lays out every panel, so existing brackets would
+        // otherwise be left where the old, wider panels used to be.
+        repositionBrackets(draft, measureAllPlots(draft, theme));
       });
     });
 
     setPasted('');
+    setName('');
     onError(null);
   };
 
   const onFile = async (file: File): Promise<void> => {
     try {
       setPasted(await file.text());
+      // The filename is nearly always a better name than "Dataset 3".
+      if (name.trim() === '') setName(file.name.replace(/\.[^.]+$/, ''));
     } catch (error) {
       onError(`Could not read ${file.name}: ${String(error)}`);
     }
@@ -172,6 +203,15 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
               ))}
             </tbody>
           </table>
+          <label className="field block">
+            Name
+            <input
+              value={name}
+              placeholder={defaultName}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </label>
+
           <button className="primary" onClick={importDataset}>
             Import as new panel
           </button>
@@ -182,7 +222,17 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
       <ul className="list">
         {doc.datasets.map((dataset) => (
           <li key={dataset.id}>
-            <strong>{dataset.name}</strong>
+            {/* Editable in place: the name propagates to the panel and plot,
+                which is what makes the Layers list readable. */}
+            <input
+              className="rename"
+              value={dataset.name}
+              onChange={(e) =>
+                commit('Rename dataset', (draft) =>
+                  renameDataset(draft, dataset.id, e.target.value),
+                )
+              }
+            />
             <span className="muted">
               {dataset.format} · {toSeries(dataset).length} series
             </span>
@@ -253,9 +303,10 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         name: `${test} on ${dataset.name}`,
         test,
         spec: { datasetId: dataset.id, groups: series.map((s) => s.name) },
+        plotId: activePlot.id,
         options,
         // Hash the values too, so editing the data marks the result stale.
-        inputHash: hashInputs(
+        inputHash: analysisInputHash(
           { test, correction },
           series.map((s) => s.values),
         ),
@@ -264,10 +315,15 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
       };
 
       api.transaction('Run analysis', () => {
+        // Replace, never accumulate: a plot carries one result, so re-running
+        // supersedes the previous one instead of stacking a second set of
+        // brackets at the same heights.
         commit('Store analysis', (draft) => {
-          draft.analyses = [...draft.analyses, analysis];
+          replaceAnalysisForPlot(draft, analysis);
         });
         commit('Annotate significance', (draft) => {
+          removeBracketsForPlot(draft, activePlot.id);
+
           // Measured from the renderer's own band scale so bracket ends land on
           // the bars; the gap grows per bracket so stacked ones do not collide.
           const measurements = measurePlot(draft, activePlot, theme) ?? undefined;
@@ -283,6 +339,10 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
             });
             placed++;
           });
+
+          // Bring any bracket on another panel back onto its bars too, in case
+          // the layout moved since it was placed.
+          repositionBrackets(draft, measureAllPlots(draft, theme));
         });
       });
     } catch (error) {
@@ -346,9 +406,36 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         Run and annotate
       </button>
 
-      {analyses.map((analysis) => (
+      {analyses.map((analysis) => {
+        // The document stores the input hash precisely so drift is detectable;
+        // rehash the current values and say so when they no longer match.
+        const analysisDataset = findDataset(doc, analysis.spec.datasetId);
+        const currentHash = analysisDataset
+          ? analysisInputHash(
+              { test: analysis.test, correction: analysis.options.correction },
+              toSeries(analysisDataset).map((s) => s.values),
+            )
+          : analysis.inputHash;
+        const stale = isStale(analysis, currentHash);
+
+        const analysisPlot = analysis.plotId ? doc.nodes[analysis.plotId] : undefined;
+        const analysisPanel =
+          analysisPlot?.parentId != null ? doc.nodes[analysisPlot.parentId] : undefined;
+        const panelLabel =
+          analysisPanel && analysisPanel.type === 'panel' ? analysisPanel.label : null;
+
+        return (
         <div key={analysis.id} className="result">
-          <h4>{analysis.test}</h4>
+          <h4>
+            {panelLabel && <span className="panel-tag">{panelLabel}</span>} {analysis.name}
+          </h4>
+
+          {stale && (
+            <p className="warning">
+              The data behind this test has changed. Re-run it — the annotated p-values may no
+              longer match what is plotted.
+            </p>
+          )}
 
           {analysis.result?.warnings.map((warning, i) => (
             <p key={i} className="warning">
@@ -398,7 +485,8 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
             </button>
           </details>
         </div>
-      ))}
+        );
+      })}
     </section>
   );
 }
@@ -477,6 +565,35 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
       .filter((n) => n.layerId === layerId)
       .sort((a, b) => a.z - b.z);
 
+  /**
+   * What a row belongs to — the dataset behind a plot, the panel a label or
+   * bracket annotates. Without it every plot reads "Plot" and two panels' worth
+   * of brackets are indistinguishable.
+   */
+  const provenance = (node: (typeof doc.nodes)[string]): string | null => {
+    const panelOf = (id: NodeId | null | undefined): string | null => {
+      if (!id) return null;
+      const panel = doc.nodes[id];
+      if (!panel || panel.type !== 'panel') return null;
+      return panel.label ? `panel ${panel.label}` : panel.name;
+    };
+
+    switch (node.type) {
+      case 'plot':
+        return findDataset(doc, node.datasetId)?.name ?? 'dataset missing';
+      case 'panel-label':
+        return panelOf(node.panelId);
+      case 'bracket': {
+        const plot = node.plotId ? doc.nodes[node.plotId] : undefined;
+        return panelOf(plot?.parentId);
+      }
+      case 'panel':
+        return null;
+      default:
+        return panelOf(node.parentId);
+    }
+  };
+
   return (
     <section>
       <h3>Layers</h3>
@@ -520,7 +637,10 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
                   onClick={() => onSelectionChange([node.id])}
                 >
                   <span className="node-type">{node.type}</span>
-                  <span>{node.name}</span>
+                  <span className="node-name">
+                    {node.name}
+                    {provenance(node) && <em className="provenance">{provenance(node)}</em>}
+                  </span>
                   <button
                     className="icon danger"
                     title="Delete"

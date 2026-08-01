@@ -116,8 +116,28 @@ button.icon.danger:hover { color: var(--danger); }
 
 .guide-overlay { position: absolute; inset: 0; pointer-events: none; }
 
+/* Editing a label in place. Sits above the SVG; never part of the document. */
+.text-edit-overlay {
+  position: absolute;
+  z-index: 5;
+  padding: 1px 3px;
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+}
+
 [data-node-id] { cursor: pointer; }
 [data-selected='true'] { outline: none; }
+/* Resize cursors by compass direction. Kept in CSS rather than on the scene
+   node: the scene carries plain SVG attributes, and React rejects a `style`
+   string, which would crash the canvas on selection. */
+[data-handle='nw'], [data-handle='se'] { cursor: nwse-resize; }
+[data-handle='ne'], [data-handle='sw'] { cursor: nesw-resize; }
+[data-handle='n'], [data-handle='s'] { cursor: ns-resize; }
+[data-handle='e'], [data-handle='w'] { cursor: ew-resize; }
 
 /* --- side panel --------------------------------------------------------- */
 
@@ -183,8 +203,66 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .node-type { color: var(--muted); font-size: 10px; text-transform: uppercase; width: 78px; flex-shrink: 0; }
 .list li .muted { margin-left: auto; font-size: 11px; }
 
+/* Which dataset or panel a row belongs to, so rows are tellable apart. */
+.node-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.provenance { color: var(--muted); font-size: 10px; font-style: normal; }
+.rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+}
+.rename:hover { border-color: var(--border); }
+.rename:focus { border-color: var(--accent); background: #fff; outline: none; }
+
 .result { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .warning { color: var(--warn); font-size: 11px; margin: 3px 0; }
+
+.panel-tag {
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* --- inspector ---------------------------------------------------------- */
+
+.inspector h4 {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.inspector .field-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.inspector input[type='text'], .inspector input:not([type]) { width: 100%; }
+.inspector button.danger {
+  margin-top: 14px;
+  width: 100%;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.swatch { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.swatch input[type='color'] {
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+}
 .methods { font-size: 11px; line-height: 1.5; background: var(--bg); padding: 8px; border-radius: var(--radius); }
 
 /* --- quality ------------------------------------------------------------ */

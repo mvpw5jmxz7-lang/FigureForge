@@ -20,13 +20,29 @@ import {
   type Dataset,
 } from './index.js';
 import {
+  addBracket,
   addPanelWithPlot,
   applyAutoLayout,
   deleteNode,
   relabelPanels,
+  removeBracketsForPlot,
+  renameDataset,
   reparentNode,
+  replaceAnalysisForPlot,
+  repositionBrackets,
+  type PlotMeasurements,
 } from './operations.js';
-import { alignFrames, distributeFrames, gridCells, snapFrame, suggestGrid } from './layout.js';
+import {
+  alignFrames,
+  autoLayout,
+  distributeFrames,
+  gridCells,
+  resizeFrame,
+  snapFrame,
+  suggestGrid,
+} from './layout.js';
+import { findLayoutTemplate } from './templates.js';
+import type { Analysis } from './analysis.js';
 
 // ---------------------------------------------------------------------------
 // Units
@@ -182,6 +198,78 @@ describe('layout', () => {
       expect(cell.x + cell.width).toBeLessThanOrEqual(89 + 1e-9);
       expect(cell.y + cell.height).toBeLessThanOrEqual(120 + 1e-9);
     }
+  });
+
+  it('divides columns by weight', () => {
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+    const cells = gridCells({ rows: 1, columns: 2, columnWeights: [2, 1] }, options);
+
+    // 174 mm of usable width split 2:1 → 116 and 58.
+    expect(cells[0]!.width).toBeCloseTo(116, 6);
+    expect(cells[1]!.width).toBeCloseTo(58, 6);
+    expect(cells[0]!.width / cells[1]!.width).toBeCloseTo(2, 6);
+    // The gutter is still exactly one gutter wide.
+    expect(cells[1]!.x - (cells[0]!.x + cells[0]!.width)).toBeCloseTo(5, 6);
+  });
+
+  it('matches the equal grid when weights are absent or uniform', () => {
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+    // Regression guard: adding weights must not shift any existing figure.
+    expect(gridCells({ rows: 2, columns: 3, columnWeights: [1, 1, 1], rowWeights: [1, 1] }, options))
+      .toEqual(gridCells({ rows: 2, columns: 3 }, options));
+  });
+
+  it('spans a panel across cells, gutters included', () => {
+    const template = findLayoutTemplate('large-left-two-stacked')!;
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+
+    const frames = autoLayout(
+      [
+        { id: 'a', aspectLock: null, slot: template.slots[0]! },
+        { id: 'b', aspectLock: null, slot: template.slots[1]! },
+        { id: 'c', aspectLock: null, slot: template.slots[2]! },
+      ],
+      template.grid,
+      options,
+    );
+
+    const a = frames.get('a')!;
+    const b = frames.get('b')!;
+    const c = frames.get('c')!;
+
+    // The tall panel covers both rows plus the gutter between them.
+    expect(a.height).toBeCloseTo(b.height + c.height + 5, 6);
+    // And it is twice as wide as the stacked pair.
+    expect(a.width / b.width).toBeCloseTo(2, 6);
+    expect(c.y).toBeGreaterThan(b.y);
+  });
+
+  it('resizes from a handle, holding the opposite edge', () => {
+    const original = { x: 10, y: 10, width: 40, height: 30 };
+
+    // Dragging the east edge right widens it; x is untouched.
+    const east = resizeFrame(original, 'e', 6, 0);
+    expect(east.x).toBeCloseTo(10, 6);
+    expect(east.width).toBeCloseTo(46, 6);
+    expect(east.height).toBeCloseTo(30, 6);
+
+    // Dragging the west edge left grows it leftward; the right edge holds.
+    const west = resizeFrame(original, 'w', -6, 0);
+    expect(west.x).toBeCloseTo(4, 6);
+    expect(west.width).toBeCloseTo(46, 6);
+    expect(west.x + west.width).toBeCloseTo(original.x + original.width, 6);
+  });
+
+  it('honours an aspect lock and a minimum size', () => {
+    const original = { x: 0, y: 0, width: 40, height: 20 };
+
+    const locked = resizeFrame(original, 'se', 20, 0, { aspectLock: 2 });
+    expect(locked.width / locked.height).toBeCloseTo(2, 6);
+
+    // Dragging far past zero clamps rather than inverting the frame.
+    const clamped = resizeFrame(original, 'e', -500, 0, { minMm: 5 });
+    expect(clamped.width).toBeCloseTo(5, 6);
+    expect(clamped.height).toBeGreaterThan(0);
   });
 
   it('snaps to a neighbour edge in preference to the grid', () => {
@@ -461,5 +549,203 @@ describe('input hashing', () => {
   it('changes when any value changes', () => {
     // This is what marks a displayed p-value stale after the data is edited.
     expect(hashInputs([1, 2, 3])).not.toBe(hashInputs([1, 2, 3.0001]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Statistical annotation lifecycle
+// ---------------------------------------------------------------------------
+
+/** An analysis over the sample document's two groups, with one comparison. */
+function sampleAnalysis(id: string, plotId: string, datasetId: string): Analysis {
+  return {
+    id,
+    name: 'ttest-welch on Data',
+    test: 'ttest-welch',
+    spec: { datasetId, groups: ['Vehicle', 'Drug'] },
+    plotId,
+    options: { alternative: 'two-sided', correction: 'holm', alpha: 0.05, welch: true },
+    inputHash: 'hash',
+    result: {
+      test: 'ttest-welch',
+      omnibus: null,
+      comparisons: [
+        {
+          groupA: 'Vehicle',
+          groupB: 'Drug',
+          statistic: 8,
+          p: 0.001,
+          pAdjusted: 0.001,
+          df: 4,
+          ci: null,
+          effectSize: 3.2,
+          effectSizeName: "Hedges' g",
+          n: [3, 3],
+        },
+      ],
+      methodsSentence: 'Welch t-test.',
+      warnings: [],
+      softwareVersions: {},
+    },
+    computedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+/** Measurements as `measurePlot` would supply them, at a given scale. */
+function measurementsAt(centreA: number, centreB: number, top = 10): PlotMeasurements {
+  return {
+    categoryX: new Map([
+      ['Vehicle', centreA],
+      ['Drug', centreB],
+    ]),
+    categoryTop: new Map([
+      ['Vehicle', top],
+      ['Drug', top],
+    ]),
+  };
+}
+
+/** The sample document with one analysis and its bracket already placed. */
+function annotatedDocument() {
+  const { doc, newId } = sampleDocument();
+  const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+  const analysis = sampleAnalysis(newId(), plot.id, doc.datasets[0]!.id);
+
+  const annotated = editDocument(doc, (draft) => {
+    replaceAnalysisForPlot(draft, analysis);
+    addBracket(draft, newId, {
+      plotId: plot.id,
+      analysis,
+      comparisonIndex: 0,
+      measurements: measurementsAt(10, 30),
+    });
+  });
+
+  return { doc: annotated, newId, plotId: plot.id, analysis };
+}
+
+describe('statistical annotation lifecycle', () => {
+  it('replaces the previous analysis and brackets when a test is re-run', () => {
+    const { doc, newId, plotId, analysis } = annotatedDocument();
+    expect(doc.analyses).toHaveLength(1);
+    expect(Object.values(doc.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+
+    // Running a different test on the same plot must supersede the first, not
+    // stack a second result and a second bracket on top of it.
+    const second = { ...sampleAnalysis(newId(), plotId, analysis.spec.datasetId), test: 'mann-whitney' as const };
+    const after = editDocument(doc, (draft) => {
+      replaceAnalysisForPlot(draft, second);
+      removeBracketsForPlot(draft, plotId);
+      addBracket(draft, newId, {
+        plotId,
+        analysis: second,
+        comparisonIndex: 0,
+        measurements: measurementsAt(10, 30),
+      });
+    });
+
+    expect(after.analyses).toHaveLength(1);
+    expect(after.analyses[0]!.test).toBe('mann-whitney');
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+  });
+
+  it('keeps analyses for other plots when one is re-run', () => {
+    const { doc, newId, plotId, analysis } = annotatedDocument();
+    const otherPlot = Object.values(doc.nodes).find(
+      (n) => n.type === 'plot' && n.id !== plotId,
+    )!;
+
+    const withBoth = editDocument(doc, (draft) => {
+      replaceAnalysisForPlot(
+        draft,
+        sampleAnalysis(newId(), otherPlot.id, analysis.spec.datasetId),
+      );
+    });
+    expect(withBoth.analyses).toHaveLength(2);
+
+    const rerun = editDocument(withBoth, (draft) => {
+      replaceAnalysisForPlot(draft, sampleAnalysis(newId(), plotId, analysis.spec.datasetId));
+    });
+    expect(rerun.analyses).toHaveLength(2);
+  });
+
+  it('moves brackets back onto the bars when the plot is resized', () => {
+    const { doc, plotId } = annotatedDocument();
+    const before = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;
+
+    // The bars have moved outward, as they would when the panel widens.
+    const after = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measurementsAt(20, 60)]]));
+    });
+    const moved = after.nodes[before.id]!;
+
+    expect(moved.frame.x).toBeGreaterThan(before.frame.x);
+    expect(moved.frame.width).toBeCloseTo(40, 6);
+  });
+
+  it('preserves a hand-dragged offset while still following the bars', () => {
+    const { doc, plotId } = annotatedDocument();
+    const bracket = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;
+
+    // A bracket nudged 3 mm up must keep that adjustment across a resize —
+    // pinning it in absolute space instead would strand it exactly as an
+    // unrepositioned bracket is stranded.
+    const nudged = editDocument(doc, (draft) => {
+      const target = draft.nodes[bracket.id]!;
+      if (target.type === 'bracket') target.userOffsetMm = { x: 0, y: -3 };
+    });
+
+    const baseline = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measurementsAt(20, 60)]]));
+    }).nodes[bracket.id]!;
+
+    const after = editDocument(nudged, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measurementsAt(20, 60)]]));
+    }).nodes[bracket.id]!;
+
+    expect(after.frame.x).toBeCloseTo(baseline.frame.x, 6);
+    expect(after.frame.y).toBeCloseTo(baseline.frame.y - 3, 6);
+  });
+
+  it('leaves brackets alone when their plot cannot be measured', () => {
+    const { doc } = annotatedDocument();
+    const before = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;
+
+    const after = editDocument(doc, (draft) => repositionBrackets(draft, new Map()));
+
+    expect(after.nodes[before.id]!.frame).toEqual(before.frame);
+  });
+
+  it('names brackets after the panel they annotate', () => {
+    const { doc } = annotatedDocument();
+    const bracket = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;
+    // Two panels' brackets would otherwise both read "Vehicle vs Drug".
+    expect(bracket.name).toBe('a: Vehicle vs Drug');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dataset naming
+// ---------------------------------------------------------------------------
+
+describe('dataset renaming', () => {
+  it('propagates the new name to the panel and plot that took it', () => {
+    const { doc } = sampleDocument();
+    const datasetId = doc.datasets[0]!.id;
+
+    const after = editDocument(doc, (draft) => renameDataset(draft, datasetId, 'Cell viability'));
+
+    expect(after.datasets[0]!.name).toBe('Cell viability');
+    const plots = Object.values(after.nodes).filter((n) => n.type === 'plot');
+    expect(plots.every((p) => p.name === 'Plot — Cell viability')).toBe(true);
+  });
+
+  it('ignores a blank name rather than clearing the dataset', () => {
+    const { doc } = sampleDocument();
+    const before = doc.datasets[0]!.name;
+    const after = editDocument(doc, (draft) =>
+      renameDataset(draft, doc.datasets[0]!.id, '   '),
+    );
+    expect(after.datasets[0]!.name).toBe(before);
   });
 });

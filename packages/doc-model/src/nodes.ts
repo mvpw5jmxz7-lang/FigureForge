@@ -79,6 +79,12 @@ export interface PanelNode extends NodeBase {
   border: Stroke | null;
   /** Space between the panel frame and its plot area. */
   paddingMm: number;
+  /**
+   * Placement within a layout template's grid, when one is applied. Persisted
+   * so re-running the layout keeps the arrangement instead of falling back to
+   * an equal grid. Optional: it post-dates SCHEMA_VERSION 1.
+   */
+  slot?: { row: number; col: number; rowSpan?: number; colSpan?: number } | null;
 }
 
 export type PlotType =
@@ -134,6 +140,15 @@ export interface PlotNode extends NodeBase {
   barWidthFraction: number;
   /** Palette id from the theme, or explicit per-series colours. */
   palette: string | readonly string[];
+  /**
+   * Draw replicate points in their series colour rather than the theme's
+   * foreground.
+   *
+   * Bars default to dark points over a coloured bar, which is conventional and
+   * legible — but it means recolouring a series visibly changes the bar and not
+   * the dots. Opt-in rather than default, so existing figures do not change.
+   */
+  pointsUseSeriesColor?: boolean;
 }
 
 export interface ImageNode extends NodeBase {
@@ -184,6 +199,27 @@ export interface BracketNode extends NodeBase {
   type: 'bracket';
   /** Set when generated from a statistical test; drives staleness checks. */
   analysisId: AnalysisId | null;
+  /**
+   * The plot this annotates. Held directly rather than joined through the
+   * analysis, because re-running a test replaces the analysis record while the
+   * bracket must still be findable by the plot it belongs to.
+   *
+   * Optional: documents written before this field existed simply lack it, which
+   * keeps them loadable without a schema migration.
+   */
+  plotId?: NodeId | null;
+  /**
+   * How far the user dragged this bracket from its computed position.
+   *
+   * Stored as an offset rather than a "pinned" flag so a hand-adjusted bracket
+   * still follows its bars when the plot is resized — pinning in absolute page
+   * space would strand it exactly as an unrepositioned bracket is stranded.
+   */
+  userOffsetMm?: { x: number; y: number };
+  /** Which comparison of the analysis this annotates, for repositioning. */
+  comparisonIndex?: number;
+  /** Clearance above the tallest datum this bracket was placed with. */
+  gapMm?: number;
   /** Displayed annotation: 'ns', '*', '**', … or an explicit p-value string. */
   label: string;
   style: TextStyle;

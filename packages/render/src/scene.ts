@@ -46,7 +46,9 @@ export type SceneRole =
   | 'arrow'
   | 'scale-bar'
   | 'scale-bar-label'
-  | 'legend';
+  | 'legend'
+  /** Editor chrome only; never present in an exported scene. */
+  | 'resize-handle';
 
 export const el = (
   tag: string,

@@ -14,6 +14,21 @@ import type { FigureNode, NodeId, NodeMap } from './nodes.js';
 export interface GridSpec {
   rows: number;
   columns: number;
+  /**
+   * Relative widths of the columns / heights of the rows. Absent means equal,
+   * which is what every grid was before templates existed — so the unweighted
+   * path must keep producing byte-identical frames.
+   */
+  columnWeights?: readonly number[];
+  rowWeights?: readonly number[];
+}
+
+/** Where a panel sits in a template's grid, and how many cells it covers. */
+export interface GridSlot {
+  row: number;
+  col: number;
+  rowSpan?: number;
+  colSpan?: number;
 }
 
 export interface LayoutOptions {
@@ -38,8 +53,40 @@ export function suggestGrid(panelCount: number): GridSpec {
 }
 
 /**
- * Divide the page into equal cells. Returns one rect per grid slot, in
- * row-major order; callers take as many as they have panels.
+ * Sizes along one axis, divided by weight. Equal weights give the same result
+ * as dividing evenly, so the unweighted path is unchanged.
+ */
+function tracks(count: number, total: number, weights: readonly number[] | undefined): number[] {
+  if (count <= 0) return [];
+  const usable = Math.max(0, total);
+
+  const valid =
+    weights !== undefined &&
+    weights.length === count &&
+    weights.every((w) => Number.isFinite(w) && w > 0);
+  if (!valid) return Array.from({ length: count }, () => usable / count);
+
+  const sum = weights.reduce((a, b) => a + b, 0);
+  return weights.map((w) => (usable * w) / sum);
+}
+
+/** Start offset of each track, given the sizes and the gutter between them. */
+function offsets(sizes: readonly number[], start: number, gutterMm: number): number[] {
+  const out: number[] = [];
+  let cursor = start;
+  for (const size of sizes) {
+    out.push(cursor);
+    cursor += size + gutterMm;
+  }
+  return out;
+}
+
+/**
+ * Divide the page into cells. Returns one rect per grid slot, in row-major
+ * order; callers take as many as they have panels.
+ *
+ * With `columnWeights`/`rowWeights` the tracks are proportional instead of
+ * equal, which is what lets one panel take two thirds of a row.
  */
 export function gridCells(spec: GridSpec, options: LayoutOptions): RectMm[] {
   const { rows, columns } = spec;
@@ -50,27 +97,58 @@ export function gridCells(spec: GridSpec, options: LayoutOptions): RectMm[] {
   const usableWidth = pageWidthMm - 2 * marginMm - gutterMm * (columns - 1);
   const usableHeight = pageHeightMm - 2 * marginMm - gutterMm * (rows - 1);
 
-  const cellWidth = Math.max(0, usableWidth / columns);
-  const cellHeight = Math.max(0, usableHeight / rows);
+  const widths = tracks(columns, usableWidth, spec.columnWeights);
+  const heights = tracks(rows, usableHeight, spec.rowWeights);
+  const xs = offsets(widths, marginMm, gutterMm);
+  const ys = offsets(heights, marginMm, gutterMm);
 
   const cells: RectMm[] = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < columns; c++) {
       cells.push({
-        x: marginMm + c * (cellWidth + gutterMm),
-        y: marginMm + r * (cellHeight + gutterMm),
-        width: cellWidth,
-        height: cellHeight,
+        x: xs[c]!,
+        y: ys[r]!,
+        width: Math.max(0, widths[c]!),
+        height: Math.max(0, heights[r]!),
       });
     }
   }
   return cells;
 }
 
+/**
+ * The rect covering a span of cells, gutters included.
+ *
+ * A panel spanning two columns occupies both cells *and* the gutter between
+ * them; leaving the gutter out would draw it narrower than the space it owns.
+ */
+export function spanCell(spec: GridSpec, slot: GridSlot, options: LayoutOptions): RectMm | null {
+  const cells = gridCells(spec, options);
+  if (cells.length === 0) return null;
+
+  const colSpan = Math.max(1, slot.colSpan ?? 1);
+  const rowSpan = Math.max(1, slot.rowSpan ?? 1);
+
+  const first = cells[slot.row * spec.columns + slot.col];
+  const lastCol = Math.min(spec.columns - 1, slot.col + colSpan - 1);
+  const lastRow = Math.min(spec.rows - 1, slot.row + rowSpan - 1);
+  const last = cells[lastRow * spec.columns + lastCol];
+  if (!first || !last) return null;
+
+  return {
+    x: first.x,
+    y: first.y,
+    width: Math.max(0, right(last) - first.x),
+    height: Math.max(0, bottom(last) - first.y),
+  };
+}
+
 export interface PanelLayoutInput {
   id: NodeId;
   /** Width/height the panel must keep, or null to fill its cell. */
   aspectLock: number | null;
+  /** Explicit grid placement. Absent means "next cell in reading order". */
+  slot?: GridSlot | null;
 }
 
 /**
@@ -87,7 +165,7 @@ export function autoLayout(
   const labelGutter = options.labelGutterMm ?? 0;
 
   panels.forEach((panel, index) => {
-    const cell = cells[index];
+    const cell = panel.slot ? spanCell(spec, panel.slot, options) : cells[index];
     if (!cell) return;
 
     const inner: RectMm = {
@@ -231,6 +309,165 @@ export function snapFrame(frame: RectMm, context: SnapContext): SnapResult {
   else if (context.snapToGrid) y = Math.round(y / context.gridSpacingMm) * context.gridSpacingMm;
 
   return { frame: { ...frame, x, y }, guides };
+}
+
+// ---------------------------------------------------------------------------
+// Interactive resize
+// ---------------------------------------------------------------------------
+
+/** Which grab handle a resize drag started from. */
+export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+export interface ResizeOptions {
+  /** Width/height the panel must keep, or null to resize freely. */
+  aspectLock?: number | null;
+  /** Floor on either dimension, so a panel cannot be dragged to nothing. */
+  minMm?: number;
+}
+
+const HANDLE_X: Record<ResizeHandle, -1 | 0 | 1> = {
+  nw: -1, w: -1, sw: -1,
+  n: 0, s: 0,
+  ne: 1, e: 1, se: 1,
+};
+
+const HANDLE_Y: Record<ResizeHandle, -1 | 0 | 1> = {
+  nw: -1, n: -1, ne: -1,
+  w: 0, e: 0,
+  sw: 1, s: 1, se: 1,
+};
+
+/**
+ * Resize a frame by dragging one handle.
+ *
+ * The opposite edge is the anchor and never moves — that is what makes a resize
+ * feel like a resize rather than a move. Pure arithmetic so it is testable
+ * without a DOM; the canvas supplies the millimetre delta.
+ */
+export function resizeFrame(
+  original: RectMm,
+  handle: ResizeHandle,
+  dxMm: number,
+  dyMm: number,
+  options: ResizeOptions = {},
+): RectMm {
+  const min = Math.max(0.1, options.minMm ?? 5);
+  const dirX = HANDLE_X[handle];
+  const dirY = HANDLE_Y[handle];
+
+  let width = original.width + dxMm * dirX;
+  let height = original.height + dyMm * dirY;
+
+  const aspect = options.aspectLock ?? null;
+  if (aspect && aspect > 0) {
+    // Corner drags follow the dominant axis; edge drags derive the other side.
+    if (dirX !== 0 && dirY !== 0) {
+      if (Math.abs(dxMm) >= Math.abs(dyMm)) height = width / aspect;
+      else width = height * aspect;
+    } else if (dirX !== 0) {
+      height = width / aspect;
+    } else {
+      width = height * aspect;
+    }
+  }
+
+  width = Math.max(min, width);
+  height = Math.max(min, height);
+
+  if (aspect && aspect > 0) {
+    // Re-derive after clamping, or the floor would break the locked ratio.
+    if (width / height > aspect) width = height * aspect;
+    else height = width / aspect;
+    width = Math.max(min, width);
+    height = Math.max(min, height);
+  }
+
+  // Anchor the edge opposite the handle. Handles on an axis' centre leave that
+  // axis' origin alone.
+  const x = dirX < 0 ? right(original) - width : original.x;
+  const y = dirY < 0 ? bottom(original) - height : original.y;
+
+  return { x, y, width, height };
+}
+
+/**
+ * Snap the edge being dragged during a resize.
+ *
+ * `snapFrame` snaps a whole frame by translating it, which is wrong mid-resize:
+ * it would drag the anchored edge along too. This moves only the live edge,
+ * against the same sibling edges, centres and page edges.
+ */
+export function snapResize(
+  frame: RectMm,
+  handle: ResizeHandle,
+  context: SnapContext,
+): SnapResult {
+  if (!context.smartGuides && !context.snapToGrid) return { frame, guides: [] };
+
+  const guides: AlignmentGuide[] = [];
+  let { x, y, width, height } = frame;
+
+  const snapEdge = (axis: GuideAxis, dir: -1 | 0 | 1): void => {
+    if (dir === 0) return;
+
+    const live =
+      axis === 'x' ? (dir < 0 ? x : x + width) : dir < 0 ? y : y + height;
+
+    let best: { delta: number; guide: AlignmentGuide } | null = null;
+
+    const consider = (target: number, sourceIds: NodeId[], kind: AlignmentGuide['kind']): void => {
+      const delta = target - live;
+      if (Math.abs(delta) > context.toleranceMm) return;
+      if (best === null || Math.abs(delta) < Math.abs(best.delta)) {
+        best = { delta, guide: { axis, position: target, sourceIds, kind } };
+      }
+    };
+
+    if (context.smartGuides) {
+      for (const other of context.others) {
+        for (const candidate of candidatesFor(other.frame, axis)) {
+          consider(candidate.value, [other.id], candidate.kind);
+        }
+      }
+      const pageEdges =
+        axis === 'x'
+          ? [0, context.pageWidthMm / 2, context.pageWidthMm]
+          : [0, context.pageHeightMm / 2, context.pageHeightMm];
+      for (const edge of pageEdges) consider(edge, [], 'page');
+    }
+
+    let delta: number;
+    if (best !== null) {
+      const resolved = best as { delta: number; guide: AlignmentGuide };
+      guides.push(resolved.guide);
+      delta = resolved.delta;
+    } else if (context.snapToGrid) {
+      const snapped = Math.round(live / context.gridSpacingMm) * context.gridSpacingMm;
+      delta = snapped - live;
+    } else {
+      return;
+    }
+
+    // Growing the leading edge moves the origin; the trailing edge only resizes.
+    if (axis === 'x') {
+      if (dir < 0) {
+        x += delta;
+        width -= delta;
+      } else {
+        width += delta;
+      }
+    } else if (dir < 0) {
+      y += delta;
+      height -= delta;
+    } else {
+      height += delta;
+    }
+  };
+
+  snapEdge('x', HANDLE_X[handle]);
+  snapEdge('y', HANDLE_Y[handle]);
+
+  return { frame: { x, y, width: Math.max(0, width), height: Math.max(0, height) }, guides };
 }
 
 // ---------------------------------------------------------------------------

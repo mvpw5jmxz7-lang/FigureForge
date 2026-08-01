@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 85 TypeScript + 38 Python tests
+make test        # 110 TypeScript + 38 Python tests
 make acceptance  # 28-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -69,6 +69,15 @@ maintained by hand.
 - **Rendering is a pure function of the document.** Anything that varies per
   render (jitter) must be seeded — `marks.ts` uses `mulberry32` keyed off the
   node id, or the export would not match the screen.
+- **`doc-model` imports nothing internal**, so anything needing measured plot
+  geometry takes it as a *parameter* (`PlotMeasurements`), never by importing
+  `measurePlot`. `render` depends on `doc-model`; the reverse would be a cycle.
+  `measureAllPlots` in `render-document.ts` is the bridge callers use.
+- **Layout decisions taken inside the renderer must be deterministic and
+  DOM-free.** Tick-label collision handling measures text with the static tables
+  in `text-width.ts` rather than `getComputedTextLength`, so the canvas and the
+  headless exporter reach the *same* decision. Measuring in the browser would
+  put angled labels on screen and overlapping ones in the PDF.
 
 ### Package split
 
@@ -118,6 +127,14 @@ Each guards against a specific, common reporting error:
 - **Tests are verified against externally published values** — Student's 1908
   sleep data and R's documented output for `t.test`, `aov`, `cor.test` — not
   against numbers this code produced itself.
+- **One analysis per plot.** Re-running a test replaces the previous result and
+  its brackets (`replaceAnalysisForPlot` + `removeBracketsForPlot`) rather than
+  appending. Accumulating them stacked new brackets at the same heights as the
+  old, since the placement gap restarts each run.
+- **The stored input hash is composed in exactly one place**, `analysisInputHash`.
+  Composing it per call site is how a stored hash and a recomputed one come to
+  disagree over nothing, which surfaces as "the data changed" on an untouched
+  figure — that bug was live in the acceptance script.
 
 ---
 
@@ -130,15 +147,48 @@ a raw NUL byte with the escape `'\u0000'` — the same character, so every hash 
 byte-identical and nothing behavioural changed (see the trap below). Run
 `git status` before assuming the tree is clean.
 
-**Verified:** 85 TypeScript tests, 38 Python tests, typecheck and lint clean,
+**Verified:** 110 TypeScript tests, 38 Python tests, typecheck and lint clean,
 28-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm; PNG exactly 300 dpi.
 
-Working end to end: CSV/TSV import with format detection and live preview →
-bar/dot/beeswarm marks with error bars → Welch's t-test and friends with
-corrections and effect sizes → significance bracket placed on measured geometry →
-auto-layout with smart guides and snapping → panel lettering in reading order →
+Working end to end: CSV/TSV import with format detection, live preview and a
+user-supplied dataset name → bar/dot/beeswarm marks with error bars → Welch's
+t-test and friends with corrections and effect sizes → significance bracket
+placed on measured geometry, which follows the plot when it moves →
+auto-layout with smart guides and snapping, weighted templates, and drag-resize
+handles → panel lettering in reading order → an Inspector for the selected node
+(colours, text, axis titles, frame) with double-click-to-edit on canvas →
 PDF/EPS/SVG/PNG/TIFF export → Publication Readiness Score → project save/load.
+
+### The editing iteration (after phases 1–2)
+
+A round of reported bugs and requests, all fixed on the phase 1–2 surface:
+
+- **Stats replace rather than accumulate.** `BracketNode.plotId` and
+  `Analysis.plotId` join annotations to their plot.
+- **Brackets follow their bars.** `repositionBrackets` re-measures on layout,
+  resize and import. A manual drag is stored as `userOffsetMm` — an *offset*,
+  not a pin, so a nudged bracket keeps its adjustment and still tracks the data.
+  `measurePlot` is memoised on `(plot, dataset, theme)` identity, which Immer's
+  structural sharing makes a sound key.
+- **Axis labels never overprint.** Category labels tilt to 45° when they outgrow
+  their band, then stand upright at 90° when 45° would force truncation —
+  upright labels are bounded by the space below the axis instead of by their
+  neighbours, so long names survive whole. The x title is placed below whatever
+  depth the labels reach, clamped to the panel.
+- **New surfaces:** Inspector tab, keyboard Delete, dataset rename that
+  propagates to panels and plots, provenance in the Layers list, layout
+  templates, panel resize handles.
+
+Two traps found by driving the real browser, which neither the unit tests nor
+the parity test could catch — both are now covered:
+
+- A `style` **string** on a scene node renders fine through the string
+  serialiser and *throws in React*, blanking the canvas whenever anything was
+  selected. Parity compares two strings, so it saw nothing. `parity.test.tsx`
+  now asserts `toReact` does not throw on chrome.
+- Setting a panel's frame through the Inspector without `resizePanel` left its
+  plot at the old size inside the resized panel.
 
 ---
 
@@ -164,6 +214,9 @@ Phases 3–9, with the actual entry points:
   calibration and on-page size, which is the hard part.
 - **Statistical tests** `chi-square`, `linear-regression`, `wilcoxon` are
   implemented in the API but absent from the UI dropdown in `SidePanel.tsx`.
+- **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
+  templates and honoured by `autoLayout`, but nothing lets a user author a slot
+  directly — templates are the only way to set one.
 - **Asset pipeline**: `resolveAsset` is wired through the renderer and
   `App.tsx` passes `assetUrls={{}}`. Image panels need blob URLs in the browser
   and data URIs on export — the seam exists, nothing fills it.
@@ -176,6 +229,9 @@ Phases 3–9, with the actual entry points:
   categorical dot path and render as something plausible-looking and wrong.
   Adding one means: the mark geometry, a renderer branch, and nothing else — the
   union in `nodes.ts:84` and its mirror in `schema.ts:87` already list them.
+  The Inspector's plot-type dropdown deliberately offers **only the four that
+  work** (`OFFERED_PLOT_TYPES` in `Inspector.tsx`); extend that list as each
+  lands, or the UI starts shipping controls that produce wrong output.
 - **`anova-rm` is in the `StatTest` union and in the `parametric` set
   (`tests.py:250`) but has no dispatch branch**, so calling it raises
   `Unsupported test: anova-rm`. It is not in the UI dropdown, so it is not
@@ -189,9 +245,10 @@ Phases 3–9, with the actual entry points:
 |---|---|
 | **Electron packaging** | Web-first deferred this, it did not remove it. The desktop shell needs Python bundled as a sidecar process with lifecycle management — real work, not a wrapper. |
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
-| **Stale bracket positions** | `addBracket` computes geometry once from `measurePlot`. Editing the data afterwards leaves brackets where they were. `inputHash` detects the staleness; nothing repositions or warns yet. |
-| **`measurePlot` recomputes** | It re-runs the full geometry pass (scales, marks, summary stats) on every call, duplicating the render path. Fine at two panels; wasteful at twenty. Memoise before adding many panels. |
-| **No schema migrations** | `SCHEMA_VERSION` is 1 and `loadArchive` rejects anything newer. The moment the model changes shape, old `.figureforge` files break — a migration path is needed *before* the first breaking change ships. |
+| **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
+| **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added in the editing iteration (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`) is **optional**, so old files still load and this was not forced. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. |
 | **Autofixes are advertised, not implemented** | Quality checker findings carry `autoFixable: true`, but no fixer is wired up and the UI offers no button. Either build them or stop claiming it. |
 | **Font licensing** | Arial is not redistributable. The image ships Liberation Sans, which is metrically identical so layout is unaffected, and the theme stack falls back to it. A user wanting genuine Arial must supply it. |
 
@@ -231,6 +288,18 @@ Each of these cost time once and will again:
 - **React wants camelCase SVG attributes.** The scene stores canonical hyphenated
   names (what the exporter writes verbatim); `react.tsx` converts. Both adapters
   must still emit identical markup — the parity test enforces it.
+- **Green tests do not mean the app runs.** The suites render through the string
+  serialiser and `renderToStaticMarkup`; neither mounts the real UI. A `style`
+  string on a scene node passed every one of them and threw in the browser,
+  blanking the canvas on any selection. Playwright is already in the API image
+  (it drives export) and can reach the web container across the shared pod
+  namespace — use it to click through a change before calling it done:
+  `podman cp smoke.py figureforge-api:/tmp/ && podman exec figureforge-api python /tmp/smoke.py`.
+- **Playwright clicks an element's centre.** A Layers row's centre is its delete
+  button, so `row.click()` deletes the node instead of selecting it. Target the
+  name span. Likewise `inner_text()` fails on SVG (`text_content()` works), and
+  a synthetic `input` event does not drive a React controlled input — use
+  `fill()`, which goes through the native setter React tracks.
 
 ### Export traps encoded in the code
 

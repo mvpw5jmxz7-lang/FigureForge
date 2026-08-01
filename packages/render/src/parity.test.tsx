@@ -111,6 +111,53 @@ describe('adapter parity', () => {
     expect(stripped).toBe(fromString);
   });
 
+  it('produces the same markup when axis labels are rotated', () => {
+    // Rotation and truncation are layout decisions taken inside the renderer,
+    // so both adapters must reach them identically — otherwise the screen would
+    // show angled labels and the PDF overlapping ones.
+    const crowded = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        // 26 mm leaves ~12 mm of plot once the axis gutters are taken, so the
+        // two category names no longer fit their bands.
+        if (node.type === 'panel') node.frame = { ...node.frame, width: 26 };
+        if (node.type === 'plot') node.frame = { ...node.frame, width: 26 };
+      }
+    });
+    const scene = renderDocument(crowded, { theme: NATURE_THEME });
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(
+      collectByRole(scene, 'tick-label').some((n) =>
+        String(n.attrs?.['transform'] ?? '').includes('rotate'),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps selection chrome out of the exported drawing', () => {
+    // Resize handles are drawn into the scene, so this proves they cannot leak
+    // into an export: the export path passes no chrome at all.
+    const selected = Object.values(doc.nodes).find((n) => n.type === 'panel')!.id;
+    const withHandles = renderDocument(doc, {
+      theme: NATURE_THEME,
+      chrome: { selectedIds: [selected] },
+    });
+
+    expect(collectByRole(withHandles, 'resize-handle').length).toBe(8);
+    expect(collectByRole(renderDocument(doc, { theme: NATURE_THEME }), 'resize-handle')).toEqual(
+      [],
+    );
+
+    // React must actually accept every attribute the chrome emits. Comparing
+    // the two adapters' strings does not prove this — a `style` string renders
+    // fine through the serialiser and throws in React, taking the canvas with
+    // it the moment anything is selected.
+    expect(() => renderToStaticMarkup(toReact(withHandles))).not.toThrow();
+  });
+
   it('renders deterministically across repeated calls', () => {
     const a = toSvgString(renderDocument(doc, { theme: NATURE_THEME }));
     const b = toSvgString(renderDocument(doc, { theme: NATURE_THEME }));

@@ -79,6 +79,16 @@ const panelSchema = z.object({
   background: fillSchema.nullable(),
   border: strokeSchema.nullable(),
   paddingMm: nonNeg,
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  slot: z
+    .object({
+      row: z.number().int().min(0),
+      col: z.number().int().min(0),
+      rowSpan: z.number().int().positive().optional(),
+      colSpan: z.number().int().positive().optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 const plotSchema = z.object({
@@ -111,6 +121,8 @@ const plotSchema = z.object({
   jitterMm: nonNeg,
   barWidthFraction: finite.min(0).max(1),
   palette: z.union([z.string(), z.array(z.string())]),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  pointsUseSeriesColor: z.boolean().optional(),
 });
 
 const imageSchema = z.object({
@@ -160,6 +172,12 @@ const bracketSchema = z.object({
   ...nodeBaseShape,
   type: z.literal('bracket'),
   analysisId: z.string().nullable(),
+  // Optional throughout: these post-date SCHEMA_VERSION 1, and zod strips
+  // unknown keys, so a field missing here would be silently lost on save.
+  plotId: z.string().nullable().optional(),
+  userOffsetMm: z.object({ x: finite, y: finite }).optional(),
+  comparisonIndex: z.number().int().min(0).optional(),
+  gapMm: nonNeg.optional(),
   label: z.string(),
   style: textStyleSchema,
   stroke: strokeSchema,
@@ -236,6 +254,8 @@ const analysisSchema = z.object({
   name: z.string(),
   test: z.string(),
   spec: z.object({ datasetId: z.string(), groups: z.array(z.string()) }),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  plotId: z.string().nullable().optional(),
   options: z.object({
     alternative: z.enum(['two-sided', 'less', 'greater']),
     correction: z.enum(['none', 'bonferroni', 'holm', 'benjamini-hochberg', 'tukey', 'dunn']),
