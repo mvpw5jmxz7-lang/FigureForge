@@ -21,7 +21,14 @@
       "Bash(awk 'NR==304||NR==306||NR==423||NR==425' figureforge/stats/tests.py)",
       "Bash(git add *)",
       "Bash(python3 -)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F -)",
+      "Bash(node -e \"1\")",
+      "Bash(python3 -c \"d=open\\('packages/doc-model/src/analysis.ts','rb'\\).read\\(\\); print\\('NUL bytes remaining:', d.count\\(b'\\\\x00'\\)\\)\")",
+      "Bash(python3 -c \"d=open\\('CLAUDE.md','rb'\\).read\\(\\); print\\('NULs in CLAUDE.md:', d.count\\(b'\\\\x00'\\)\\)\")",
+      "Bash(python3 -c \"d=open\\('CLAUDE.md','rb'\\).read\\(\\); print\\('NULs:', d.count\\(b'\\\\x00'\\)\\)\")",
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ed27c7d2-1c8a-4952-8c51-4a1f5673c1b2/scratchpad/commitmsg.txt)",
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q --amend --no-edit)"
     ]
   }
 }

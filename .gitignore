@@ -17,3 +17,6 @@ venv/
 .DS_Store
 out/
 coverage/
+
+# Claude Code writes these transiently while saving settings
+.claude/settings.local.json.tmp.*
