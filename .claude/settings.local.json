@@ -34,7 +34,9 @@
       "Bash(grep -oE '`docker compose [a-z -]+`' GUIDE.md)",
       "Bash(grep -oE '\\(localhost:[0-9]+|port [0-9]+|[0-9]{4,5}\\)' GUIDE.md)",
       "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ed27c7d2-1c8a-4952-8c51-4a1f5673c1b2/scratchpad/commitmsg2.txt)",
-      "Bash(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -m 'Record permission allowlist entry from previous commit *)"
+      "Bash(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -q -m 'Record permission allowlist entry from previous commit *)",
+      "Bash(python3 -c \"d=open\\('TestPlan.md','rb'\\).read\\(\\); print\\('NULs:', d.count\\(b'\\\\x00'\\)\\)\")",
+      "Bash(git -c user.name=\"Claude\" -c user.email=\"noreply@anthropic.com\" commit -q -F /tmp/claude-1000/-home-comet-Projects-SciencePlatform/ec22e0b7-e5c3-43b3-b541-5a46adc98e92/subagents/commitmsg.txt)"
     ]
   }
 }
