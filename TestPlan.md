@@ -7,18 +7,71 @@ FigureForge as it exists today (commits `fb401cb` + `be29341`).
 > the model, renderer and statistics already run inside the repo
 > (`packages/*/src/*.test.ts`, `services/api/tests/`) and are passing.
 
+## Sessions run
+
+Add one row per testing session. The next development session reads this table
+first, so it knows what was reached, what broke, and what to look at.
+
+| Date | Tester | App version | Sections run | Pass / Fail / Skip | Issues filed | Linked commit |
+|---|---|---|---|---|---|---|
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+|  |  |  |  |  |  |  |
+
+**Filled example row to copy when starting a new session:**
+
+```
+| 2026-08-01 | AK | 68c3a6d | 0–5, 8 | 7 / 1 / 0 | 2 | dc1e276 |
+```
+
+- **Date** — the day the session ran.
+- **Tester** — initials or first name, consistent across the project.
+- **App version** — the git short SHA of the FigureForge build you tested
+  against (e.g. `68c3a6d`).
+- **Sections run** — list of section numbers, e.g. `0–5, 8`.
+- **Pass / Fail / Skip** — three counts, e.g. `7 / 1 / 0`.
+- **Issues filed** — count of new rows in section 18 ("Notes &
+  suggestions") this session.
+- **Linked commit** — the SHA of any FigureForge commit that affected
+  what you tested, when known.
+
 ## How to read this document
 
 Every test step has the same shape:
 
 - **What to do** — the click, dropdown, paste or keyboard action.
 - **What to look at** — what you should see on screen.
-- **What a failure looks like** — what to record in section 17 ("Notes &
+- **What a failure looks like** — what to record in section 18 ("Notes &
   suggestions") if something is wrong.
 
 Most steps include a clickable control name and a tab name. The app has four
 tabs on the right: **Data**, **Stats**, **Quality**, **Layers**. The
 top toolbar and bottom status bar are not tabs.
+
+## How to update this file as a tester
+
+This document is the input to the next development session. After a session:
+
+1. Tick `- [x]` next to each step you completed. Leave `- [ ]` if you did
+   not run that step. If a step **failed**, leave `- [ ]` and add
+   `(FAIL — see Notes)` so the next session can find it quickly.
+2. Add a **row to the "Sessions run" table** at the top with your date,
+   initials, app version and what you covered.
+3. Add a **short summary line** in the footer of each section you ran
+   (the `> Session YYYY-MM-DD:` blockquote at the end of every section).
+4. For anything you want **next**, add an entry to section 17
+   ("Suggestions for the next round of development").
+5. For anything **broken**, add an entry to section 18 ("Notes &
+   suggestions").
+6. **Commit your changes** when you finish. The next session reads the
+   committed version — uncommitted edits are not visible to it.
 
 Before you start, the app must be running and open in your browser at
 `http://localhost:5173`. If you don't see anything on the screen, see section
@@ -28,6 +81,8 @@ before reporting an empty page as broken.
 ---
 
 ## 0. Before you start
+
+- [ ] **Open the app and confirm the starting state.**
 
 Confirm:
 
@@ -45,9 +100,13 @@ isn't fully up — restart it (`make down` then `make up` on Linux,
 `docker compose down` then `docker compose up --build` on macOS) and wait
 ~30 seconds.
 
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
+
 ---
 
 ## 1. The starting figure
+
+- [ ] **Inspect the two demo panels and confirm labels, colours and page size.**
 
 You are looking at two demonstration datasets loaded on app start:
 
@@ -72,57 +131,65 @@ You are looking at two demonstration datasets loaded on app start:
 above (only occurs if a different palette was applied — not in the default
 demo), or axis labels unreadable at the default zoom.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 2. Data tab — paste, preview, import
+
+- [ ] **Run each format-detection snippet and check the live preview matches.**
 
 The Data tab has a paste area and a file picker. Pasting (or selecting) data
 produces a **live preview** before you commit to importing it.
 
 ### Format detection — paste each of these in turn
 
-1. **Grouped** (two columns):
+- [ ] **Grouped paste** — preview reads `grouped · 2 columns · 3 rows`.
+
    ```text
    Group,Value
    A,1
    A,2
    B,3
    ```
-   Preview should read `grouped · 2 columns · 3 rows`. Columns: `Group` (A),
-   `Value` (#).
+   Columns should show `Group` (A) and `Value` (#).
 
-2. **Replicate** (one label column, several replicate columns):
+- [ ] **Replicate paste** — preview reads `replicate · 4 columns · 2 rows`.
+
    ```text
    Treatment,Rep1,Rep2,Rep3
    Vehicle,10,11,12
    Drug,4,5,6
    ```
-   Preview should read `replicate · 4 columns · 2 rows`.
 
-3. **Prism** (XY, several Y columns):
+- [ ] **Prism paste** — preview reads `prism · 3 columns · 2 rows`.
+
    ```text
    X,Y1,Y2
    1,2,5
    2,3,6
    ```
-   Preview should read `prism · 3 columns · 2 rows`.
 
-4. **Broken** — paste the single number `42`. No preview should appear; the
-   **Import as new panel** button should not be visible.
+- [ ] **Broken paste** — pasting `42` produces no preview and hides the
+  Import button.
 
 ### Import
 
-After a successful preview, click **Import as new panel**. A new panel
-appears in the canvas labelled with the next available letter (`c` if you
-started with `a, b`), populated with the new data.
+- [ ] **Import a successful preview** — a new panel labelled `c` (or next
+  available letter) appears with the data plotted.
 
 **Failure:** preview shows a wrong format (e.g. the Prism paste labelled
 `replicate`), the columns display `A` instead of `#` for numeric, or
 importing produces a panel with no data.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 3. Layout — auto-arrangement
+
+- [ ] **Click Auto layout** — grid label updates and panels rearrange; switch
+  journal preset to see the page-width readout and figure rescale.
 
 Click **Auto layout** in the toolbar.
 
@@ -144,9 +211,15 @@ full range.
 **Failure:** changing the preset does not change the page width, or the
 panels do not re-arrange after the preset change.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 4. Layout — manual nudge
+
+- [ ] **Select a panel and nudge it with arrow keys** — `sel …` readout
+  updates by 1 / 5 / 0.1 mm for plain / Shift / Alt respectively; toggle
+  Snap and Grid to confirm behaviour.
 
 Click any panel to select it (a red dashed outline appears; the top-right
 shows a `sel 87.0 mm × 60.0 mm` readout for that selection).
@@ -171,9 +244,15 @@ canvas-only and is **not** included in exports).
 click the canvas first), or the nudge distance is wrong (one full panel's
 worth instead of 1 mm).
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 5. Stats tab — single comparison
+
+- [ ] **Run Welch's t-test on the demo data** — bracket with `****` appears
+  over bars; results table, adjusted P ≤ 0.05 in green, methods sentence
+  expands and Copy works.
 
 With the demo data loaded, open the **Stats** tab.
 
@@ -210,9 +289,16 @@ When it clears:
 Is the API running?" — the API container is not up. Click the **Stats** tab
 again once it is.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 6. Stats tab — corrections and test switching
+
+- [ ] **Switch the correction** — methods sentence wording changes per option
+  (None, Holm-Bonferroni, Bonferroni, Benjamini-Hochberg).
+- [ ] **Switch to One-way ANOVA** — methods sentence changes and the
+  results table now contains three pairwise comparisons.
 
 The **Multiple comparisons** dropdown offers four choices:
 
@@ -236,9 +322,14 @@ flow — the omnibus is reported inside the methods sentence, not the table.
 **Failure:** the methods sentence does not change when the dropdown
 changes, or pairwise comparisons don't appear after switching to ANOVA.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 7. Stats tab — assumption warnings
+
+- [ ] **Trigger the Levene warning** — paste the unequal-variance dataset,
+  run Welch's t-test, confirm a yellow warning appears above the results.
 
 The demo data has equal n's and similar variances, so **no** warning is
 expected on the default run — that is normal.
@@ -261,9 +352,16 @@ telling the tester the data violate a t-test assumption.
 **Failure:** no warning appears, or a warning appears on the clean demo
 data (false positive).
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 8. Quality tab — Publication Readiness Score
+
+- [ ] **Default demo shows 100/100** with seven green ✓ and zero findings.
+- [ ] **Break it deliberately** — change Height to 400, switch to Nature
+  double-column; score drops, Page dimensions flips to yellow `!`, the
+  "Height exceeds the 247 mm limit" finding appears.
 
 Open the **Quality** tab. With the default demo:
 
@@ -302,9 +400,15 @@ finding does not appear.
 > images inside the figure will print at ≥ the target DPI; the export DPI
 > is about what you actually render. They are deliberately independent.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 9. Layers tab
+
+- [ ] **Visibility, lock, delete** — toggle each on a non-essential layer
+  (Labels / Graphs); confirm a deleted panel label disappears and Undo
+  restores it (see section 10).
 
 Open the **Layers** tab. Five layers are listed top-to-bottom in **reverse
 draw order**:
@@ -335,9 +439,14 @@ delete that label. The canvas updates immediately.
 **Failure:** visibility/lock toggles don't change anything, deleted nodes
 re-appear, or selection doesn't update.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 10. Undo / redo
+
+- [ ] **Ctrl+Z / Ctrl+Shift+Z round-trip** — after the deletion in section
+  9, the toolbar buttons and keyboard shortcuts both work.
 
 After deleting a node in section 9:
 
@@ -352,9 +461,16 @@ click the canvas first if you just typed in the paste area.
 **Failure:** keyboard shortcuts do nothing, or one of the buttons stays
 disabled when there is history available.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 11. Export — vector formats
+
+- [ ] **PDF** downloads (~25 KB), opens at exactly 183.0 mm × 75.0 mm with
+  selectable text; exactly one page; bracket and `****` are visible.
+- [ ] **EPS** downloads (~330 KB) and starts with `%!PS-Adobe-3.0 EPSF-3.0`.
+- [ ] **SVG** downloads and renders identically to the canvas in a browser.
 
 Click **PDF** in the bottom status bar. A file downloads; the toolbar
 briefly shows `Exporting PDF…`. The filename is the figure title (top of
@@ -383,9 +499,15 @@ the bracketed significance stars.
 **Failure:** text is outlined (regression of the export-fidelity invariant),
 wrong page size, missing bracket, or blank second page.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 12. Export — raster formats
+
+- [ ] **PNG at 300 dpi** is ~2163 × 884 pixels, not pixelated.
+- [ ] **PNG at 600 dpi** doubles the pixel count.
+- [ ] **TIFF** carries the embedded DPI in its properties dialog.
 
 Set **Raster DPI** in the bottom status bar to **300** and click **PNG**.
 A PNG downloads (~45 KB). Open it in Preview (or any image viewer) and
@@ -408,9 +530,16 @@ journal's submission system uses to verify the resolution claim.
 ignoring the `device_scale_factor`), or the embedded DPI in the TIFF is
 wrong.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 13. Project save / load
+
+- [ ] **Save downloads a `.figureforge` zip** with `MANIFEST.json`,
+  `document.json`, `data/*.csv`.
+- [ ] **Open round-trips** — figure reappears identically (panels, brackets,
+  analyses).
 
 Click **Save project** in the bottom status bar. A file downloads with
 the figure title plus the `.figureforge` extension. Open it with any zip
@@ -430,9 +559,14 @@ brackets, same analysis results.
 ("Could not open project: …"), or the figure looks different after
 loading.
 
+
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
 ---
 
 ## 14. End-to-end in one go
+
+- [ ] **Full flow** — paste → import → auto layout → Welch t-test → bracket
+  → Quality ≥ 80 → PDF opens at 183 × 75 mm with selectable text.
 
 The combined scenario, written as a single continuous flow. Run this when
 you just want to know *"is the whole thing working today?"*.
@@ -451,9 +585,14 @@ you just want to know *"is the whole thing working today?"*.
 
 If every step passes, the core pipeline works.
 
+> **Session ____-__-__** — passed / failed / skipped. _one-line summary_
+
 ---
 
 ## 15. What NOT to file (these are not yet built)
+
+- [ ] **Confirm I've read this section** — items here are deliberately not
+  built; do not file them as bugs.
 
 Check this list before reporting something as a bug — every item here is in
 CLAUDE.md's "declared but missing" or "already scaffolded but unused"
@@ -486,10 +625,15 @@ section. **Do not report any of these.**
 
 ## 16. Test datasets
 
+- [ ] **Use each dataset below at least once** during a session — different
+  shapes exercise different parts of the import path.
+
 All values below are taken from existing code in the repo so the
 expected outcomes are real, not invented.
 
 ### Vehicle viability (in-app demo, already loaded)
+
+- [ ] Vehicle viability is significant at every dose vs vehicle (P < 0.001).
 
 ```text
 Treatment,Rep1,Rep2,Rep3,Rep4
@@ -503,6 +647,8 @@ A 4-treatment dose–response, n = 4 per group, expected to be **highly
 significant** at every dose vs vehicle (P < 0.001).
 
 ### Genotype expression (in-app demo, already loaded)
+
+- [ ] Genotype expression distinguishes the KO genotype from WT.
 
 ```text
 Genotype,Rep1,Rep2,Rep3
@@ -537,6 +683,8 @@ result in R's `t.test`.)
 
 ### PlantGrowth (one-way ANOVA reference)
 
+- [ ] PlantGrowth ANOVA matches R: F(2, 27) = 4.85, P = 0.016.
+
 Three groups of 10 observations each. Paste as replicates:
 
 ```text
@@ -552,6 +700,8 @@ P = 0.016`. Three pairwise comparisons follow. (Reference: R's
 
 ### Unequal-variance trigger (assumption-warning test)
 
+- [ ] Triggers a Levene/variance warning above the results table.
+
 ```text
 Sample,A,B
 s1,5.1,0.5
@@ -565,11 +715,33 @@ warning should appear.
 
 ---
 
-## 17. Notes & suggestions
+## 17. Suggestions for the next round of development
 
-Use the table below for anything you find. **Describe the issue by what
-you clicked** — not by paragraph. Include the figure title (top of the
-canvas) and the export format, if relevant.
+What you'd like to see built or fixed next. One item per row. The next
+development session reads this list when deciding what to work on.
+
+1. _title_ — `initials, YYYY-MM-DD` — _one-line rationale_
+2.
+3.
+4.
+5.
+
+> Examples of useful suggestions:
+>
+> - **Box plots** — `AK, 2026-08-01` — section 15 lists them as not-yet-built, but the analysis service already has the maths; a next session could build the renderer.
+> - **Image panels** — `BJ, 2026-08-02` — important for our microscopy figures; would unblock the "image in figure" use case.
+> - **Drag-to-resize** — `CM, 2026-08-03` — I tried to drag panel corners and it just moved the whole panel; frustrating.
+
+Delete empty rows at session end so the list doesn't grow forever.
+
+---
+
+## 18. Notes & suggestions
+
+Use the table below for anything you find **broken** or otherwise worth
+recording. **Describe the issue by what you clicked** — not by paragraph.
+Include the figure title (top of the canvas) and the export format, if
+relevant.
 
 **Before you file, check section 15** — features listed there are
 deliberately not yet built, and reporting them wastes both our time.
