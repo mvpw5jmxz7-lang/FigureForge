@@ -1,9 +1,10 @@
 /**
- * Phase 2 acceptance flow, run end to end without the UI.
+ * Acceptance flow, run end to end without the UI.
  *
  *   CSV in → bar+dot plot with mean ± s.e.m. → Welch's t-test → significance
- *   bracket → two panels on Nature double-column → panel letters → export PDF
- *   with selectable text and a 300 dpi PNG → publication readiness score.
+ *   bracket → micrograph panel with a calibrated scale bar and annotations →
+ *   two panels on Nature double-column → panel letters → export PDF with
+ *   selectable text and a 300 dpi PNG → publication readiness score.
  *
  * Driving the model directly rather than through the interface is the point:
  * the app, the tests and this script all go through the same operations, so a
@@ -15,8 +16,12 @@
 import { writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import {
+  addArrow,
+  addAsset,
   addBracket,
+  addImage,
   addPanelWithPlot,
+  addScaleBar,
   applyAutoLayout,
   buildArchiveContents,
   createDocument,
@@ -28,6 +33,8 @@ import {
   parseDelimited,
   relabelPanels,
   saveArchive,
+  scaleBarWidthMm,
+  setImageCrop,
   stableStringify,
   toSeries,
   type Analysis,
@@ -207,10 +214,79 @@ async function main(): Promise<void> {
 
   console.log(`\n   ${result.methodsSentence}\n`);
 
-  // -- 4. Render -----------------------------------------------------------
-  console.log('4. Render');
+  // -- 3b. Image panel, scale bar and annotations ---------------------------
+  console.log('\n3b. Image panel');
 
-  const scene = renderDocument(doc, { theme: NATURE_THEME });
+  // A real 2×2 PNG rather than a stub: the export path has to embed decodable
+  // image data, and a placeholder would pass every check below while producing
+  // a blank rectangle in the PDF.
+  const PNG_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4' +
+    'nGP8z8DAwMDAxAADRDEAWFsCBQlnMcgAAAAASUVORK5CYII=';
+  const pngBytes = Uint8Array.from(atob(PNG_BASE64), (c) => c.charCodeAt(0));
+
+  const assetId = newId();
+  // 1000 px shown 40 mm wide → 0.04 mm/px. At 2 px/µm a 10 µm bar spans 20 px,
+  // so it must draw exactly 0.8 mm. Hand-computed, not read back from the code.
+  const EXPECTED_BAR_MM = 0.8;
+
+  let imageId = '';
+  let barId = '';
+
+  doc = editDocument(doc, (draft) => {
+    addAsset(draft, {
+      id: assetId,
+      filename: 'micrograph.png',
+      mimeType: 'image/png',
+      byteLength: pngBytes.length,
+      naturalPx: { width: 1000, height: 800 },
+    });
+
+    const image = addImage(draft, newId, {
+      assetId,
+      frame: { x: 120, y: 8, width: 40, height: 32 },
+      naturalPx: { width: 1000, height: 800 },
+      name: 'Micrograph',
+    });
+    imageId = image.id;
+
+    barId =
+      addScaleBar(draft, newId, {
+        imageId: image.id,
+        length: 10,
+        pixelsPerUnit: 2,
+        unitLabel: 'µm',
+        calibrationSource: 'metadata',
+      })?.id ?? '';
+
+    addArrow(draft, newId, { frame: { x: 125, y: 12, width: 12, height: 8 } });
+  });
+
+  check('image panel created', doc.nodes[imageId]?.type === 'image');
+  check('scale bar attached to the image', doc.nodes[barId]?.parentId === imageId);
+  check('scale bar length matches the calibration',
+    Math.abs((scaleBarWidthMm(doc.nodes, barId) ?? 0) - EXPECTED_BAR_MM) < 1e-9,
+    `${(scaleBarWidthMm(doc.nodes, barId) ?? 0).toFixed(3)} mm`);
+
+  // Halving the image halves what a millimetre on it represents. A bar that
+  // held its length here would silently misstate the scale.
+  const halved = editDocument(doc, (draft) => {
+    const image = draft.nodes[imageId]!;
+    image.frame = { ...image.frame, width: image.frame.width / 2 };
+  });
+  check('scale bar halves with its image',
+    Math.abs((scaleBarWidthMm(halved.nodes, barId) ?? 0) - EXPECTED_BAR_MM / 2) < 1e-9);
+
+  // -- 4. Render -----------------------------------------------------------
+  console.log('\n4. Render');
+
+  // The exporter hands back data URIs: an exported SVG must not depend on
+  // anything outside itself, and a blob URL is meaningless off this machine.
+  const dataUri = `data:image/png;base64,${PNG_BASE64}`;
+  const resolveAsset = (id: string): string | undefined =>
+    id === assetId ? dataUri : undefined;
+
+  const scene = renderDocument(doc, { theme: NATURE_THEME, resolveAsset });
   const svg = toSvgString(scene, { xmlDeclaration: true });
 
   check('SVG declares millimetre dimensions', svg.includes('width="183mm"'));
@@ -223,6 +299,29 @@ async function main(): Promise<void> {
   check('box plot hinges rendered', collectByRole(scene, 'box').length === 2);
   check('box plot whiskers rendered', collectByRole(scene, 'whisker').length === 2);
   check('no error bars drawn under a box', collectByRole(scene, 'error-bar').length === 2);
+
+  check('image embedded as a self-contained data URI',
+    svg.includes('<image') && svg.includes('data:image/png;base64,'));
+  check('scale bar and its label rendered',
+    collectByRole(scene, 'scale-bar').length === 1 &&
+      collectByRole(scene, 'scale-bar-label').length === 1);
+  // Markers scale with stroke-width and are flattened on import into vector
+  // editors, which is why the head is explicit path geometry.
+  check('arrowheads drawn as geometry, not markers',
+    collectByRole(scene, 'arrow').length === 1 && !svg.includes('<marker'));
+
+  // Cropping must clip an oversized image, never resample it: every retained
+  // pixel keeps the resolution it was captured at.
+  const cropped = editDocument(doc, (draft) =>
+    setImageCrop(draft, imageId, { x: 0.25, width: 0.5 }),
+  );
+  const croppedSvg = toSvgString(
+    renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }),
+  );
+  const imageFrame = cropped.nodes[imageId]!.frame;
+  check('crop clips an oversized image rather than scaling it',
+    croppedSvg.includes('clipPath') && croppedSvg.includes(`width="${imageFrame.width / 0.5}"`));
+
   writeFileSync(`${OUT}figure.svg`, svg);
 
   // -- 5. Quality ----------------------------------------------------------
@@ -234,6 +333,36 @@ async function main(): Promise<void> {
     console.log(`   [${finding.severity}] ${finding.title}`);
   }
   check('no blocking errors', report.findings.every((f) => f.severity !== 'error'));
+
+  // A rule that never fires passes "no blocking errors" just as well as a rule
+  // that works, so prove the two heaviest ones actually judge something. Built
+  // in a throwaway document: firing them in the main one would turn the check
+  // above red for the right reason at the wrong time.
+  const underResolved = editDocument(doc, (draft) => {
+    const image = draft.nodes[imageId]!;
+    // 1000 px across 160 mm is 159 dpi, well under the 300 dpi target.
+    image.frame = { ...image.frame, width: 160 };
+  });
+  const lowDpi = checkFigure({
+    document: underResolved,
+    theme: NATURE_THEME,
+    scene: renderDocument(underResolved, { theme: NATURE_THEME, resolveAsset }),
+    exportDpi: 300,
+  }).findings;
+  check('an under-resolution image is flagged',
+    lowDpi.some((f) => f.id.startsWith('image-low-dpi-') && f.severity === 'error'));
+
+  const uncalibrated = editDocument(doc, (draft) => {
+    const bar = draft.nodes[barId];
+    if (bar?.type === 'scale-bar') bar.calibrationSource = 'unknown';
+  });
+  const barFindings = checkFigure({
+    document: uncalibrated,
+    theme: NATURE_THEME,
+    scene: renderDocument(uncalibrated, { theme: NATURE_THEME, resolveAsset }),
+  }).findings;
+  check('an uncalibrated scale bar is flagged',
+    barFindings.some((f) => f.id.startsWith('scale-bar-uncalibrated-')));
 
   // -- 6. Export -----------------------------------------------------------
   console.log('\n6. Export');
@@ -263,8 +392,13 @@ async function main(): Promise<void> {
   // -- 7. Project round-trip ----------------------------------------------
   console.log('\n7. Project file');
 
+  const assetPath = doc.assets[0]!.path;
   const archive = saveArchive(
-    buildArchiveContents(doc, new Map([[`data/${viability.id}.csv`, VIABILITY]])),
+    buildArchiveContents(
+      doc,
+      new Map([[`data/${viability.id}.csv`, VIABILITY]]),
+      new Map([[assetPath, pngBytes]]),
+    ),
   );
   writeFileSync(`${OUT}figure.figureforge`, archive);
 
@@ -275,6 +409,17 @@ async function main(): Promise<void> {
     stableStringify(reopened.document) === stableStringify(doc));
   check('verbatim source data preserved',
     reopened.dataFiles.get(`data/${viability.id}.csv`) === VIABILITY);
+
+  // The same claim, for binaries: what a reviewer extracts must be the bytes
+  // that were imported, not a re-encoding of them.
+  const reopenedAsset = reopened.assets.get(assetPath);
+  check('image asset preserved byte for byte',
+    reopenedAsset !== undefined &&
+      reopenedAsset.length === pngBytes.length &&
+      reopenedAsset.every((byte, i) => byte === pngBytes[i]),
+    `${reopenedAsset?.length ?? 0} bytes`);
+  check('scale bar calibration survives the round-trip',
+    Math.abs((scaleBarWidthMm(reopened.document.nodes, barId) ?? 0) - EXPECTED_BAR_MM) < 1e-9);
   check('cached p-value preserved',
     reopened.document.analyses[0]?.result?.comparisons[0]?.p === comparison.p);
 
