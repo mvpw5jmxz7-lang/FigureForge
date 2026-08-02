@@ -15,7 +15,9 @@ import {
   inferFormat,
   parseDelimited,
   relabelPanels,
+  type DataFormat,
   type Dataset,
+  type ParseOptions,
   type FigureDocument,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
@@ -32,17 +34,30 @@ KO,2.41,2.68,2.55
 Rescue,1.18,1.09,1.24`;
 
 /** Build a Dataset from pasted or imported delimited text. */
+export interface ImportOptions extends ParseOptions {
+  /**
+   * Override the inferred layout.
+   *
+   * Detection is a heuristic on column shapes and names, and a wrong guess
+   * silently changes what every series *is* — `prism` reads column 0 as one
+   * shared x, `sigmaplot` reads the columns as independent pairs. The author is
+   * the only one who actually knows, so they get the last word.
+   */
+  format?: DataFormat;
+}
+
 export function datasetFromText(
   text: string,
   name: string,
   id: string,
   filename: string | null = null,
+  options: ImportOptions = {},
 ): Dataset {
-  const parsed = parseDelimited(text);
+  const parsed = parseDelimited(text, options);
   return {
     id,
     name,
-    format: inferFormat(parsed.columns),
+    format: options.format ?? inferFormat(parsed.columns),
     columns: parsed.columns,
     rows: parsed.rows,
     sourcePath: `data/${id}.csv`,

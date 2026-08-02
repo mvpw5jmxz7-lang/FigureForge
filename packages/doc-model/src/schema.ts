@@ -69,6 +69,10 @@ const axisSchema = z.object({
   showTicks: z.boolean(),
   showLabels: z.boolean(),
   trimToData: z.boolean(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  minorTicks: z.number().int().min(0).max(20).optional(),
+  tickDirection: z.enum(['out', 'in']).optional(),
+  breaks: z.array(z.object({ from: finite, to: finite })).optional(),
 });
 
 const panelSchema = z.object({
@@ -124,6 +128,12 @@ const plotSchema = z.object({
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   pointsUseSeriesColor: z.boolean().optional(),
   histogramBins: z.number().int().positive().optional(),
+  errorBarDirection: z.enum(['both', 'up']).optional(),
+  pointShape: z.enum(['circle', 'square', 'triangle', 'diamond']).optional(),
+  pointFill: z.string().optional(),
+  pointStroke: strokeSchema.optional(),
+  y2: axisSchema.optional(),
+  seriesAxis: z.array(z.enum(['y', 'y2'])).optional(),
 });
 
 const imageSchema = z.object({
@@ -237,7 +247,9 @@ const cellSchema = z.union([finite, z.string(), z.null()]);
 const datasetSchema = z.object({
   id: z.string(),
   name: z.string(),
-  format: z.enum(['simple-xy', 'prism', 'sigmaplot', 'grouped', 'replicate']),
+  // Loosening an enum is backward-compatible: an older build cannot read a
+  // contingency dataset, but every file it *has* still validates here.
+  format: z.enum(['simple-xy', 'prism', 'sigmaplot', 'grouped', 'replicate', 'contingency']),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
   sourcePath: z.string().nullable(),

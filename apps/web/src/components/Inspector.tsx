@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  POINT_SHAPES,
   childrenOf,
   deleteNode,
   effectiveDpi,
@@ -29,10 +30,12 @@ import {
   updateNode,
   type CalibrationSource,
   type FigureDocument,
+  type AxisSpec,
   type FigureNode,
   type NodeId,
   type PlotNode,
   type PlotType,
+  type PointShape,
   type TextStyle,
 } from '@figureforge/doc-model';
 import { measureAllPlots } from '@figureforge/render';
@@ -372,9 +375,11 @@ function PlotFields({
         </select>
       </label>
 
+      {/* Keyed by index, not name: a paired-xy dataset legitimately repeats a
+          column name, and a duplicate React key drops one of the swatches. */}
       <div className="swatches">
         {series.map((s, index) => (
-          <label className="swatch" key={s.name} title={s.name}>
+          <label className="swatch" key={index} title={s.name}>
             <input
               type="color"
               value={colors[index] ?? '#000000'}
@@ -472,6 +477,27 @@ function PlotFields({
               <option value="median">Median</option>
             </select>
           </label>
+
+          <label className="field block">
+            Error bar direction
+            <select
+              value={node.errorBarDirection ?? 'both'}
+              onChange={(e) =>
+                setPlot('Change error bar direction', {
+                  errorBarDirection: e.target.value as 'both' | 'up',
+                })
+              }
+            >
+              <option value="both">Both directions</option>
+              <option value="up">Upper half only (bar convention)</option>
+            </select>
+          </label>
+          {node.errorBarDirection === 'up' && (
+            <p className="hint">
+              Only the upper half is drawn, so the figure shows half the spread that was
+              measured. Conventional on bar charts, but state it in the legend.
+            </p>
+          )}
         </>
       )}
 
@@ -484,21 +510,353 @@ function PlotFields({
         {node.plotType === 'box' ? 'Overlay all points' : 'Show replicate points'}
       </label>
 
+      <div className="field-row">
+        <label className="field">
+          Marker
+          <select
+            value={node.pointShape ?? 'circle'}
+            onChange={(e) =>
+              setPlot('Change marker shape', { pointShape: e.target.value as PointShape })
+            }
+          >
+            {POINT_SHAPES.map((shape) => (
+              <option key={shape} value={shape}>
+                {shape[0]!.toUpperCase() + shape.slice(1)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          Size (mm)
+          <input
+            type="number"
+            min={0.1}
+            max={5}
+            step={0.1}
+            value={node.pointSizeMm}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) {
+                setPlot('Change marker size', { pointSizeMm: value });
+              }
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="field-row">
+        <label className="field">
+          Marker fill
+          <input
+            type="color"
+            // Blank means "follow the series", which is the existing rule and
+            // what every figure made before this control looked like.
+            value={node.pointFill ?? '#000000'}
+            onChange={(e) => setPlot('Change marker fill', { pointFill: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          Marker border
+          <input
+            type="color"
+            value={node.pointStroke?.color ?? '#000000'}
+            onChange={(e) =>
+              setPlot('Change marker border', {
+                pointStroke: { color: e.target.value, widthMm: node.pointStroke?.widthMm ?? 0.15 },
+              })
+            }
+          />
+        </label>
+      </div>
+      {(node.pointFill !== undefined || node.pointStroke !== undefined) && (
+        <button
+          onClick={() =>
+            setPlot('Reset marker colours', { pointFill: undefined, pointStroke: undefined })
+          }
+        >
+          Follow the series colour
+        </button>
+      )}
+
       <h4>Axes</h4>
+      <AxisFields
+        label="Y"
+        axis={node.y}
+        seriesValues={series.flatMap((s) => s.values)}
+        onChange={(patch, label) => setPlot(label, { y: { ...node.y, ...patch } })}
+      />
+      <AxisFields
+        label="X"
+        axis={node.x}
+        seriesValues={series.flatMap((s) => [...(s.x ?? [])])}
+        numeric={CONTINUOUS_X_PLOT_TYPES.has(node.plotType)}
+        onChange={(patch, label) => setPlot(label, { x: { ...node.x, ...patch } })}
+      />
+
+      <h4>Second y axis</h4>
+      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) ? (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.y2 !== undefined}
+              onChange={(e) =>
+                setPlot('Toggle second y axis', {
+                  y2: e.target.checked ? { ...node.y, title: '' } : undefined,
+                  seriesAxis: e.target.checked ? node.seriesAxis : undefined,
+                })
+              }
+            />
+            Right-hand axis
+          </label>
+          {node.y2 && (
+            <>
+              <AxisFields
+                label="Y2"
+                axis={node.y2}
+                seriesValues={series
+                  .filter((_, i) => node.seriesAxis?.[i] === 'y2')
+                  .flatMap((s) => s.values)}
+                onChange={(patch, label) => setPlot(label, { y2: { ...node.y2!, ...patch } })}
+              />
+              <div className="swatches">
+                {series.map((s, index) => (
+                  <label className="check" key={index}>
+                    <input
+                      type="checkbox"
+                      checked={node.seriesAxis?.[index] === 'y2'}
+                      onChange={(e) => {
+                        const next = series.map(
+                          (_, i) =>
+                            (i === index
+                              ? e.target.checked
+                                ? 'y2'
+                                : 'y'
+                              : (node.seriesAxis?.[i] ?? 'y')) as 'y' | 'y2',
+                        );
+                        setPlot('Assign series axis', { seriesAxis: next });
+                      }}
+                    />
+                    {s.name} on the right
+                  </label>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <p className="hint">
+          A second axis is offered on scatter and line plots only. Two bar series drawn
+          against different scales cannot be compared by length, which is the only thing a
+          bar chart is for.
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * The controls for one axis.
+ *
+ * Every field here was already in the model and honoured by the renderer, with
+ * nothing in the UI referring to it — a log axis, an explicit tick step and a
+ * fixed min/max have all worked since phase 1 and could only be set by hand
+ * editing a saved archive.
+ */
+function AxisFields({
+  label,
+  axis,
+  seriesValues,
+  numeric = true,
+  onChange,
+}: {
+  label: string;
+  axis: AxisSpec;
+  /** Values bound to this axis, for the non-positive warning on a log scale. */
+  seriesValues: readonly number[];
+  /** False for a categorical x axis, which has no numeric bounds to set. */
+  numeric?: boolean;
+  onChange: (patch: Partial<AxisSpec>, undoLabel: string) => void;
+}) {
+  const nonPositive = seriesValues.filter((v) => Number.isFinite(v) && v <= 0).length;
+
+  const numberField = (
+    key: 'min' | 'max' | 'tickStep',
+    text: string,
+  ): React.ReactElement => (
+    <label className="field" key={key}>
+      {text}
+      <input
+        type="number"
+        step="any"
+        // Blank is a real value here — it means "derive from the data" — so an
+        // empty field must clear the bound rather than be ignored.
+        value={axis[key] ?? ''}
+        placeholder="auto"
+        onChange={(e) => {
+          const raw = e.target.value.trim();
+          if (raw === '') return onChange({ [key]: null }, `Clear ${label} ${text}`);
+          const value = Number(raw);
+          if (Number.isFinite(value)) onChange({ [key]: value }, `Change ${label} ${text}`);
+        }}
+      />
+    </label>
+  );
+
+  return (
+    <div className="axis-fields">
       <label className="field block">
-        Y title
+        {label} title
         <input
-          value={node.y.title}
-          onChange={(e) => setPlot('Change y title', { y: { ...node.y, title: e.target.value } })}
+          value={axis.title}
+          onChange={(e) => onChange({ title: e.target.value }, `Change ${label} title`)}
         />
       </label>
-      <label className="field block">
-        X title
-        <input
-          value={node.x.title}
-          onChange={(e) => setPlot('Change x title', { x: { ...node.x, title: e.target.value } })}
-        />
-      </label>
+
+      {numeric && (
+        <>
+          <div className="field-row">
+            <label className="field">
+              Scale
+              <select
+                value={axis.scale}
+                onChange={(e) =>
+                  onChange({ scale: e.target.value as 'linear' | 'log10' }, `Change ${label} scale`)
+                }
+              >
+                <option value="linear">Linear</option>
+                <option value="log10">Log₁₀</option>
+              </select>
+            </label>
+            {numberField('tickStep', 'Tick step')}
+          </div>
+
+          {axis.scale === 'log10' && nonPositive > 0 && (
+            <p className="warning">
+              {nonPositive} value{nonPositive === 1 ? '' : 's'} at or below zero cannot be
+              placed on a log axis. The domain is clamped to a decade below the smallest
+              positive datum, so those points are not drawn.
+            </p>
+          )}
+
+          <div className="field-row">
+            {numberField('min', 'Min')}
+            {numberField('max', 'Max')}
+          </div>
+
+          <div className="field-row">
+            <label className="field">
+              Minor ticks
+              <input
+                type="number"
+                min={0}
+                max={20}
+                step={1}
+                value={axis.minorTicks ?? 0}
+                title="Divisions between major ticks; 0 for none"
+                onChange={(e) => {
+                  const value = Math.max(0, Math.min(20, Math.round(Number(e.target.value) || 0)));
+                  onChange({ minorTicks: value }, `Change ${label} minor ticks`);
+                }}
+              />
+            </label>
+            <label className="field">
+              Ticks
+              <select
+                value={axis.tickDirection ?? 'out'}
+                onChange={(e) =>
+                  onChange(
+                    { tickDirection: e.target.value as 'out' | 'in' },
+                    `Change ${label} tick direction`,
+                  )
+                }
+              >
+                <option value="out">Outwards</option>
+                <option value="in">Inwards</option>
+              </select>
+            </label>
+          </div>
+
+          <AxisBreakFields label={label} axis={axis} onChange={onChange} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Ranges cut out of an axis, with the conventional break marks. */
+function AxisBreakFields({
+  label,
+  axis,
+  onChange,
+}: {
+  label: string;
+  axis: AxisSpec;
+  onChange: (patch: Partial<AxisSpec>, undoLabel: string) => void;
+}) {
+  const breaks = axis.breaks ?? [];
+  const setBreaks = (next: { from: number; to: number }[], undoLabel: string): void =>
+    onChange({ breaks: next.length > 0 ? next : undefined }, undoLabel);
+
+  if (axis.scale === 'log10') {
+    return breaks.length > 0 ? (
+      <p className="hint">
+        Breaks are ignored on a log axis: compressing a range that is already compressed
+        leaves nothing a reader can measure against.
+      </p>
+    ) : null;
+  }
+
+  return (
+    <>
+      {breaks.map((brk, index) => (
+        <div className="field-row" key={index}>
+          <label className="field">
+            Break from
+            <input
+              type="number"
+              step="any"
+              value={brk.from}
+              onChange={(e) =>
+                setBreaks(
+                  breaks.map((b, i) => (i === index ? { ...b, from: Number(e.target.value) } : b)),
+                  `Change ${label} break`,
+                )
+              }
+            />
+          </label>
+          <label className="field">
+            to
+            <input
+              type="number"
+              step="any"
+              value={brk.to}
+              onChange={(e) =>
+                setBreaks(
+                  breaks.map((b, i) => (i === index ? { ...b, to: Number(e.target.value) } : b)),
+                  `Change ${label} break`,
+                )
+              }
+            />
+          </label>
+          <button
+            className="icon danger"
+            title="Remove break"
+            onClick={() => setBreaks(breaks.filter((_, i) => i !== index), `Remove ${label} break`)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button onClick={() => setBreaks([...breaks, { from: 0, to: 1 }], `Add ${label} break`)}>
+        Add axis break
+      </button>
+      {breaks.length > 0 && (
+        <p className="hint">
+          Values inside a break are not drawn at all. A mark pinned to the edge of the gap
+          would be read as data at that value.
+        </p>
+      )}
     </>
   );
 }

@@ -25,6 +25,7 @@ TEST_NAMES = {
     "anova-rm": "repeated-measures ANOVA",
     "kruskal-wallis": "Kruskal-Wallis test",
     "chi-square": "chi-square test of independence",
+    "fisher": "Fisher's exact test",
     "pearson": "Pearson correlation",
     "spearman": "Spearman rank correlation",
     "linear-regression": "ordinary least-squares linear regression",

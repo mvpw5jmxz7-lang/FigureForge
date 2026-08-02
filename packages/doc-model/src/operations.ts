@@ -180,6 +180,19 @@ export function addPlot(
   // opposite: without ticks there is nothing to read a position against.
   plot.x.showTicks = CONTINUOUS_X_PLOT_TYPES.has(plot.plotType);
 
+  /*
+   * A contingency row is a set of category counts, not replicates of one
+   * measurement. Its mean is meaningless and an SEM over it is a standard error
+   * of nothing, so a count table gets plain bars — the alternative is a figure
+   * that draws error bars on frequencies and looks entirely convincing.
+   */
+  if (dataset && dataset.format === 'contingency') {
+    plot.plotType = 'bar';
+    plot.errorBars = 'none';
+    plot.showPoints = false;
+    if (plot.y.title === '') plot.y.title = 'Count';
+  }
+
   draft.nodes[id] = plot;
   return plot;
 }

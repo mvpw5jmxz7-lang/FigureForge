@@ -18,6 +18,7 @@ import {
   scaleBarWidthMm,
   toSeries,
   type ArrowNode,
+  type AxisSpec,
   type BracketNode,
   type FigureDocument,
   type FigureNode,
@@ -539,6 +540,12 @@ export interface ContinuousPlotGeometry extends PlotGeometryBase {
   xScale: NumericScale;
   series: ReturnType<typeof xyMarks>;
   bins: ReturnType<typeof histogramMarks>;
+  /**
+   * Right-hand axis, present only when a plot declares `y2` *and* some series
+   * reads it. Built from those series alone: a second axis whose domain came
+   * from all the data would be a second copy of the first.
+   */
+  y2Scale?: NumericScale;
 }
 
 export type PlotGeometry = CategoricalPlotGeometry | ContinuousPlotGeometry;
@@ -602,6 +609,7 @@ function continuousGeometry(
       rangeMm: [plotHeight, 0],
       tickStep: node.y.tickStep ?? countStep,
       kind: node.y.scale,
+      ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
     });
 
     return {
@@ -631,6 +639,7 @@ function continuousGeometry(
     rangeMm: [0, plotWidth],
     tickStep: node.x.tickStep,
     kind: node.x.scale,
+    ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
   });
 
   const yScale = makeScale({
@@ -644,7 +653,36 @@ function continuousGeometry(
     rangeMm: [plotHeight, 0],
     tickStep: node.y.tickStep,
     kind: node.y.scale,
+    ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
   });
+
+  /*
+   * The secondary axis is offered on continuous plots only. On a categorical
+   * plot the bands, not the values, carry the reading, and two bar series drawn
+   * against different scales in one band group cannot be compared by length —
+   * which is the only thing a bar chart is for. Withheld rather than
+   * approximated, and the Inspector says so.
+   */
+  const axisFor = node.seriesAxis ?? [];
+  const usesY2 = node.y2 !== undefined && series.some((_, i) => axisFor[i] === 'y2');
+  const y2Scale = usesY2
+    ? makeScale({
+        domain: resolveDomain(
+          series.filter((_, i) => axisFor[i] === 'y2').flatMap((s) => s.values),
+          {
+            min: node.y2!.min,
+            max: node.y2!.max,
+            includeZero: false,
+            padFraction: 0.08,
+            kind: node.y2!.scale,
+          },
+        ),
+        rangeMm: [plotHeight, 0],
+        tickStep: node.y2!.tickStep,
+        kind: node.y2!.scale,
+        ...(node.y2!.breaks ? { breaks: node.y2!.breaks } : {}),
+      })
+    : undefined;
 
   return {
     kind: 'continuous',
@@ -653,9 +691,13 @@ function continuousGeometry(
     plotHeight,
     xScale,
     yScale,
+    ...(y2Scale ? { y2Scale } : {}),
     series: xyMarks(series, {
       x: xScale,
       y: yScale,
+      ...(y2Scale
+        ? { ySeries: series.map((_, i) => (axisFor[i] === 'y2' ? y2Scale : undefined)) }
+        : {}),
       showLine: node.plotType === 'line',
       // A line plot hides its points by default; a scatter is nothing but points.
       showPoints: node.plotType === 'scatter' || node.showPoints,
@@ -698,6 +740,7 @@ function geometryForMargin(
     rangeMm: [plotHeight, 0],
     tickStep: node.y.tickStep,
     kind: node.y.scale,
+    ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
   });
 
   const band = makeBandScale(series.map((s) => s.name), [0, plotWidth]);
@@ -707,6 +750,9 @@ function geometryForMargin(
     y: yScale,
     center: node.center,
     errorBars: node.errorBars,
+    // Absent means both directions: the field post-dates every saved figure,
+    // and half a whisker is not a sane default to inherit.
+    errorBarDirection: node.errorBarDirection ?? 'both',
     barWidthFraction: node.barWidthFraction,
     showBar: node.plotType === 'bar' || node.plotType === 'bar-dot',
     showBox: node.plotType === 'box',
@@ -745,20 +791,46 @@ function requiredMargin(
   node: PlotNode,
   theme: Theme,
   geometry: PlotGeometry,
-): { left: number; bottom: number } {
+): { left: number; bottom: number; right: number } {
   const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
+
+  // An inward tick takes no gutter at all, so it must not reserve any.
+  const yTickGutter =
+    node.y.showTicks && node.y.tickDirection !== 'in' ? theme.spacing.tickLengthMm : 0;
+  const xTickGutter =
+    node.x.showTicks && node.x.tickDirection !== 'in' ? theme.spacing.tickLengthMm : 0;
 
   const yLabels = node.y.showLabels ? yTickLayout(node, theme, geometry).maxLabelWidth : 0;
   const left =
-    (node.y.showTicks ? theme.spacing.tickLengthMm : 0) +
+    yTickGutter +
     (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
     (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
 
   const bottom =
-    (node.x.showTicks ? theme.spacing.tickLengthMm : 0) +
+    xTickGutter +
     theme.spacing.tickLabelGapMm +
     xLabelLayout(node, theme, geometry).depth +
     (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+
+  // A secondary axis puts the same furniture on the right, where the theme
+  // reserves 2 mm — enough for a label overhanging the last x tick and nothing
+  // more.
+  let right = theme.spacing.plotMarginMm.right;
+  if (geometry.kind === 'continuous' && geometry.y2Scale && node.y2) {
+    const spec = node.y2;
+    const labels = spec.showLabels
+      ? geometry.y2Scale.ticks.reduce(
+          (max, t) => Math.max(max, estimateTextWidthMm(geometry.y2Scale!.format(t), theme.type.tickLabelPt)),
+          0,
+        )
+      : 0;
+    right = Math.max(
+      right,
+      (spec.showTicks && spec.tickDirection !== 'in' ? theme.spacing.tickLengthMm : 0) +
+        (spec.showLabels ? theme.spacing.tickLabelGapMm + labels : 0) +
+        (spec.title ? theme.spacing.axisTitleGapMm + titleHeight : 0),
+    );
+  }
 
   // Never take so much that nothing is left to plot in: on a panel too small
   // for its own labels, a crowded axis still reads where a zero-height plot
@@ -766,6 +838,7 @@ function requiredMargin(
   return {
     left: Math.min(left, node.frame.width * 0.6),
     bottom: Math.min(bottom, node.frame.height * 0.6),
+    right: Math.min(right, node.frame.width * 0.3),
   };
 }
 
@@ -793,7 +866,11 @@ function computePlotGeometry(
    * what keeps the canvas and the exporter agreeing.
    */
   const needed = requiredMargin(node, theme, first);
-  if (needed.left <= themeMargin.left + 0.01 && needed.bottom <= themeMargin.bottom + 0.01) {
+  if (
+    needed.left <= themeMargin.left + 0.01 &&
+    needed.bottom <= themeMargin.bottom + 0.01 &&
+    needed.right <= themeMargin.right + 0.01
+  ) {
     return first;
   }
 
@@ -801,6 +878,7 @@ function computePlotGeometry(
     ...themeMargin,
     left: Math.max(themeMargin.left, needed.left),
     bottom: Math.max(themeMargin.bottom, needed.bottom),
+    right: Math.max(themeMargin.right, needed.right),
   };
   return geometryForMargin(node, series, grown) ?? first;
 }
@@ -902,6 +980,9 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       [
         ...renderAxes(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry),
+        // Break marks last: the gap is painted in the page colour, so it has to
+        // land over the marks it interrupts rather than under them.
+        ...renderAxisBreaks(node, theme, geometry),
       ],
       { role: 'plot-area' },
     );
@@ -990,13 +1071,13 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
     if (mark.errorBar) {
       const eb = mark.errorBar;
-      const lower = eb.lowerInsideBar ? mark.centerMm : eb.bottomMm;
+      const lower = eb.upperOnly ? mark.centerMm : eb.bottomMm;
       markChildren.push(
         el('path', {
           d:
             `M${round(eb.x - eb.capHalfWidthMm)} ${round(eb.topMm)} L${round(eb.x + eb.capHalfWidthMm)} ${round(eb.topMm)} ` +
             `M${round(eb.x)} ${round(eb.topMm)} L${round(eb.x)} ${round(lower)}` +
-            (eb.lowerInsideBar
+            (eb.upperOnly
               ? ''
               : ` M${round(eb.x - eb.capHalfWidthMm)} ${round(eb.bottomMm)} L${round(eb.x + eb.capHalfWidthMm)} ${round(eb.bottomMm)}`),
           fill: 'none',
@@ -1009,33 +1090,27 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
     for (const point of mark.points) {
       markChildren.push(
-        el('circle', {
-          cx: point.x,
-          cy: point.y,
-          r: node.pointSizeMm / 2,
+        markerNode(node, theme, point.x, point.y, {
           // Dark points over a coloured bar by default — conventional and
           // legible, but it means recolouring a series leaves the dots alone,
           // so the plot can opt into series-coloured points instead.
-          fill: mark.bar && !node.pointsUseSeriesColor ? theme.foreground : mark.color,
-          'fill-opacity': mark.bar ? 0.85 : 1,
-          stroke: 'none',
-        }, undefined, { role: 'point' }),
+          fill:
+            node.pointFill ??
+            (mark.bar && !node.pointsUseSeriesColor ? theme.foreground : mark.color),
+          fillOpacity: mark.bar ? 0.85 : 1,
+        }),
       );
     }
 
     for (const outlier of mark.outliers) {
-      markChildren.push(
-        el('circle', {
-          cx: outlier.x,
-          cy: outlier.y,
-          r: node.pointSizeMm / 2,
-          // Hollow, so an outlier is never mistaken for a plotted data point in
-          // a box-plus-points figure.
-          fill: 'none',
-          stroke: theme.foreground,
-          'stroke-width': theme.stroke.hairlineMinMm,
-        }, undefined, { role: 'outlier' }),
-      );
+      const hollow = markerNode(node, theme, outlier.x, outlier.y, {
+        // Hollow, so an outlier is never mistaken for a plotted data point in
+        // a box-plus-points figure. The outline is forced rather than taken
+        // from `pointStroke`: without one the marker would not be there at all.
+        fill: 'none',
+        forceStroke: { color: theme.foreground, widthMm: theme.stroke.hairlineMinMm },
+      });
+      markChildren.push({ ...hollow, role: 'outlier' });
     }
 
     content.push(group({}, markChildren));
@@ -1043,9 +1118,79 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
   const axes = renderAxes(node, theme, geometry);
 
-  return group({ transform: translate(margin.left, margin.top) }, [...axes, ...content], {
-    role: 'plot-area',
-  });
+  return group(
+    { transform: translate(margin.left, margin.top) },
+    [...axes, ...content, ...renderAxisBreaks(node, theme, geometry)],
+    { role: 'plot-area' },
+  );
+}
+
+/**
+ * One replicate marker.
+ *
+ * Points were always circles. Shape carries a series identity that survives
+ * greyscale printing and colour-blind readers, which is exactly the population
+ * the palette validator already worries about — so it is worth having, and it
+ * belongs in one place rather than at each of the three call sites that draw a
+ * point.
+ */
+function markerNode(
+  node: PlotNode,
+  theme: Theme,
+  cx: number,
+  cy: number,
+  style: { fill: string; fillOpacity?: number; forceStroke?: { color: string; widthMm: number } },
+): SceneNode {
+  const r = node.pointSizeMm / 2;
+  const stroke = style.forceStroke ?? node.pointStroke;
+  const strokeAttrs = stroke
+    ? { stroke: stroke.color, 'stroke-width': stroke.widthMm }
+    : { stroke: 'none' };
+  const common = {
+    fill: style.fill,
+    ...(style.fillOpacity !== undefined ? { 'fill-opacity': style.fillOpacity } : {}),
+    ...strokeAttrs,
+  };
+
+  switch (node.pointShape ?? 'circle') {
+    case 'square': {
+      // Every shape is matched on *area* to the circle of the same nominal
+      // size, so switching shape does not silently change how heavy a series
+      // looks on the page.
+      const side = r * Math.sqrt(Math.PI);
+      return el(
+        'rect',
+        {
+          x: round(cx - side / 2),
+          y: round(cy - side / 2),
+          width: round(side),
+          height: round(side),
+          ...common,
+        },
+        undefined,
+        { role: 'point' },
+      );
+    }
+    case 'triangle': {
+      // Equilateral, centroid on the point, area matched to the circle.
+      const side = r * Math.sqrt((4 * Math.PI) / Math.sqrt(3));
+      const height = (side * Math.sqrt(3)) / 2;
+      const d =
+        `M${round(cx)} ${round(cy - (2 / 3) * height)} ` +
+        `L${round(cx + side / 2)} ${round(cy + height / 3)} ` +
+        `L${round(cx - side / 2)} ${round(cy + height / 3)} Z`;
+      return el('path', { d, ...common }, undefined, { role: 'point' });
+    }
+    case 'diamond': {
+      const half = r * Math.sqrt(Math.PI / 2);
+      const d =
+        `M${round(cx)} ${round(cy - half)} L${round(cx + half)} ${round(cy)} ` +
+        `L${round(cx)} ${round(cy + half)} L${round(cx - half)} ${round(cy)} Z`;
+      return el('path', { d, ...common }, undefined, { role: 'point' });
+    }
+    default:
+      return el('circle', { cx, cy, r, ...common }, undefined, { role: 'point' });
+  }
 }
 
 /** Scatter points, line paths and histogram bars. */
@@ -1090,13 +1235,7 @@ function renderContinuousMarks(
 
     for (const point of s.points) {
       markChildren.push(
-        el('circle', {
-          cx: point.x,
-          cy: point.y,
-          r: node.pointSizeMm / 2,
-          fill: s.color,
-          stroke: 'none',
-        }, undefined, { role: 'point' }),
+        markerNode(node, theme, point.x, point.y, { fill: node.pointFill ?? s.color }),
       );
     }
 
@@ -1115,6 +1254,171 @@ function renderContinuousMarks(
  * overlapping in the export, which is precisely the divergence the DOM-free
  * invariant exists to prevent.
  */
+/**
+ * The conventional break marks: two short parallel zig-zags across the axis,
+ * with the gap between them painted in the page colour so the axis line, and
+ * any bar crossing it, is visibly interrupted rather than merely covered.
+ */
+function breakMarks(
+  scale: NumericScale,
+  theme: Theme,
+  axis: 'y' | 'x',
+  across: number,
+): SceneNode[] {
+  const out: SceneNode[] = [];
+  const stroke = {
+    stroke: theme.foreground,
+    'stroke-width': theme.stroke.axisMm,
+    fill: 'none',
+    'stroke-linejoin': 'round',
+  };
+  const zig = 1.1;
+
+  for (const gap of scale.breaks ?? []) {
+    const lo = Math.min(gap.startMm, gap.endMm);
+    const hi = Math.max(gap.startMm, gap.endMm);
+
+    if (axis === 'y') {
+      out.push(
+        el('rect', { x: -theme.spacing.tickLengthMm, y: round(lo), width: round(across + theme.spacing.tickLengthMm), height: round(hi - lo), fill: theme.background, stroke: 'none' }),
+      );
+      for (const y of [lo, hi]) {
+        out.push(
+          el('path', {
+            d: `M${round(-theme.spacing.tickLengthMm)} ${round(y + zig / 2)} L${round(zig)} ${round(y - zig / 2)}`,
+            ...stroke,
+          }, undefined, { role: 'axis-break' }),
+        );
+      }
+    } else {
+      out.push(
+        el('rect', { x: round(lo), y: 0, width: round(hi - lo), height: round(across + theme.spacing.tickLengthMm), fill: theme.background, stroke: 'none' }),
+      );
+      for (const x of [lo, hi]) {
+        out.push(
+          el('path', {
+            d: `M${round(x - zig / 2)} ${round(across + theme.spacing.tickLengthMm)} L${round(x + zig / 2)} ${round(across - zig)}`,
+            ...stroke,
+          }, undefined, { role: 'axis-break' }),
+        );
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The right-hand axis: the same furniture as the left, mirrored.
+ *
+ * Its ticks and labels sit outside the plot on the right, so `requiredMargin`
+ * grows `margin.right` to hold them — the theme reserves only 2 mm there,
+ * which is enough for a label overhanging the last x tick and nothing else.
+ */
+function renderSecondaryAxis(
+  node: PlotNode,
+  theme: Theme,
+  scale: NumericScale,
+  plotWidth: number,
+  plotHeight: number,
+): SceneNode[] {
+  const spec = node.y2!;
+  const out: SceneNode[] = [];
+  const tickLen = theme.spacing.tickLengthMm;
+  const tickLabelPt = theme.type.tickLabelPt;
+  const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
+
+  if (spec.showLine) {
+    out.push(
+      el('path', { d: `M${round(plotWidth)} 0 L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
+    );
+  }
+
+  const visible = scale.ticks.filter((t) => {
+    const y = scale.scale(t);
+    return Number.isFinite(y) && y >= -0.01 && y <= plotHeight + 0.01;
+  });
+
+  let widest = 0;
+  for (const tick of visible) {
+    const y = scale.scale(tick);
+    if (spec.showTicks) {
+      out.push(
+        el('path', { d: `M${round(plotWidth)} ${round(y)} L${round(plotWidth + tickOffset(spec, tickLen))} ${round(y)}`, ...axisStroke }, undefined, { role: 'tick' }),
+      );
+    }
+    if (spec.showLabels) {
+      const label = scale.format(tick);
+      widest = Math.max(widest, estimateTextWidthMm(label, tickLabelPt));
+      out.push(
+        text(label, {
+          x: plotWidth + tickLen + theme.spacing.tickLabelGapMm,
+          y,
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(tickLabelPt),
+          fill: theme.foreground,
+          'text-anchor': 'start',
+          'dominant-baseline': 'central',
+        }, { role: 'tick-label' }),
+      );
+    }
+  }
+
+  if (spec.title) {
+    const x = plotWidth + tickLen + theme.spacing.tickLabelGapMm + widest + theme.spacing.axisTitleGapMm;
+    out.push(
+      text(spec.title, {
+        x: 0,
+        y: 0,
+        // Rotated the other way from the left title, so it reads from the
+        // outside of the page rather than upside down against it.
+        transform: `translate(${round(x)} ${round(plotHeight / 2)}) rotate(90)`,
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(theme.type.axisTitlePt),
+        fill: theme.foreground,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'alphabetic',
+      }, { role: 'axis-title' }),
+    );
+  }
+
+  return out;
+}
+
+/** Break marks for whichever of a plot's axes carry them. */
+function renderAxisBreaks(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
+  const out = breakMarks(geometry.yScale, theme, 'y', geometry.plotWidth);
+  if (geometry.kind === 'continuous') {
+    out.push(...breakMarks(geometry.xScale, theme, 'x', geometry.plotHeight));
+  }
+  return out;
+}
+
+/**
+ * Signed tick length. Positive points away from the plot, which is how most
+ * journals draw them; `tickDirection: 'in'` reverses it, and the label offsets
+ * stay outside either way so an inward tick never pushes text into the data.
+ */
+function tickOffset(axis: AxisSpec, tickLen: number): number {
+  return axis.tickDirection === 'in' ? -tickLen : tickLen;
+}
+
+/**
+ * Values between the major ticks, for the minor divisions.
+ *
+ * Derived from the majors rather than from the domain, so they line up with the
+ * grid the reader is already using and cannot drift out of phase with it.
+ */
+function minorTickValues(majors: readonly number[], divisions: number | undefined): number[] {
+  if (!divisions || divisions < 2 || majors.length < 2) return [];
+  const out: number[] = [];
+  for (let i = 1; i < majors.length; i++) {
+    const from = majors[i - 1]!;
+    const step = (majors[i]! - from) / divisions;
+    for (let k = 1; k < divisions; k++) out.push(from + step * k);
+  }
+  return out;
+}
+
 function renderNumericXTicks(
   node: PlotNode,
   theme: Theme,
@@ -1139,13 +1443,27 @@ function renderNumericXTicks(
   const maxLabels = widest > 0 ? Math.max(2, Math.floor(plotWidth / (widest * 1.25))) : visible.length;
   const stride = visible.length > maxLabels ? Math.ceil(visible.length / maxLabels) : 1;
 
+  if (node.x.showTicks) {
+    // Minor ticks first, so a major tick is never drawn over by one.
+    for (const value of minorTickValues(visible, node.x.minorTicks)) {
+      const x = xScale.scale(value);
+      if (x < -0.01 || x > plotWidth + 0.01) continue;
+      out.push(
+        el('path', {
+          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(node.x, tickLen) * 0.55)}`,
+          ...axisStroke,
+        }, undefined, { role: 'tick' }),
+      );
+    }
+  }
+
   visible.forEach((tick, index) => {
     const x = xScale.scale(tick);
 
     if (node.x.showTicks) {
       out.push(
         el('path', {
-          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickLen)}`,
+          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(node.x, tickLen))}`,
           ...axisStroke,
         }, undefined, { role: 'tick' }),
       );
@@ -1306,6 +1624,16 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
     geometry,
   );
 
+  if (node.y.showTicks) {
+    for (const value of minorTickValues(visibleTicks, node.y.minorTicks)) {
+      const y = yScale.scale(value);
+      if (y < -0.01 || y > plotHeight + 0.01) continue;
+      out.push(
+        el('path', { d: `M${round(-tickOffset(node.y, tickLen) * 0.55)} ${round(y)} L0 ${round(y)}`, ...axisStroke }, undefined, { role: 'tick' }),
+      );
+    }
+  }
+
   if (node.y.showTicks || node.y.showLabels) {
     visibleTicks.forEach((tick, index) => {
       const y = yScale.scale(tick);
@@ -1314,7 +1642,7 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
 
       if (node.y.showTicks) {
         out.push(
-          el('path', { d: `M${round(-tickLen)} ${round(y)} L0 ${round(y)}`, ...axisStroke }, undefined, { role: 'tick' }),
+          el('path', { d: `M${round(-tickOffset(node.y, tickLen))} ${round(y)} L0 ${round(y)}`, ...axisStroke }, undefined, { role: 'tick' }),
         );
       }
       if (node.y.showLabels && labelled) {
@@ -1356,6 +1684,11 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
         'dominant-baseline': 'alphabetic',
       }, { role: 'axis-title' }),
     );
+  }
+
+  // --- secondary y axis ----------------------------------------------------
+  if (geometry.kind === 'continuous' && geometry.y2Scale && node.y2) {
+    out.push(...renderSecondaryAxis(node, theme, geometry.y2Scale, plotWidth, plotHeight));
   }
 
   // --- x axis --------------------------------------------------------------
