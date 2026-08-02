@@ -381,7 +381,7 @@ function DataTab({
         />
       </label>
 
-      <ul className="list">
+      <ul className="list assets">
         {doc.assets.map((asset) => {
           const uses = imagesUsingAsset(doc.nodes, asset.id);
           const widest = Math.max(0, ...uses.map((image) => image.frame.width));

@@ -10,13 +10,23 @@
 
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  childrenOf,
   deleteNode,
+  effectiveDpi,
+  findAsset,
   findDataset,
   formatMm,
+  normaliseArrowFrame,
   repositionBrackets,
   resizePanel,
+  resyncScaleBars,
+  scaleBarWidthMm,
+  setImageCrop,
+  setScaleBarCalibration,
   toSeries,
+  ungroup,
   updateNode,
+  type CalibrationSource,
   type FigureDocument,
   type FigureNode,
   type NodeId,
@@ -28,14 +38,7 @@ import { measureAllPlots } from '@figureforge/render';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
-/**
- * Only the plot types that actually render distinctly.
- *
- * `PlotType` also declares scatter, line and histogram; those pass the type
- * system but fall through to the categorical dot path, so offering them here
- * would ship a control that produces plausible-looking wrong output. They need a
- * numeric x axis, which does not exist yet — add them as each one lands.
- */
+/** Every plot type. All nine render distinctly since phase 3. */
 const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'bar', label: 'Bar' },
   { id: 'dot', label: 'Dot' },
@@ -171,6 +174,26 @@ export function InspectorTab({ api, theme, selectedIds, onSelectionChange }: Ins
         </label>
       )}
       {node.type === 'panel' && <PanelFields api={api} node={node} />}
+      {node.type === 'image' && <ImageFields api={api} node={node} doc={doc} theme={theme} />}
+      {node.type === 'scale-bar' && <ScaleBarFields api={api} node={node} doc={doc} />}
+      {node.type === 'arrow' && <ArrowFields api={api} node={node} />}
+      {node.type === 'shape' && <ShapeFields api={api} node={node} />}
+      {node.type === 'group' && (
+        <>
+          <p className="hint">
+            {childrenOf(doc.nodes, node.id).length} items. Clicking on the canvas still selects the
+            individual item, not the group — use the Layers list to select this.
+          </p>
+          <button
+            onClick={() => {
+              commit('Ungroup', (draft) => ungroup(draft, node.id));
+              onSelectionChange([]);
+            }}
+          >
+            Ungroup
+          </button>
+        </>
+      )}
 
       <h4>Position and size</h4>
       <div className="field-row">
@@ -497,6 +520,469 @@ function TextFields({
         />
         Bold
       </label>
+    </>
+  );
+}
+
+/** Crop is stored 0–1; nobody thinks in 0.317, so the UI works in percent. */
+const CROP_KEYS = ['x', 'y', 'width', 'height'] as const;
+
+function ImageFields({
+  api,
+  node,
+  doc,
+  theme,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'image' }>;
+  doc: FigureDocument;
+  theme: Theme;
+}) {
+  const { commit } = api;
+  const asset = findAsset(doc, node.assetId);
+  const isVector = asset?.mimeType === 'image/svg+xml';
+
+  const visiblePx = node.naturalPx.width * (node.crop.width || 1);
+  const dpi = node.frame.width > 0 ? effectiveDpi(visiblePx, node.frame.width) : 0;
+
+  return (
+    <>
+      <p className="hint">
+        {asset ? asset.filename : 'asset missing'}
+        {asset && !isVector && ` · ${node.naturalPx.width}×${node.naturalPx.height} px`}
+      </p>
+
+      {!isVector && node.naturalPx.width > 0 && (
+        <p className={dpi < 300 ? 'warning' : 'hint'}>
+          {/* Live, because the number changes with every resize and crop —
+              which is exactly when the author needs to see it. */}
+          {Math.round(dpi)} dpi at this size
+          {dpi < 300 && ` · below the 300 dpi most journals require`}
+        </p>
+      )}
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={node.preserveAspect}
+          onChange={(e) =>
+            commit('Toggle aspect lock', (draft) =>
+              updateNode<typeof node>(draft, node.id, { preserveAspect: e.target.checked }),
+            )
+          }
+        />
+        Keep aspect ratio
+      </label>
+
+      <h4>Crop</h4>
+      <p className="hint">Percent of the source image. Cropping keeps full resolution.</p>
+      <div className="field-row">
+        {CROP_KEYS.map((key) => (
+          <label className="field" key={key}>
+            {key}
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={Number((node.crop[key] * 100).toFixed(1))}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (!Number.isFinite(value)) return;
+                commit('Change crop', (draft) => {
+                  // Routed through setImageCrop so the clamp and the scale-bar
+                  // resync happen here exactly as they do for a drag.
+                  setImageCrop(draft, node.id, { [key]: value / 100 });
+                });
+              }}
+            />
+          </label>
+        ))}
+      </div>
+
+      <button
+        onClick={() =>
+          commit('Reset crop', (draft) =>
+            setImageCrop(draft, node.id, { x: 0, y: 0, width: 1, height: 1 }),
+          )
+        }
+      >
+        Reset crop
+      </button>
+
+      {node.naturalPx.height > 0 && (
+        <button
+          onClick={() =>
+            commit('Fit to aspect', (draft) => {
+              const target = draft.nodes[node.id];
+              if (target?.type !== 'image') return;
+              // Height follows width, so the visible crop is drawn at its true
+              // proportions instead of letterboxed inside a mismatched frame.
+              const aspect =
+                (target.naturalPx.width * target.crop.width) /
+                (target.naturalPx.height * target.crop.height);
+              target.frame = { ...target.frame, height: target.frame.width / aspect };
+              resyncScaleBars(draft);
+              repositionBrackets(draft, measureAllPlots(draft, theme));
+            })
+          }
+        >
+          Fit frame to image
+        </button>
+      )}
+    </>
+  );
+}
+
+/** Sub-millimetre units a micrograph is actually calibrated in. */
+const CALIBRATION_UNITS: { label: string; perMicron: number }[] = [
+  { label: 'nm', perMicron: 1000 },
+  { label: 'µm', perMicron: 1 },
+  { label: 'mm', perMicron: 0.001 },
+];
+
+const CALIBRATION_WORDING: Record<CalibrationSource, string> = {
+  metadata: 'Read from the image file.',
+  manual: 'You entered this.',
+  measured: 'Measured from a known feature.',
+  unknown: 'Not calibrated — this bar states a length nothing supports.',
+};
+
+function ScaleBarFields({
+  api,
+  node,
+  doc,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'scale-bar' }>;
+  doc: FigureDocument;
+}) {
+  const { commit } = api;
+  const source = node.calibrationSource ?? 'unknown';
+  const drawnMm = scaleBarWidthMm(doc.nodes, node.id);
+
+  const setBar = (label: string, patch: Partial<typeof node>): void => {
+    commit(label, (draft) => {
+      updateNode(draft, node.id, patch);
+      resyncScaleBars(draft);
+    });
+  };
+
+  // Nobody holds the calibration as "pixels per unit" — they have µm per pixel
+  // off the microscope. Present it the way the number arrives; the model keeps
+  // its own form.
+  const unitPerPixel = node.pixelsPerUnit > 0 ? 1 / node.pixelsPerUnit : 0;
+
+  return (
+    <>
+      <p className={source === 'unknown' ? 'warning' : 'hint'}>{CALIBRATION_WORDING[source]}</p>
+
+      <h4>Bar</h4>
+      <div className="field-row">
+        <label className="field">
+          Length
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={node.length}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) setBar('Change bar length', { length: value });
+            }}
+          />
+        </label>
+        <label className="field">
+          Unit
+          <select
+            value={node.unitLabel}
+            onChange={(e) => setBar('Change bar unit', { unitLabel: e.target.value })}
+          >
+            {CALIBRATION_UNITS.map((unit) => (
+              <option key={unit.label} value={unit.label}>
+                {unit.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <h4>Image scale</h4>
+      <label className="field block">
+        {node.unitLabel} per pixel
+        <input
+          type="number"
+          min={0}
+          step={0.001}
+          value={Number(unitPerPixel.toFixed(6))}
+          onChange={(e) => {
+            const value = Number(e.target.value);
+            if (!Number.isFinite(value) || value <= 0) return;
+            commit('Set image scale', (draft) =>
+              // Typing a number is a claim that it is right, so the provenance
+              // moves with it. Leaving it 'unknown' would keep the quality
+              // checker complaining about a bar the author has just calibrated.
+              setScaleBarCalibration(draft, node.id, 1 / value, 'manual'),
+            );
+          }}
+        />
+      </label>
+      <p className="hint">
+        {node.pixelsPerUnit.toFixed(4)} px per {node.unitLabel}
+        {drawnMm !== null && ` · bar draws ${drawnMm.toFixed(2)} mm`}
+      </p>
+
+      <h4>Appearance</h4>
+      <div className="field-row">
+        <label className="field">
+          Label
+          <select
+            value={node.labelPosition}
+            onChange={(e) => {
+              const labelPosition = e.target.value as 'above' | 'below' | 'none';
+              // showLabel is deprecated but still required by the schema, so
+              // it is kept in step rather than left to contradict this.
+              setBar('Change label position', { labelPosition, showLabel: labelPosition !== 'none' });
+            }}
+          >
+            <option value="above">Above</option>
+            <option value="below">Below</option>
+            <option value="none">Hidden</option>
+          </select>
+        </label>
+        <label className="field">
+          Colour
+          <input
+            type="color"
+            value={node.fill.color}
+            onChange={(e) => setBar('Change bar colour', { fill: { color: e.target.value } })}
+          />
+        </label>
+        <label className="field">
+          Thickness
+          <input
+            type="number"
+            min={0.1}
+            step={0.1}
+            value={node.barHeightMm}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) {
+                setBar('Change bar thickness', { barHeightMm: value });
+              }
+            }}
+          />
+        </label>
+      </div>
+    </>
+  );
+}
+
+const END_STYLES = [
+  { id: 'none', label: 'None' },
+  { id: 'triangle', label: 'Solid' },
+  { id: 'open', label: 'Open' },
+] as const;
+
+function ArrowFields({
+  api,
+  node,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'arrow' }>;
+}) {
+  const { commit } = api;
+
+  const setArrow = (label: string, patch: Partial<typeof node>): void => {
+    commit(label, (draft) => updateNode(draft, node.id, patch));
+  };
+
+  return (
+    <>
+      <p className="hint">Drag the round grips on the canvas to aim it.</p>
+
+      <div className="field-row">
+        <label className="field">
+          Head
+          <select
+            value={node.head}
+            onChange={(e) => setArrow('Change arrowhead', { head: e.target.value as typeof node.head })}
+          >
+            {END_STYLES.map((style) => (
+              <option key={style.id} value={style.id}>
+                {style.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          Tail
+          <select
+            value={node.tail}
+            onChange={(e) => setArrow('Change arrow tail', { tail: e.target.value as typeof node.tail })}
+          >
+            {END_STYLES.map((style) => (
+              <option key={style.id} value={style.id}>
+                {style.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          Head size
+          <input
+            type="number"
+            min={0.2}
+            step={0.2}
+            value={node.headSizeMm}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) setArrow('Change head size', { headSizeMm: value });
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="field-row">
+        <label className="field">
+          Colour
+          <input
+            type="color"
+            value={node.stroke.color}
+            onChange={(e) =>
+              setArrow('Change arrow colour', { stroke: { ...node.stroke, color: e.target.value } })
+            }
+          />
+        </label>
+        <label className="field">
+          Width
+          <input
+            type="number"
+            min={0.05}
+            step={0.05}
+            value={node.stroke.widthMm}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) {
+                setArrow('Change arrow width', { stroke: { ...node.stroke, widthMm: value } });
+              }
+            }}
+          />
+        </label>
+      </div>
+
+      <button
+        onClick={() =>
+          commit('Add arrow point', (draft) => {
+            const target = draft.nodes[node.id];
+            if (target?.type !== 'arrow') return;
+            const last = target.points[target.points.length - 1]!;
+            const previous = target.points[target.points.length - 2] ?? last;
+            // Extend along the current heading, so the new segment continues
+            // the arrow rather than doubling back on it.
+            target.points = [
+              ...target.points,
+              { x: last.x + (last.x - previous.x || 5), y: last.y + (last.y - previous.y || 0) },
+            ];
+            normaliseArrowFrame(draft, node.id);
+          })
+        }
+      >
+        Add a bend
+      </button>
+    </>
+  );
+}
+
+function ShapeFields({
+  api,
+  node,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'shape' }>;
+}) {
+  const { commit } = api;
+
+  const setShape = (label: string, patch: Partial<typeof node>): void => {
+    commit(label, (draft) => updateNode(draft, node.id, patch));
+  };
+
+  return (
+    <>
+      <label className="field block">
+        Shape
+        <select
+          value={node.shape}
+          onChange={(e) => setShape('Change shape', { shape: e.target.value as typeof node.shape })}
+        >
+          <option value="rect">Rectangle</option>
+          <option value="ellipse">Ellipse</option>
+          <option value="line">Line</option>
+        </select>
+      </label>
+
+      <div className="field-row">
+        <label className="field">
+          Stroke
+          <input
+            type="color"
+            value={node.stroke?.color ?? '#000000'}
+            onChange={(e) =>
+              setShape('Change stroke colour', {
+                stroke: { widthMm: 0.35, ...node.stroke, color: e.target.value },
+              })
+            }
+          />
+        </label>
+        <label className="field">
+          Width
+          <input
+            type="number"
+            min={0.05}
+            step={0.05}
+            value={node.stroke?.widthMm ?? 0.35}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) {
+                setShape('Change stroke width', {
+                  stroke: { color: '#000000', ...node.stroke, widthMm: value },
+                });
+              }
+            }}
+          />
+        </label>
+        {node.shape === 'rect' && (
+          <label className="field">
+            Corner
+            <input
+              type="number"
+              min={0}
+              step={0.2}
+              value={node.cornerRadiusMm ?? 0}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value >= 0) {
+                  setShape('Change corner radius', { cornerRadiusMm: value });
+                }
+              }}
+            />
+          </label>
+        )}
+      </div>
+
+      <div className="field-row">
+        <label className="field">
+          Fill
+          <input
+            type="color"
+            value={node.fill?.color ?? '#ffffff'}
+            onChange={(e) => setShape('Change fill', { fill: { color: e.target.value } })}
+          />
+        </label>
+        <button onClick={() => setShape(node.fill ? 'Clear fill' : 'Restore fill', { fill: null })}>
+          No fill
+        </button>
+      </div>
     </>
   );
 }

@@ -235,6 +235,7 @@ export function App() {
         api={api}
         theme={theme}
         selectedIds={selectedIds}
+        onSelectionChange={setSelectedIds}
         zoom={zoom}
         onZoomChange={setZoom}
         onFit={() => setZoom(fitZoom(api.document.page.widthMm))}

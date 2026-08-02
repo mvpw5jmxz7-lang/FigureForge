@@ -13,8 +13,11 @@ import {
   isEffectivelyLocked,
   recordBracketOffset,
   repositionBrackets,
+  rescaleArrowPoints,
   resizeFrame,
   resizePanel,
+  resyncScaleBars,
+  setArrowPoint,
   snapFrame,
   snapResize,
   type AlignmentGuide,
@@ -47,6 +50,31 @@ interface DragState {
   originalFrames: Map<NodeId, RectMm>;
   /** Set when the drag started on a resize grip rather than the node body. */
   handle?: ResizeHandle;
+  /** Set when the drag started on an arrow endpoint grip. */
+  pointIndex?: number;
+  /** The dragged point's start position, in page space. */
+  pointOrigin?: { x: number; y: number };
+}
+
+/** Arrow endpoint grips carry `data-handle="point-0"`, `"point-1"`, … */
+const POINT_HANDLE = /^point-(\d+)$/;
+
+/**
+ * Ratio a resize must preserve, or null for free resize.
+ *
+ * Images join panels here. An image without it does not distort — the renderer
+ * emits `preserveAspectRatio` — but it letterboxes inside its frame, leaving
+ * white space the author cannot account for while the dpi readout, which
+ * divides by the *frame* width, quietly overstates the resolution.
+ */
+function aspectLockFor(node: FigureDocument['nodes'][string]): number | null {
+  if (node.type === 'panel') return node.aspectLock;
+  if (node.type === 'image' && node.preserveAspect && node.naturalPx.height > 0) {
+    return node.naturalPx.width / node.naturalPx.height;
+  }
+  // Vector assets carry {0, 0} and fall through to free resize, which is
+  // correct: they have no intrinsic proportions to preserve.
+  return null;
 }
 
 /** A text node being edited in place. */
@@ -118,6 +146,25 @@ export function Canvas({
       const node = doc.nodes[nodeId];
       if (!node || isEffectivelyLocked(doc.nodes, nodeId)) return;
 
+      const point = POINT_HANDLE.exec(handle);
+      if (point && node.type === 'arrow') {
+        const index = Number(point[1]);
+        const origin = node.points[index];
+        if (!origin) return;
+        dragRef.current = {
+          nodeId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          originalFrames: new Map([[nodeId, node.frame]]),
+          pointIndex: index,
+          // Page space, so the drag maths does not have to track the frame
+          // being rebased under it as the point crosses the origin.
+          pointOrigin: { x: node.frame.x + origin.x, y: node.frame.y + origin.y },
+        };
+        (event.target as Element).setPointerCapture?.(event.pointerId);
+        return;
+      }
+
       dragRef.current = {
         nodeId,
         startClientX: event.clientX,
@@ -145,10 +192,27 @@ export function Canvas({
       const primaryOriginal = drag.originalFrames.get(drag.nodeId);
       if (!primary || !primaryOriginal) return;
 
+      // --- arrow endpoint ---------------------------------------------------
+      if (drag.pointIndex !== undefined && drag.pointOrigin) {
+        const { pointIndex, pointOrigin } = drag;
+        api.commit('Aim arrow', (draft) => {
+          const node = draft.nodes[drag.nodeId];
+          if (node?.type !== 'arrow' || isEffectivelyLocked(draft.nodes, drag.nodeId)) return;
+          // The point is held in page space through the drag and converted
+          // back at the end, because normaliseArrowFrame moves the frame
+          // origin underneath a frame-relative delta.
+          setArrowPoint(draft, drag.nodeId, pointIndex, {
+            x: pointOrigin.x + dxMm - node.frame.x,
+            y: pointOrigin.y + dyMm - node.frame.y,
+          });
+        });
+        return;
+      }
+
       // --- resizing ---------------------------------------------------------
       if (drag.handle) {
         const resized = resizeFrame(primaryOriginal, drag.handle, dxMm, dyMm, {
-          aspectLock: primary.type === 'panel' ? primary.aspectLock : null,
+          aspectLock: aspectLockFor(primary),
           minMm: 5,
         });
 
@@ -175,8 +239,13 @@ export function Canvas({
           // Panels carry a plot and a page-space label that must follow, or the
           // panel letter is left behind and the plot keeps its old size.
           if (node.type === 'panel') resizePanel(draft, drag.nodeId, snapped.frame);
+          // An arrow's points are frame-relative, so stretching the box has to
+          // stretch the line inside it or the grips drift off the arrow.
+          else if (node.type === 'arrow') rescaleArrowPoints(draft, drag.nodeId, snapped.frame);
           else node.frame = snapped.frame;
 
+          // A resized image changes what a millimetre on it represents.
+          resyncScaleBars(draft);
           // The direct fix for stranded significance brackets: their geometry
           // is absolute, so nothing else would move them with the bars.
           repositionBrackets(draft, measureAllPlots(draft, theme));
