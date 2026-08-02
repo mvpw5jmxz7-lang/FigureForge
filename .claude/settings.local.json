@@ -56,7 +56,13 @@
       "Bash(git commit *)",
       "Bash(make test-web *)",
       "Bash(make test-api *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git checkout *)",
+      "Bash(git merge --no-ff feature/phase-4-images-annotations -m ' *)",
+      "Bash(git stash *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(make lint *)",
+      "Bash(make test *)"
     ]
   }
 }

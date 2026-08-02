@@ -117,6 +117,79 @@ export const LAYOUT_TEMPLATES: readonly LayoutTemplate[] = [
     ],
     description: 'Four equal panels.',
   },
+  {
+    id: 'four-wide-top-three-below',
+    label: 'Wide top + 3',
+    panelCount: 4,
+    grid: { rows: 2, columns: 3 },
+    slots: [
+      { row: 0, col: 0, colSpan: 3 },
+      { row: 1, col: 0 },
+      { row: 1, col: 1 },
+      { row: 1, col: 2 },
+    ],
+    description: 'A full-width panel above three equal panels.',
+  },
+  {
+    id: 'five-two-over-three',
+    label: '2 over 3',
+    panelCount: 5,
+    grid: { rows: 2, columns: 6 },
+    slots: [
+      { row: 0, col: 0, colSpan: 3 },
+      { row: 0, col: 3, colSpan: 3 },
+      { row: 1, col: 0, colSpan: 2 },
+      { row: 1, col: 2, colSpan: 2 },
+      { row: 1, col: 4, colSpan: 2 },
+    ],
+    // A 6-column grid is the smallest that divides evenly by both 2 and 3, so
+    // neither row needs a fractional cell.
+    description: 'Two panels above three.',
+  },
+  {
+    id: 'five-wide-top-four-below',
+    label: 'Wide top + 4',
+    panelCount: 5,
+    grid: { rows: 2, columns: 4 },
+    slots: [
+      { row: 0, col: 0, colSpan: 4 },
+      { row: 1, col: 0 },
+      { row: 1, col: 1 },
+      { row: 1, col: 2 },
+      { row: 1, col: 3 },
+    ],
+    description: 'A full-width panel above four equal panels.',
+  },
+  {
+    id: 'six-grid',
+    label: '3 × 2',
+    panelCount: 6,
+    grid: { rows: 2, columns: 3 },
+    slots: [
+      { row: 0, col: 0 },
+      { row: 0, col: 1 },
+      { row: 0, col: 2 },
+      { row: 1, col: 0 },
+      { row: 1, col: 1 },
+      { row: 1, col: 2 },
+    ],
+    description: 'Six equal panels, three across and two down.',
+  },
+  {
+    id: 'six-two-across',
+    label: '2 × 3',
+    panelCount: 6,
+    grid: { rows: 3, columns: 2 },
+    slots: [
+      { row: 0, col: 0 },
+      { row: 0, col: 1 },
+      { row: 1, col: 0 },
+      { row: 1, col: 1 },
+      { row: 2, col: 0 },
+      { row: 2, col: 1 },
+    ],
+    description: 'Six equal panels, two across and three down.',
+  },
 ];
 
 export const findLayoutTemplate = (id: string): LayoutTemplate | undefined =>

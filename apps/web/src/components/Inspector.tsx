@@ -189,7 +189,20 @@ export function InspectorTab({
           />
         </label>
       )}
-      {node.type === 'panel' && <PanelFields api={api} node={node} />}
+      {node.type === 'panel' && (
+        <>
+          <PanelFields api={api} node={node} />
+          {/* A click on the canvas selects the panel, so the plot or micrograph
+              inside it needs a way in that is not "double-click and hope". */}
+          {childrenOf(doc.nodes, node.id)
+            .filter((child) => child.type === 'plot' || child.type === 'image')
+            .map((child) => (
+              <button key={child.id} onClick={() => onSelectionChange([child.id])}>
+                Edit the {child.type} inside
+              </button>
+            ))}
+        </>
+      )}
       {node.type === 'image' && (
         <ImageFields
           api={api}
@@ -215,8 +228,8 @@ export function InspectorTab({
       {node.type === 'group' && (
         <>
           <p className="hint">
-            {childrenOf(doc.nodes, node.id).length} items. Clicking on the canvas still selects the
-            individual item, not the group — use the Layers list to select this.
+            {childrenOf(doc.nodes, node.id).length} items. Clicking any of them on the canvas
+            selects the group; double-click to step inside and select one, Escape to step back out.
           </p>
           <button
             onClick={() => {
@@ -870,7 +883,11 @@ function ScaleBarFields({
           <input
             type="color"
             value={node.fill.color}
-            onChange={(e) => setBar('Change bar colour', { fill: { color: e.target.value } })}
+            // Spread, not replace: `fill` also carries opacity, which a bare
+            // `{ color }` would silently reset to full.
+            onChange={(e) =>
+              setBar('Change bar colour', { fill: { ...node.fill, color: e.target.value } })
+            }
           />
         </label>
         <label className="field">

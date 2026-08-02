@@ -51,7 +51,11 @@ body {
 .toolbar-group.right { margin-left: auto; }
 .brand { font-weight: 650; letter-spacing: -0.01em; margin-right: 4px; }
 
-button, select, input[type='number'], input[type='file'] {
+/* `input` unqualified as well as the typed selectors: `:root` declares
+   `color-scheme: light dark`, so a text input the app does not colour picks its
+   text colour from the OS scheme. In dark mode that is near-white — invisible
+   against any surface the app paints white. */
+button, select, input, input[type='number'], input[type='file'] {
   font: inherit;
   color: var(--text);
   background: var(--surface);
@@ -116,16 +120,20 @@ button.icon.danger:hover { color: var(--danger); }
 
 .guide-overlay { position: absolute; inset: 0; pointer-events: none; }
 
-/* Editing a label in place. Sits above the SVG; never part of the document. */
+/* Editing a label in place. Sits above the SVG; never part of the document.
+   Colour and background both track the theme: hardcoding a white background
+   while leaving the text colour to the UA put white-on-white text in dark
+   mode, so the field looked empty while it was in fact being typed into. */
 .text-edit-overlay {
   position: absolute;
   z-index: 5;
   padding: 1px 3px;
   font: inherit;
   font-size: 12px;
+  color: var(--text);
   border: 1px solid var(--accent);
   border-radius: 2px;
-  background: #fff;
+  background: var(--surface);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
 }
 
@@ -206,6 +214,15 @@ h3:first-child { margin-top: 0; }
 h4 { margin: 0 0 6px; font-size: 13px; }
 
 .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+
+/* The outcome of the last run. Not an error — "nothing was significant" is a
+   real result — so it reads as a note rather than a failure banner. */
+.hint.notice {
+  color: var(--text);
+  border-left: 2px solid var(--accent);
+  padding: 4px 0 4px 8px;
+  margin-top: 8px;
+}
 .muted { color: var(--muted); }
 
 .paste-area {
@@ -237,6 +254,7 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .list li { padding: 5px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
 .list.nodes li { cursor: pointer; font-size: 12px; }
 .list.nodes li.selected { color: var(--accent); }
+.list.nodes li.node-hidden .node-name { opacity: 0.45; text-decoration: line-through; }
 .node-type { color: var(--muted); font-size: 10px; text-transform: uppercase; width: 78px; flex-shrink: 0; }
 .list li .muted { margin-left: auto; font-size: 11px; }
 

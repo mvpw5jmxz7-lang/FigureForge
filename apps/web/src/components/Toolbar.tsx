@@ -244,23 +244,27 @@ export function Toolbar({
 
         {/* Arrangement templates, so panels need not all be the same size.
             Only those matching the panel count are offered — a mismatched
-            template would leave panels unplaced. */}
-        {templates.length > 0 && (
-          <select
-            value=""
-            title="Panel arrangement"
-            onChange={(e) => {
-              if (e.target.value) arrange('Apply layout template', e.target.value);
-            }}
-          >
-            <option value="">Template…</option>
-            {templates.map((template) => (
-              <option key={template.id} value={template.id} title={template.description}>
-                {template.label}
-              </option>
-            ))}
-          </select>
-        )}
+            template would leave panels unplaced. The control is always shown,
+            even with nothing to offer: hiding it made the feature look as
+            though it had stopped working the moment a figure grew past four
+            panels, rather than saying there is no template for that count. */}
+        <select
+          value=""
+          title="Panel arrangement"
+          disabled={templates.length === 0}
+          onChange={(e) => {
+            if (e.target.value) arrange('Apply layout template', e.target.value);
+          }}
+        >
+          <option value="">
+            {templates.length > 0 ? 'Template…' : `No template for ${panelCount} panels`}
+          </option>
+          {templates.map((template) => (
+            <option key={template.id} value={template.id} title={template.description}>
+              {template.label}
+            </option>
+          ))}
+        </select>
         <button onClick={api.undo} disabled={!api.canUndo} title="Undo (Ctrl+Z)">
           Undo
         </button>
