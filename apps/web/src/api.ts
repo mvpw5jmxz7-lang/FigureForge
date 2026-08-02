@@ -66,6 +66,52 @@ export async function exportFigure(request: ExportRequest): Promise<Blob> {
   return response.blob();
 }
 
+export interface DecodedImage {
+  png: Uint8Array;
+  width: number;
+  height: number;
+  sourceFormat: string;
+  frames: number;
+  /** Present only when the file states one; never defaulted. */
+  calibration?: { pixelsPerUnit: number; unitLabel: string };
+  notes: string[];
+}
+
+/**
+ * Decode a format the browser cannot open (TIFF) into a PNG display proxy.
+ *
+ * Multipart out, raw PNG back — base64 in JSON would inflate a 200 MB
+ * micrograph by a third and hold it whole as a string at both ends.
+ */
+export async function decodeImage(file: File): Promise<DecodedImage> {
+  const body = new FormData();
+  body.append('file', file);
+
+  const response = await fetch(`${BASE}/decode-image`, { method: 'POST', body });
+  if (!response.ok) throw await failure(response);
+
+  const header = (name: string): string | null => response.headers.get(name);
+  const pixelsPerUnit = Number(header('X-Image-Pixels-Per-Unit'));
+  const unitLabel = header('X-Image-Unit-Label');
+  const notes = header('X-Image-Notes');
+
+  const decoded: DecodedImage = {
+    png: new Uint8Array(await response.arrayBuffer()),
+    width: Number(header('X-Image-Width') ?? 0),
+    height: Number(header('X-Image-Height') ?? 0),
+    sourceFormat: header('X-Image-Source-Format') ?? 'unknown',
+    frames: Number(header('X-Image-Frames') ?? 1),
+    notes: notes ? [notes] : [],
+  };
+
+  // Both or neither: a half-read calibration is indistinguishable from a
+  // measured one everywhere downstream.
+  if (unitLabel && Number.isFinite(pixelsPerUnit) && pixelsPerUnit > 0) {
+    decoded.calibration = { pixelsPerUnit, unitLabel };
+  }
+  return decoded;
+}
+
 export async function health(): Promise<boolean> {
   try {
     const response = await fetch(`${BASE}/health`);

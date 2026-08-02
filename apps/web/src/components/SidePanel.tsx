@@ -3,15 +3,23 @@
 import { useMemo, useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  addAsset,
   addBracket,
+  addPanelWithImage,
   addPanelWithPlot,
   analysisInputHash,
   applyAutoLayout,
+  childrenOf,
+  dataPathFor,
   defaultAnalysisOptions,
   deleteNode,
+  effectiveDpi,
+  findAsset,
   findDataset,
+  imagesUsingAsset,
   isStale,
   relabelPanels,
+  removeAsset,
   removeBracketsForPlot,
   renameDataset,
   replaceAnalysisForPlot,
@@ -35,9 +43,20 @@ import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
 import { InspectorTab } from './Inspector.js';
 import { datasetFromText } from '../sample.js';
+import type { AssetsApi } from '../assets.js';
+import { ACCEPTED_IMAGE_TYPES, importImage, initialImageFrame } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
 
 export type Tab = 'data' | 'inspector' | 'stats' | 'quality' | 'layers';
+
+/**
+ * Warn once the archive gets big enough to be a problem.
+ *
+ * `zipSync` builds the whole file in one allocation, so a project well past
+ * this is an out-of-memory kill of the tab and a lost session. Surfaced as a
+ * running total rather than discovered at save time.
+ */
+const ASSET_SIZE_WARNING_BYTES = 300 * 1024 * 1024;
 
 export interface SidePanelProps {
   api: DocumentApi;
@@ -46,6 +65,10 @@ export interface SidePanelProps {
   onSelectionChange: (ids: NodeId[]) => void;
   onError: (message: string | null) => void;
   setBusy: (label: string | null) => void;
+  assets: AssetsApi;
+  /** Verbatim import text keyed by archive path; written here, saved in App. */
+  dataOriginals: Map<string, string>;
+  exportDpi: number;
 }
 
 export function SidePanel(props: SidePanelProps) {
@@ -82,7 +105,16 @@ export function SidePanel(props: SidePanelProps) {
 // Data
 // ---------------------------------------------------------------------------
 
-function DataTab({ api, theme, onError }: SidePanelProps) {
+function DataTab({
+  api,
+  theme,
+  onError,
+  setBusy,
+  assets,
+  dataOriginals,
+  exportDpi,
+  onSelectionChange,
+}: SidePanelProps) {
   const { document: doc, commit, newId } = api;
   const [pasted, setPasted] = useState('');
   // Blank means "use the default"; the placeholder shows what that will be.
@@ -103,6 +135,11 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
     if (!preview) return;
     const id = newId();
     const dataset = datasetFromText(pasted, name.trim() || defaultName, id);
+
+    // Keep the text exactly as it arrived. Re-serialising through
+    // `datasetToCsv` on save would round-trip the author's numbers, which is
+    // the one thing `data/` exists to prevent.
+    dataOriginals.set(dataPathFor(dataset), pasted);
 
     api.transaction('Import data', () => {
       commit('Add dataset', (draft) => {
@@ -146,6 +183,88 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
       onError(`Could not read ${file.name}: ${String(error)}`);
     }
   };
+
+  // --- images -------------------------------------------------------------
+
+  const importImageFile = async (file: File): Promise<void> => {
+    setBusy(`Reading ${file.name}`);
+    onError(null);
+    try {
+      const imported = await importImage(file);
+      const assetId = newId();
+
+      // Bytes first: the commit below registers the asset, and a document
+      // referencing one the store has never seen would render a placeholder.
+      assets.store.add(assetId, imported.bytes);
+
+      commit('Add image', (draft) => {
+        // Asset record and image node in ONE commit. Referential integrity
+        // rejects an image whose asset is unregistered, so splitting them
+        // would leave a figure that edits fine and cannot be saved.
+        addAsset(draft, {
+          id: assetId,
+          filename: imported.filename,
+          mimeType: imported.bytes.mimeType,
+          byteLength: imported.bytes.original.length,
+          naturalPx: imported.naturalPx,
+        });
+        addPanelWithImage(draft, newId, {
+          frame: initialImageFrame(imported.aspect, draft.page.widthMm, draft.page.heightMm),
+          name: imported.filename,
+          assetId,
+          // Vector sources carry {0,0}: there is no pixel grid to record, and
+          // the resolution check skips them by MIME type rather than by this.
+          naturalPx: imported.naturalPx ?? { width: 0, height: 0 },
+        });
+        applyAutoLayout(draft, {
+          marginMm: theme.spacing.marginMm,
+          gutterMm: theme.spacing.panelGutterMm,
+          labelGutterMm: 4,
+        });
+        relabelPanels(draft, newId, {
+          uppercase: theme.panelLabelCase === 'upper',
+          fontSizePt: theme.type.panelLabelPt,
+          offsetMm: 4,
+        });
+        repositionBrackets(draft, measureAllPlots(draft, theme));
+      });
+
+      if (imported.notes.length > 0) onError(imported.notes.join(' '));
+    } catch (error) {
+      onError(`Could not import ${file.name}: ${String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const insertAsset = (assetId: string): void => {
+    const asset = findAsset(doc, assetId);
+    if (!asset) return;
+    const naturalPx = asset.naturalPx ?? { width: 0, height: 0 };
+    const aspect = naturalPx.height > 0 ? naturalPx.width / naturalPx.height : 1;
+
+    commit('Insert image', (draft) => {
+      const { image } = addPanelWithImage(draft, newId, {
+        frame: initialImageFrame(aspect, draft.page.widthMm, draft.page.heightMm),
+        name: asset.filename,
+        assetId,
+        naturalPx,
+      });
+      applyAutoLayout(draft, {
+        marginMm: theme.spacing.marginMm,
+        gutterMm: theme.spacing.panelGutterMm,
+        labelGutterMm: 4,
+      });
+      relabelPanels(draft, newId, {
+        uppercase: theme.panelLabelCase === 'upper',
+        fontSizePt: theme.type.panelLabelPt,
+        offsetMm: 4,
+      });
+      onSelectionChange([image.id]);
+    });
+  };
+
+  const totalAssetBytes = assets.store.totalBytes();
 
   return (
     <section>
@@ -241,6 +360,82 @@ function DataTab({ api, theme, onError }: SidePanelProps) {
         ))}
         {doc.datasets.length === 0 && <li className="muted">No data imported yet.</li>}
       </ul>
+
+      <h3>Images</h3>
+      <p className="hint">
+        Micrographs, blots, gels and schematics. PNG, JPEG, SVG or TIFF — TIFF is decoded by the
+        analysis service, and the original is kept in the project either way.
+      </p>
+
+      <label className="file-button">
+        Add image
+        <input
+          type="file"
+          accept={ACCEPTED_IMAGE_TYPES}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void importImageFile(file);
+            // Clear the input, or picking the same file twice does nothing.
+            e.target.value = '';
+          }}
+        />
+      </label>
+
+      <ul className="list">
+        {doc.assets.map((asset) => {
+          const uses = imagesUsingAsset(doc.nodes, asset.id);
+          const widest = Math.max(0, ...uses.map((image) => image.frame.width));
+          const visiblePx = (asset.naturalPx?.width ?? 0) * (uses[0]?.crop.width ?? 1);
+          const dpi = widest > 0 ? effectiveDpi(visiblePx, widest) : null;
+
+          return (
+            <li key={asset.id}>
+              <span className="rename" title={asset.filename}>
+                {asset.filename}
+              </span>
+              <span className="muted">
+                {asset.naturalPx
+                  ? `${asset.naturalPx.width}×${asset.naturalPx.height} px`
+                  : 'vector'}
+                {' · '}
+                {(asset.byteLength / 1e6).toFixed(1)} MB
+                {dpi !== null && asset.naturalPx && (
+                  <>
+                    {' · '}
+                    <span className={dpi < exportDpi ? 'warning' : ''}>{Math.round(dpi)} dpi</span>
+                  </>
+                )}
+              </span>
+              <div className="field-row">
+                <button onClick={() => insertAsset(asset.id)}>Insert as panel</button>
+                {uses.length === 0 && (
+                  <>
+                    {/* Deleting the last image that used an asset leaves it
+                        here on purpose — undo must be able to bring the node
+                        back, and this is how a mistaken delete is recovered.
+                        Collecting it automatically is the obvious wrong move. */}
+                    <span className="muted">not used</span>
+                    <button
+                      className="danger"
+                      onClick={() => commit('Remove image', (draft) => removeAsset(draft, asset.id))}
+                    >
+                      Remove
+                    </button>
+                  </>
+                )}
+              </div>
+            </li>
+          );
+        })}
+        {doc.assets.length === 0 && <li className="muted">No images added yet.</li>}
+      </ul>
+
+      {totalAssetBytes > ASSET_SIZE_WARNING_BYTES && (
+        <p className="warning">
+          {(totalAssetBytes / 1e6).toFixed(0)} MB of images. The project file is built in memory in
+          one piece, so saving may fail beyond roughly half a gigabyte.
+        </p>
+      )}
     </section>
   );
 }
@@ -519,14 +714,17 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
 // Quality
 // ---------------------------------------------------------------------------
 
-function QualityTab({ api, theme, onSelectionChange }: SidePanelProps) {
+function QualityTab({ api, theme, onSelectionChange, assets }: SidePanelProps) {
   const { document: doc } = api;
   const [dpi, setDpi] = useState(300);
 
   const report = useMemo(() => {
-    const scene = renderDocument(doc, { theme });
+    // The scene has to carry its images: text-size and colour rules read the
+    // rendered tree, and a figure checked as a set of grey placeholders is not
+    // the figure being submitted.
+    const scene = renderDocument(doc, { theme, resolveAsset: (id) => assets.urls[id] });
     return checkFigure({ document: doc, theme, scene, exportDpi: dpi });
-  }, [doc, theme, dpi]);
+  }, [doc, theme, dpi, assets.urls]);
 
   const tone = report.score >= 90 ? 'good' : report.score >= 70 ? 'fair' : 'poor';
 
@@ -611,6 +809,21 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
         const plot = node.plotId ? doc.nodes[node.plotId] : undefined;
         return panelOf(plot?.parentId);
       }
+      case 'image':
+        // The filename, not the panel: six micrographs all reading "panel a"
+        // is exactly the unreadability this column exists to fix.
+        return findAsset(doc, node.assetId)?.filename ?? 'asset missing';
+      case 'scale-bar': {
+        // Calibration provenance is the point of the row. An uncalibrated bar
+        // states a measurement nobody supplied, and it looks identical to one
+        // that does not.
+        const source = node.calibrationSource ?? 'unknown';
+        const image = node.parentId ? doc.nodes[node.parentId] : undefined;
+        if (image?.type !== 'image') return 'not on an image';
+        return source === 'unknown' ? 'uncalibrated' : `${source} calibration`;
+      }
+      case 'group':
+        return `${childrenOf(doc.nodes, node.id).length} items`;
       case 'panel':
         return null;
       default:

@@ -55,7 +55,8 @@
       "Bash(git log *)",
       "Bash(git commit *)",
       "Bash(make test-web *)",
-      "Bash(make test-api *)"
+      "Bash(make test-api *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
