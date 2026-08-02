@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–5 are done; phases 6–9 are not.**
+could be proven before breadth was added. **Phases 1–5 are done, plus three rounds of reported fixes; phases 6–9 are not.**
 
 ---
 
@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 229 TypeScript + 68 Python tests
+make test        # 241 TypeScript + 76 Python tests
 make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -147,10 +147,14 @@ Each guards against a specific, common reporting error:
   Cohen's *d* noticeably overstates the effect.
 - **Confidence intervals use the t distribution.** At n = 3 the correct
   multiplier is 4.303, not 1.96; the 1.96 shortcut badly understates the interval.
+- **Fisher's exact test is refused above 2×2.** SciPy has no exact r×c test,
+  and approximating the one test whose whole purpose is exactness would be
+  worse than declining. Its odds ratio is SciPy's sample estimate, not R's
+  conditional MLE — a documented difference, not a discrepancy.
 - **Tests are verified against externally published values** — Student's 1908
   sleep data and R's documented output for `t.test`, `aov`, `cor.test`,
-  `chisq.test`, `wilcox.test`, and statsmodels' own documented `AnovaRM`
-  example — not against numbers this code produced itself. Spearman is the one
+  `chisq.test`, `wilcox.test`, `fisher.test`, and statsmodels' own documented
+  `AnovaRM` example — not against numbers this code produced itself. Spearman is the one
   exception: R's `cor.test` computes an exact permutation p-value (AS 89) that
   SciPy's t-approximation genuinely does not reproduce at low n, so that test
   asserts against SciPy's own reproducible output and says so in a comment
@@ -177,11 +181,11 @@ Each guards against a specific, common reporting error:
 ## Current state
 
 Phases 1–5 are on `master`. A three-stage round of reported bugs and requests
-follows; **stages A and B are done**, stage C is not — see "The reported-bug
-rounds" below. Run `git status` and `git branch` before
-assuming the tree is clean or which branch you're on.
+follows; **all three stages are done** — see "The reported-bug rounds" below.
+Run `git status` and `git branch` before assuming the tree is clean or which
+branch you're on.
 
-**Verified:** 229 TypeScript tests, 68 Python tests, typecheck and lint clean,
+**Verified:** 241 TypeScript tests, 76 Python tests, typecheck and lint clean,
 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
@@ -199,7 +203,12 @@ Layers eye, and the editor reading `rgb(232,234,237) on rgb(31,34,39)`. Stage B
 likewise: a save named `my-chosen-name.figureforge` from the dialog and adopted
 as the title, Ctrl+V and Ctrl+D on a text label and on a whole panel, Send to
 back reordering the DOM, and a five-figure-count import with no axis label
-outside its panel.
+outside its panel. Stage C too: two-sided error bars becoming one-sided on
+demand, a triangle marker replacing 16 circles on one plot only, minor ticks
+12 → 32, inward ticks, a log y axis relabelling, break marks drawn with nothing
+at NaN in the gap, a sedimentation-style paste detected as `sigmaplot` and drawn
+as two overlaid lines, a right-hand axis, and Fisher's exact on a contingency
+import reading `Treated vs Control  P = 0.025, odds ratio 5.57`.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
 user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
@@ -462,6 +471,78 @@ Three of the four were additive. The fourth changes plot geometry.
   itself under the sample document's name. Saving now asks for a name and keeps
   it as the title, so the document and the file on disk stop disagreeing.
 
+#### Stage C, and what each option refuses to do
+
+Six features, four of them new model fields. Every one is **optional** and the
+one enum change only *adds* a member, so `SCHEMA_VERSION` stays at 1 — but each
+had to be added to `schema.ts` as well as the TS type, since zod strips unknown
+keys and a field present only in the type is dropped on save.
+
+- **Error bars draw both ways by default.** `errorInterval` was always
+  symmetric; the renderer truncated the stroke at the bar's top, so a figure
+  showed half the spread that was measured — and its own comment said only the
+  *cap* was hidden. `errorBarDirection` (`'both' | 'up'`, absent reading as
+  `'both'`) makes the bar-chart convention a stated choice. It is also ignored
+  on a plot with no bar: with nothing to hide the lower half behind, half a
+  whisker is just missing data.
+- **A broken axis removes a range; it does not compress one.** The kept segments
+  share the millimetres in proportion to the data they span, minus a fixed 2 mm
+  per break, so equal spans either side of a break get equal length. A value
+  inside a break maps to **NaN**, and every mark builder filters on the *scaled*
+  position as well as the value — clamping it to the edge of the gap would draw
+  a mark at a value the axis explicitly does not show, which a reader takes as
+  data. Overlapping breaks are merged before anything is placed, or each would
+  reserve its own gap and subtract the shared region twice. Breaks are refused
+  on a log axis: compressing what is already compressed leaves nothing to
+  measure against.
+- **The second y axis is offered on scatter and line plots only.** On a
+  categorical plot the bands, not the values, carry the reading — two bar series
+  drawn against different scales cannot be compared by length, which is the only
+  thing a bar chart is for. Withheld rather than approximated, and the Inspector
+  says so. `seriesAxis` is indexed by series *order*, the same key the palette
+  uses, so it needs no names and cannot go stale when a series is renamed.
+  `requiredMargin` grows `margin.right` to hold it; the theme reserves 2 mm
+  there, enough for an overhanging x label and nothing else.
+- **Log axes needed no model work at all** — `AxisSpec.scale`, `min`, `max` and
+  `tickStep` have been modelled and honoured since phase 1 with nothing in the
+  UI referring to them. `AxisFields` is that UI. It warns when a log scale is
+  chosen over data containing values ≤ 0, since `resolveDomain` silently clamps
+  them and the points then are not drawn.
+- **Marker shapes are matched on area**, not on side length, so switching shape
+  does not silently change how heavy a series looks. `markerNode` is the single
+  implementation; the box-plot outlier reuses it with a forced outline, since
+  without one a hollow marker would not be there at all.
+- **Import stopped guessing silently.** Delimiter, header row, transpose and the
+  *layout* are all overridable, with the layout also fixable after import — a
+  layout is a reading of the same rows, not a transformation of them, so
+  changing it is lossless. The layout matters most: `prism` reads column 0 as
+  one shared x, `sigmaplot` reads the columns as independent pairs, and nothing
+  in the old UI said so. Detection was also relaxed: it demanded headers
+  literally starting with `x`/`y`, so a sedimentation-velocity export headed
+  `Radius,C(s)_run1,Radius,C(s)_run2` was read as `prism` — silently plotting
+  run 2 against run 1's radii. Repeated first-of-pair names are the stronger
+  signal, since a shared-x table cannot have them.
+- **A contingency table is a separate `DataFormat` even though its shape is
+  identical to `replicate`.** The numbers mean something different: its rows are
+  not replicates of one another, its mean is meaningless, and the tests that
+  apply to it are exactly the ones that do not apply to measurements. So the
+  gate runs both ways — a count table offers only chi-square and Fisher, and a
+  measurement table offers neither. A count table also plots as plain bars with
+  no error bars and no points, because an SEM over frequencies is a standard
+  error of nothing and looks entirely convincing on the page. The assumption
+  checks are skipped for count tests too: `n = 2` there means two *categories*.
+- **Fisher's exact test refuses anything larger than 2×2.** SciPy has no exact
+  r×c test and the whole point of Fisher's is that it is exact, so the error
+  names the shape supplied rather than approximating. Its p-values match R's
+  `?fisher.test` examples exactly; the **odds ratio deliberately does not** —
+  R reports the conditional MLE (6.408 for the tea table), SciPy the sample odds
+  ratio (9.0). Same situation as Spearman: the test asserts SciPy's own value
+  and says why.
+- **`_contingency_table` validates before `np.array` does.** `_clean` drops
+  non-finite values per row, so a table with one blank cell arrived ragged and
+  raised an opaque "inhomogeneous shape" error. Counts genuinely include zeros,
+  so a blank cell is a mistake to report, not a value to skip.
+
 ---
 
 ## What's next
@@ -505,7 +586,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, and stage C's `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | Quality checker findings carry `autoFixable: true`, but no fixer is wired up and the UI offers no button. Either build them or stop claiming it. |

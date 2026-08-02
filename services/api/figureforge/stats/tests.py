@@ -60,6 +60,35 @@ def _clean(values: Sequence[float]) -> np.ndarray:
     return arr[np.isfinite(arr)]
 
 
+def _contingency_table(groups: dict[str, np.ndarray], names: list[str]) -> np.ndarray:
+    """A count table, or a clear error.
+
+    `_clean` drops non-finite values from each row independently, which is right
+    for unrelated groups of measurements and wrong here: a table with a missing
+    cell in one row comes through ragged, and `np.array` then raises an opaque
+    "inhomogeneous shape" error. Contingency counts also genuinely have zeros,
+    so a blank cell is a mistake to report rather than a value to skip.
+    """
+    lengths = {len(groups[n]) for n in names}
+    if len(lengths) != 1:
+        detail = ", ".join(f'"{n}" has {len(groups[n])}' for n in names)
+        raise ValueError(
+            "A contingency table needs the same number of counts in every row "
+            f"(a blank cell is not a zero): {detail}."
+        )
+
+    table = np.array([groups[n] for n in names], dtype=float)
+    if table.shape[1] < 2:
+        raise ValueError("A contingency table needs at least two categories.")
+    if np.any(table < 0):
+        raise ValueError("A contingency table cannot contain negative counts.")
+    if not np.allclose(table, np.round(table)):
+        raise ValueError("A contingency table holds counts, so every cell must be a whole number.")
+    if table.sum() <= 0:
+        raise ValueError("A contingency table of all zeros has nothing to test.")
+    return table
+
+
 # ---------------------------------------------------------------------------
 # Effect sizes
 # ---------------------------------------------------------------------------
@@ -278,7 +307,12 @@ def run_test(
         "pearson",
         "linear-regression",
     }
-    warnings = check_assumptions(cleaned, parametric)
+    # Assumption checks read each group as a sample of measurements. A
+    # contingency row is a set of *category counts*, so "n = 2" would mean two
+    # categories, not two observations — a warning that is simply about the
+    # wrong thing. The count tests carry their own validation instead.
+    counts = test in ("chi-square", "fisher")
+    warnings = [] if counts else check_assumptions(cleaned, parametric)
     outcome = _dispatch(test, cleaned, alternative, alpha, welch)
     outcome.warnings = warnings + outcome.warnings
 
@@ -490,9 +524,37 @@ def _dispatch(
             )
         ])
 
-    if test == "chi-square":
+    if test in ("chi-square", "fisher"):
         # Groups are rows of a contingency table.
-        table = np.array([groups[n] for n in names])
+        table = _contingency_table(groups, names)
+
+    if test == "fisher":
+        # SciPy has no exact test beyond 2x2, and there is no honest way to
+        # approximate one: the whole point of Fisher's is that it is exact.
+        # Refused with the shape that was actually supplied, so the author can
+        # see what to collapse.
+        if table.shape != (2, 2):
+            raise ValueError(
+                "Fisher's exact test needs a 2x2 table; this one is "
+                f"{table.shape[0]}x{table.shape[1]}. Use the chi-square test, or collapse "
+                "the table to two rows and two columns."
+            )
+        odds_ratio, p = sps.fisher_exact(table, alternative=alternative)
+        return TestOutcome(
+            [
+                Comparison(
+                    names[0], names[1],
+                    float(odds_ratio), float(p), float(p), float("nan"), None,
+                    float(odds_ratio), "Odds ratio", [int(row.sum()) for row in table],
+                )
+            ],
+            # No omnibus statistic: Fisher's returns a p-value directly, and
+            # inventing a chi-square to sit beside it would invite reporting a
+            # number this test never computed.
+            None,
+        )
+
+    if test == "chi-square":
         chi2, p, dof, _ = sps.chi2_contingency(table)
         n_total = table.sum()
         # Cramer's V

@@ -26,7 +26,18 @@ export type DataFormat =
   /** Group,Value — long form */
   | 'grouped'
   /** Treatment,Replicate1,Replicate2,… */
-  | 'replicate';
+  | 'replicate'
+  /**
+   * RowLabel,CategoryA,CategoryB,… — a table of *counts*, not measurements.
+   *
+   * Structurally identical to `replicate`, and deliberately a separate member
+   * anyway: the numbers mean something different. A count table's rows are not
+   * replicates of one another, its mean is meaningless, and the tests that
+   * apply to it (chi-square, Fisher) are exactly the ones that do not apply to
+   * measurements. Without the distinction a user can run a t-test on
+   * frequencies and get a confident, wrong answer.
+   */
+  | 'contingency';
 
 export interface Column {
   name: string;
@@ -120,18 +131,48 @@ export interface ParsedTable {
   hasHeader: boolean;
 }
 
+export interface ParseOptions {
+  /** Override the detected delimiter. */
+  delimiter?: Delimiter;
+  /** Override the header-row guess. */
+  hasHeader?: boolean;
+  /**
+   * Swap rows and columns before anything else is decided.
+   *
+   * Plate readers and image quantification tools routinely emit the transpose
+   * of what the plot wants, and re-pasting a table by hand to fix that is
+   * exactly the drudgery this importer exists to remove.
+   */
+  transpose?: boolean;
+}
+
 /**
  * Parse delimited text into a table. Used for CSV/TSV/TXT files and for
  * clipboard pastes out of Excel (which are tab-delimited).
+ *
+ * Every option defaults to the detected value, so a caller that passes nothing
+ * gets exactly the behaviour every existing call site already relied on.
  */
-export function parseDelimited(text: string, delimiter?: Delimiter): ParsedTable {
-  const delim = delimiter ?? detectDelimiter(text);
+export function parseDelimited(
+  text: string,
+  delimiterOrOptions?: Delimiter | ParseOptions,
+): ParsedTable {
+  const options: ParseOptions =
+    typeof delimiterOrOptions === 'string'
+      ? { delimiter: delimiterOrOptions }
+      : (delimiterOrOptions ?? {});
+
+  const delim = options.delimiter ?? detectDelimiter(text);
   const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
   if (lines.length === 0) {
     return { columns: [], rows: [], delimiter: delim, hasHeader: false };
   }
 
-  const cells = lines.map((line) => splitLine(line, delim));
+  let cells = lines.map((line) => splitLine(line, delim));
+  if (options.transpose) {
+    const width = Math.max(...cells.map((r) => r.length));
+    cells = Array.from({ length: width }, (_, col) => cells.map((row) => row[col] ?? ''));
+  }
   const width = Math.max(...cells.map((r) => r.length));
 
   // A first row with no numbers in it, above rows that do have numbers, is a header.
@@ -139,7 +180,9 @@ export function parseDelimited(text: string, delimiter?: Delimiter): ParsedTable
   const bodyHasNumbers = cells
     .slice(1)
     .some((row) => row.some((c) => typeof parseCell(c) === 'number'));
-  const hasHeader = bodyHasNumbers && firstRow.every((c) => typeof parseCell(c) !== 'number');
+  const hasHeader =
+    options.hasHeader ??
+    (bodyHasNumbers && firstRow.every((c) => typeof parseCell(c) !== 'number'));
 
   const headerNames = hasHeader ? firstRow : [];
   const bodyRows = (hasHeader ? cells.slice(1) : cells).map((row) => {
@@ -184,16 +227,35 @@ export function inferFormat(columns: readonly Column[]): DataFormat {
   if (columns.length === 2 && kinds[0] === 'text' && kinds[1] === 'number') return 'grouped';
   if (columns.length === 2 && numericCount === 2) return 'simple-xy';
   if (kinds[0] === 'text' && numericCount === columns.length - 1) return 'replicate';
-  // Alternating x/y pairs is the SigmaPlot signature.
+  /*
+   * Alternating x/y pairs is the SigmaPlot signature. The old rule demanded
+   * headers literally starting with x and y, so a sedimentation-velocity export
+   * headed `Radius,C(s)_run1,Radius,C(s)_run2` was read as `prism` — one shared
+   * x for every series, silently plotting run 2 against run 1's radii. Repeated
+   * first-of-pair names are the stronger signal, since a shared-x table cannot
+   * have them.
+   */
   if (columns.length >= 4 && columns.length % 2 === 0 && numericCount === columns.length) {
-    const looksPaired = columns.every((c, i) =>
-      i % 2 === 0 ? /^x/i.test(c.name) : /^y/i.test(c.name),
-    );
-    if (looksPaired) return 'sigmaplot';
+    const named = columns.every((c, i) => (i % 2 === 0 ? /^x/i.test(c.name) : /^y/i.test(c.name)));
+    const firsts = columns.filter((_, i) => i % 2 === 0).map((c) => c.name.toLowerCase());
+    const repeatedFirsts = new Set(firsts).size < firsts.length;
+    if (named || repeatedFirsts) return 'sigmaplot';
   }
   if (numericCount >= 3) return 'prism';
   return 'simple-xy';
 }
+
+/**
+ * Whether a dataset holds counts rather than measurements.
+ *
+ * The one thing every caller needs to know about `'contingency'`, in one place
+ * so the stats UI, the plot-type gate and the quality checker cannot disagree.
+ */
+export const isContingency = (ds: Dataset): boolean => ds.format === 'contingency';
+
+/** Category (column) labels of a contingency table. */
+export const contingencyCategories = (ds: Dataset): string[] =>
+  ds.format === 'contingency' ? ds.columns.slice(1).map((c) => c.name) : [];
 
 // ---------------------------------------------------------------------------
 // Series extraction
@@ -244,8 +306,12 @@ export function toSeries(ds: Dataset): Series[] {
       return [...byGroup].map(([name, values]) => ({ name, values }));
     }
 
+    case 'contingency':
     case 'replicate': {
       // Row-per-treatment; the replicate columns collapse into one series.
+      // A contingency table has the same shape — one row of counts per group —
+      // so it reads the same way. What differs is what may be *done* with the
+      // numbers, which `isContingency` gates rather than this.
       const valueCols = ds.columns.slice(1);
       return ds.rows
         .map((row) => {

@@ -31,6 +31,7 @@ export type SceneRole =
   | 'panel-label'
   | 'plot-area'
   | 'axis'
+  | 'axis-break'
   | 'axis-title'
   | 'tick'
   | 'tick-label'

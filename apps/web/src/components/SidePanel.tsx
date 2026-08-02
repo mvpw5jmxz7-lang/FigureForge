@@ -17,6 +17,8 @@ import {
   findAsset,
   findDataset,
   imagesUsingAsset,
+  isContingency,
+  contingencyCategories,
   isStale,
   nextPanelFrame,
   relabelPanels,
@@ -30,6 +32,8 @@ import {
   xForHash,
   type Analysis,
   type Correction,
+  type DataFormat,
+  type Delimiter,
   type FigureDocument,
   type NodeId,
   type PlotNode,
@@ -45,7 +49,7 @@ import {
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
 import { InspectorTab } from './Inspector.js';
-import { datasetFromText } from '../sample.js';
+import { datasetFromText, type ImportOptions } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
 import { ACCEPTED_IMAGE_TYPES, importImage, initialImageSize } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
@@ -60,6 +64,44 @@ export type Tab = 'data' | 'inspector' | 'stats' | 'quality' | 'layers';
  * running total rather than discovered at save time.
  */
 const ASSET_SIZE_WARNING_BYTES = 300 * 1024 * 1024;
+
+/**
+ * The layouts an author can choose between, with what each one *means* for the
+ * series that come out of it — the difference between `prism` and `sigmaplot`
+ * is one shared x versus one x per series, and nothing in the old UI said so.
+ */
+const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
+  {
+    id: 'replicate',
+    label: 'Treatment + replicates',
+    hint: 'One row per group; the replicate columns collapse into that group’s values.',
+  },
+  {
+    id: 'grouped',
+    label: 'Group, Value (long)',
+    hint: 'Two columns: a label and a measurement, one observation per row.',
+  },
+  {
+    id: 'simple-xy',
+    label: 'X, Y',
+    hint: 'One series of paired x and y values.',
+  },
+  {
+    id: 'prism',
+    label: 'X, Y1, Y2, … (shared x)',
+    hint: 'Column 1 is the x for every series — right only if the series were sampled together.',
+  },
+  {
+    id: 'sigmaplot',
+    label: 'X1, Y1, X2, Y2, … (paired)',
+    hint: 'Each series carries its own x, so runs sampled at different points stay independent.',
+  },
+  {
+    id: 'contingency',
+    label: 'Contingency table (counts)',
+    hint: 'One row per group, one column per category. Counts, not measurements: only chi-square and Fisher apply.',
+  },
+];
 
 export interface SidePanelProps {
   api: DocumentApi;
@@ -134,21 +176,41 @@ function DataTab({
   // Blank means "use the default"; the placeholder shows what that will be.
   const [name, setName] = useState('');
 
+  /*
+   * Import options. Every one is `undefined` until the author touches it, so
+   * the preview shows exactly what detection decided and an override is a
+   * visible departure from it rather than a silent default.
+   */
+  const [delimiter, setDelimiter] = useState<Delimiter | ''>('');
+  const [headerMode, setHeaderMode] = useState<'auto' | 'yes' | 'no'>('auto');
+  const [transpose, setTranspose] = useState(false);
+  const [format, setFormat] = useState<DataFormat | ''>('');
+
+  const parseOptions: ImportOptions = useMemo(
+    () => ({
+      ...(delimiter !== '' ? { delimiter } : {}),
+      ...(headerMode !== 'auto' ? { hasHeader: headerMode === 'yes' } : {}),
+      ...(transpose ? { transpose: true } : {}),
+      ...(format !== '' ? { format } : {}),
+    }),
+    [delimiter, headerMode, transpose, format],
+  );
+
   const preview = useMemo(() => {
     if (pasted.trim() === '') return null;
     try {
-      return datasetFromText(pasted, 'Preview', 'preview');
+      return datasetFromText(pasted, 'Preview', 'preview', null, parseOptions);
     } catch {
       return null;
     }
-  }, [pasted]);
+  }, [pasted, parseOptions]);
 
   const defaultName = `Dataset ${doc.datasets.length + 1}`;
 
   const importDataset = (): void => {
     if (!preview) return;
     const id = newId();
-    const dataset = datasetFromText(pasted, name.trim() || defaultName, id);
+    const dataset = datasetFromText(pasted, name.trim() || defaultName, id, null, parseOptions);
 
     // Keep the text exactly as it arrived. Re-serialising through
     // `datasetToCsv` on save would round-trip the author's numbers, which is
@@ -318,14 +380,76 @@ function DataTab({
           {/* Live preview before import, so a mis-detected layout is visible
               before it becomes a plot. */}
           <div className="preview-meta">
-            Detected <strong>{preview.format}</strong> · {preview.columns.length} columns ·{' '}
-            {preview.rows.length} rows
+            {format === '' ? 'Detected' : 'Reading as'} <strong>{preview.format}</strong> ·{' '}
+            {preview.columns.length} columns · {preview.rows.length} rows
           </div>
+
+          {/* Everything below used to be decided silently. Detection is a
+              heuristic on column shapes and names; when it guesses wrong it
+              changes what every series *is*, and until now the only recourse
+              was to re-shape the file by hand. */}
+          <div className="field-row">
+            <label className="field">
+              Delimiter
+              <select
+                value={delimiter}
+                onChange={(e) => setDelimiter(e.target.value as Delimiter | '')}
+              >
+                <option value="">Detect</option>
+                <option value=",">Comma</option>
+                <option value="&#9;">Tab</option>
+                <option value=";">Semicolon</option>
+                <option value="|">Pipe</option>
+              </select>
+            </label>
+            <label className="field">
+              Header row
+              <select
+                value={headerMode}
+                onChange={(e) => setHeaderMode(e.target.value as 'auto' | 'yes' | 'no')}
+              >
+                <option value="auto">Detect</option>
+                <option value="yes">First row</option>
+                <option value="no">None</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="field-row">
+            <label className="field">
+              Layout
+              <select
+                value={format}
+                onChange={(e) => setFormat(e.target.value as DataFormat | '')}
+              >
+                <option value="">Detect</option>
+                {DATA_FORMATS.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={transpose}
+                onChange={(e) => setTranspose(e.target.checked)}
+              />
+              Transpose
+            </label>
+          </div>
+          <p className="hint">
+            {DATA_FORMATS.find((f) => f.id === preview.format)?.hint}
+          </p>
           <table>
             <thead>
               <tr>
-                {preview.columns.map((c) => (
-                  <th key={c.name}>
+                {/* Keyed by position, not by name: a paired-xy export
+                    legitimately repeats a column name ("Radius, C(s)_run1,
+                    Radius, C(s)_run2"), and a duplicate React key drops one. */}
+                {preview.columns.map((c, i) => (
+                  <th key={i}>
                     {c.name}
                     <span className="kind">{c.kind === 'number' ? '#' : 'A'}</span>
                   </th>
@@ -372,9 +496,28 @@ function DataTab({
                 )
               }
             />
-            <span className="muted">
-              {dataset.format} · {toSeries(dataset).length} series
-            </span>
+            {/* Fixable after the fact: a layout is a reading of the same rows,
+                not a transformation of them, so changing it is lossless.
+                `toSeries` is the only consumer and it reads this field. */}
+            <select
+              value={dataset.format}
+              title="How these columns are read"
+              onChange={(e) =>
+                commit('Change data layout', (draft) => {
+                  const next = e.target.value as DataFormat;
+                  draft.datasets = draft.datasets.map((d) =>
+                    d.id === dataset.id ? { ...d, format: next } : d,
+                  );
+                })
+              }
+            >
+              {DATA_FORMATS.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+            <span className="muted">{toSeries(dataset).length} series</span>
           </li>
         ))}
         {doc.datasets.length === 0 && <li className="muted">No data imported yet.</li>}
@@ -465,6 +608,16 @@ function DataTab({
 
 const CORRELATION_TESTS = new Set<StatTest>(['pearson', 'spearman', 'linear-regression']);
 
+/**
+ * Tests that read a table of counts rather than measurements.
+ *
+ * The gate runs both ways. A contingency table's rows are not replicates of one
+ * another, so a t-test on it compares means of frequencies — a confident,
+ * meaningless number. And chi-square on measurements silently treats them as
+ * counts. Neither is offered against the wrong kind of data.
+ */
+const COUNT_TESTS = new Set<StatTest>(['chi-square', 'fisher']);
+
 const TESTS: { id: StatTest; label: string }[] = [
   { id: 'ttest-welch', label: "Welch's t-test" },
   { id: 'ttest-independent', label: "Student's t-test" },
@@ -475,6 +628,7 @@ const TESTS: { id: StatTest; label: string }[] = [
   { id: 'anova-rm', label: 'Repeated-measures ANOVA' },
   { id: 'kruskal-wallis', label: 'Kruskal-Wallis' },
   { id: 'chi-square', label: 'Chi-square test' },
+  { id: 'fisher', label: "Fisher's exact test" },
   { id: 'pearson', label: 'Pearson correlation' },
   { id: 'spearman', label: 'Spearman correlation' },
   { id: 'linear-regression', label: 'Linear regression' },
@@ -553,6 +707,17 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     CORRELATION_TESTS.has(test) && series.length === 1 && series[0]?.x !== undefined;
   const blockedByContinuousAxis = continuousPlot && !xyCorrelation;
   const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
+
+  // Counts and measurements take disjoint tests; see COUNT_TESTS.
+  const counts = dataset !== undefined && isContingency(dataset);
+  const offeredTests = TESTS.filter((t) => COUNT_TESTS.has(t.id) === counts);
+
+  // Keep the dropdown honest when the selected plot's dataset changes kind.
+  const [testEcho, setTestEcho] = useState(counts);
+  if (testEcho !== counts) {
+    setTestEcho(counts);
+    if (COUNT_TESTS.has(test) !== counts) setTest(counts ? 'chi-square' : 'ttest-welch');
+  }
 
   const run = async (): Promise<void> => {
     if (blockedByContinuousAxis) {
@@ -708,7 +873,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       <label className="field block">
         Test
         <select value={test} onChange={(e) => setTest(e.target.value as StatTest)}>
-          {TESTS.map((t) => (
+          {offeredTests.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}
             </option>
@@ -728,8 +893,19 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       </label>
 
       <p className="hint">
-        Groups: {series.map((s) => `${s.name} (n=${s.values.length})`).join(', ') || '—'}
+        {counts ? 'Rows' : 'Groups'}:{' '}
+        {series
+          .map((s) => `${s.name} (${counts ? `total ${s.values.reduce((a, b) => a + b, 0)}` : `n=${s.values.length}`})`)
+          .join(', ') || '—'}
       </p>
+
+      {counts && (
+        <p className="hint">
+          This dataset is a contingency table, so only the count tests are offered — a
+          t-test here would compare means of frequencies. Its categories are{' '}
+          {contingencyCategories(dataset!).join(', ')}.
+        </p>
+      )}
 
       {blockedByContinuousAxis && (
         <p className="hint">

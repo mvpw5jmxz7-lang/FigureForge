@@ -16,6 +16,8 @@ Reference values:
   drug response  Maxwell & Delaney (1990), via statsmodels' own `AnovaRM`
               documented example — cited from statsmodels since that library,
               not R, computes this test here
+  tea tasting   Fisher (1935), via R's `?fisher.test` example
+  convictions   Fisher (1962) twin study, via R's `?fisher.test` example
 """
 
 from __future__ import annotations
@@ -223,6 +225,73 @@ class TestChiSquare:
         assert outcome.omnibus.statistic == pytest.approx(30.07, abs=1e-2)
         assert outcome.omnibus.df == [2.0]
         assert outcome.omnibus.p == pytest.approx(2.954e-07, rel=1e-3)
+
+
+class TestFisher:
+    """R: fisher.test() on the two datasets in its own help page.
+
+    Both p-values match R exactly. The *odds ratio* deliberately does not: R
+    reports the conditional maximum-likelihood estimate (6.408 for the tea
+    table), SciPy's `fisher_exact` returns the sample odds ratio (9.0). Neither
+    is wrong; they are different estimators, and asserting SciPy's own value
+    with the reason stated is more honest than forcing a match that is not real.
+    """
+
+    # Fisher's lady tasting tea: 3 of 4 cups identified correctly.
+    TEA = {"Guessed milk": [3.0, 1.0], "Guessed tea": [1.0, 3.0]}
+    # Fisher (1962): convictions among monozygotic vs dizygotic twins.
+    CONVICTIONS = {"Dizygotic": [2.0, 10.0], "Monozygotic": [15.0, 3.0]}
+
+    def test_tea_tasting_matches_r(self):
+        """R: fisher.test(TeaTasting, alternative = "greater") -> p = 0.2429"""
+        outcome = run_test("fisher", self.TEA, alternative="greater")
+        c = only(outcome)
+        assert c.p == pytest.approx(0.2429, abs=1e-4)
+        # SciPy's sample odds ratio, not R's conditional MLE of 6.408.
+        assert c.effectSize == pytest.approx(9.0, abs=1e-9)
+        assert c.effectSizeName == "Odds ratio"
+
+    def test_convictions_matches_r(self):
+        """R: fisher.test(Convictions) -> p = 0.0005367; alternative="less" -> 0.0004652"""
+        assert only(run_test("fisher", self.CONVICTIONS)).p == pytest.approx(
+            0.0005367, abs=1e-7
+        )
+        assert only(run_test("fisher", self.CONVICTIONS, alternative="less")).p == pytest.approx(
+            0.0004652, abs=1e-7
+        )
+
+    def test_reports_no_omnibus(self):
+        # Fisher's returns a p-value directly; inventing a chi-square beside it
+        # would invite reporting a number this test never computed.
+        assert run_test("fisher", self.TEA).omnibus is None
+
+    def test_rejects_a_table_larger_than_two_by_two(self):
+        # SciPy has no exact test beyond 2x2 and there is no honest way to
+        # approximate one — the whole point of Fisher's is that it is exact.
+        with pytest.raises(ValueError, match="2x2"):
+            run_test("fisher", GENDER_PARTY)
+
+
+class TestContingencyValidation:
+    """A count table is not a set of measurements, and is checked as one."""
+
+    def test_rejects_a_ragged_table(self):
+        # `_clean` drops non-finite values per row, so a blank cell used to
+        # arrive as a short row and raise an opaque numpy shape error.
+        with pytest.raises(ValueError, match="blank cell is not a zero"):
+            run_test("chi-square", {"F": [762.0, 327.0, 468.0], "M": [484.0, float("nan"), 477.0]})
+
+    def test_rejects_fractional_counts(self):
+        with pytest.raises(ValueError, match="whole number"):
+            run_test("chi-square", {"A": [1.5, 2.0], "B": [3.0, 4.0]})
+
+    def test_rejects_negative_counts(self):
+        with pytest.raises(ValueError, match="negative"):
+            run_test("chi-square", {"A": [-1.0, 2.0], "B": [3.0, 4.0]})
+
+    def test_rejects_a_single_category(self):
+        with pytest.raises(ValueError, match="at least two categories"):
+            run_test("chi-square", {"A": [1.0], "B": [3.0]})
 
 
 class TestNonparametric:

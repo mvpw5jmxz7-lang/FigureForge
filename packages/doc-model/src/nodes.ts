@@ -111,6 +111,11 @@ export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(
 
 export type ErrorBarKind = 'none' | 'sd' | 'sem' | 'ci95' | 'range' | 'iqr';
 
+/** Marker shapes. Enough to tell four series apart in greyscale. */
+export type PointShape = 'circle' | 'square' | 'triangle' | 'diamond';
+
+export const POINT_SHAPES: readonly PointShape[] = ['circle', 'square', 'triangle', 'diamond'];
+
 export type CenterKind = 'mean' | 'median';
 
 export interface AxisSpec {
@@ -126,6 +131,22 @@ export interface AxisSpec {
   showLabels: boolean;
   /** Draw the axis line only across the data range, Tufte-style. */
   trimToData: boolean;
+  /**
+   * Unlabelled subdivisions between major ticks, or 0/undefined for none.
+   * The count is *divisions*, so 5 draws four minor ticks per interval.
+   */
+  minorTicks?: number;
+  /** Ticks point away from the plot by default, as most journals draw them. */
+  tickDirection?: 'out' | 'in';
+  /**
+   * Ranges cut out of the axis, drawn with the conventional break marks.
+   *
+   * Linear scales only: a broken log axis compounds two different kinds of
+   * compression in one line, and there is no honest way to read it. Values
+   * falling inside a break are *dropped*, never clamped to its edge — a mark
+   * pinned to the break would be read as data at that value.
+   */
+  breaks?: readonly { from: number; to: number }[];
 }
 
 export interface PlotNode extends NodeBase {
@@ -166,6 +187,29 @@ export interface PlotNode extends NodeBase {
    * the shape a reader takes away, so it has to be overridable.
    */
   histogramBins?: number;
+  /**
+   * Whether an error bar is drawn on both sides of the centre.
+   *
+   * `'up'` reproduces the bar-chart convention of hiding the lower half under
+   * the bar. It reads cleanly and states half of what was measured, so `'both'`
+   * is the default and `'up'` is the deliberate choice.
+   */
+  errorBarDirection?: 'both' | 'up';
+  /** Replicate marker shape. Circles unless asked otherwise. */
+  pointShape?: PointShape;
+  /** Marker interior. Unset keeps the series/foreground rule in the renderer. */
+  pointFill?: string;
+  /** Marker outline. Unset draws no outline, as before. */
+  pointStroke?: Stroke;
+  /**
+   * A second y axis on the right, and which series read it.
+   *
+   * `seriesAxis` is indexed the same way as the palette — by series order — so
+   * it needs no names and cannot go stale when a series is renamed. Absent or
+   * `'y'` means the left axis, which is what every existing figure has.
+   */
+  y2?: AxisSpec;
+  seriesAxis?: readonly ('y' | 'y2')[];
 }
 
 export interface ImageNode extends NodeBase {

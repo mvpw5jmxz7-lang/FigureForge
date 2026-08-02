@@ -22,6 +22,7 @@ export type StatTest =
   | 'anova-rm'
   | 'kruskal-wallis'
   | 'chi-square'
+  | 'fisher'
   | 'pearson'
   | 'spearman'
   | 'linear-regression';

@@ -30,8 +30,15 @@ export interface ErrorBarGeometry {
   topMm: number;
   bottomMm: number;
   capHalfWidthMm: number;
-  /** True when the lower cap falls inside the bar and should be suppressed. */
-  lowerInsideBar: boolean;
+  /**
+   * True when only the upper half is drawn.
+   *
+   * Bar charts conventionally hide the lower cap under the bar, and the
+   * renderer used to go further and drop the whole lower segment — so a figure
+   * showed half of the spread that was measured. It is now an explicit choice
+   * on the plot (`errorBarDirection`), defaulting to both directions.
+   */
+  upperOnly: boolean;
 }
 
 export interface PointGeometry {
@@ -84,6 +91,8 @@ export interface MarkOptions {
   y: NumericScale;
   center: CenterKind;
   errorBars: ErrorBarKind;
+  /** 'both' draws the full symmetric whisker; 'up' keeps the bar convention. */
+  errorBarDirection?: 'both' | 'up';
   barWidthFraction: number;
   showBar: boolean;
   showBox: boolean;
@@ -162,7 +171,10 @@ export function categoricalMarks(
   options: MarkOptions,
 ): SeriesMarks[] {
   const random = mulberry32(options.seed ?? 0x5eed);
-  const baselineMm = options.y.scale(clampToDomain(0, options.y));
+  // A broken axis maps a value inside a gap to NaN, and zero can land in one.
+  // The range start is the honest fallback: it is where the axis begins.
+  const rawBaseline = options.y.scale(clampToDomain(0, options.y));
+  const baselineMm = Number.isFinite(rawBaseline) ? rawBaseline : options.y.range[0];
 
   return series.map((s, index) => {
     const stats = summarize(s.values);
@@ -196,8 +208,10 @@ export function categoricalMarks(
             topMm: options.y.scale(interval.high),
             bottomMm: options.y.scale(interval.low),
             capHalfWidthMm: Math.max(0.5, barWidth * 0.25),
-            // Hiding the lower cap under a bar is the standard convention.
-            lowerInsideBar: options.showBar,
+            // Both directions unless the plot explicitly asks for the bar-chart
+            // convention: an error bar states a spread, and drawing half of it
+            // states half of what was measured.
+            upperOnly: options.showBar && options.errorBarDirection === 'up',
           };
 
     const box: BoxGeometry | null =
@@ -238,7 +252,11 @@ export function categoricalMarks(
     // once in the overlay.
     const outliers: PointGeometry[] =
       box && !options.showPoints
-        ? stats.outliers.map((value) => ({ x: centerX, y: options.y.scale(value), value }))
+        ? stats.outliers
+            .map((value) => ({ x: centerX, y: options.y.scale(value), value }))
+            // Dropped, not clamped: an axis that says it does not show a range
+            // must not show a mark there.
+            .filter((p) => Number.isFinite(p.y))
         : [];
 
     let points: PointGeometry[] = [];
@@ -252,14 +270,12 @@ export function categoricalMarks(
           ? clampOffsets(beeswarmOffsets(ys, options.pointSizeMm), spread)
           : ys.map(() => (random() * 2 - 1) * spread);
 
-      points = finite.map((value, i) => ({
-        x: centerX + (offsets[i] ?? 0),
-        y: ys[i]!,
-        value,
-      }));
+      points = finite
+        .map((value, i) => ({ x: centerX + (offsets[i] ?? 0), y: ys[i]!, value }))
+        .filter((p) => Number.isFinite(p.y));
     }
 
-    const candidates = [centerMm];
+    const candidates = [centerMm].filter(Number.isFinite);
     if (bar) candidates.push(bar.y);
     if (errorBar) candidates.push(errorBar.topMm);
     // The whisker cap, not the hinge — a bracket placed off q3 sits inside the plot.
@@ -277,8 +293,9 @@ export function categoricalMarks(
       points,
       outliers,
       centerMm,
-      // y is inverted, so the visual top is the minimum.
-      topMm: Math.min(...candidates),
+      // y is inverted, so the visual top is the minimum. Empty only when every
+      // mark fell inside an axis break, in which case there is nothing to clear.
+      topMm: candidates.length > 0 ? Math.min(...candidates) : 0,
       n: stats.n,
       errorLabel: interval.label,
     };
@@ -330,6 +347,12 @@ export interface XySeriesMarks {
 export interface XyMarkOptions {
   x: NumericScale;
   y: NumericScale;
+  /**
+   * Per-series y scale, for a plot with a second axis on the right. Indexed by
+   * series order — the same key the palette uses, so it needs no names and
+   * cannot go stale when a series is renamed. A missing entry means `y`.
+   */
+  ySeries?: readonly (NumericScale | undefined)[];
   showLine: boolean;
   showPoints: boolean;
   pointSizeMm: number;
@@ -343,6 +366,7 @@ export function xyMarks(
 ): XySeriesMarks[] {
   return series.map((s, index) => {
     const color = options.colors[index % Math.max(1, options.colors.length)] ?? '#000000';
+    const y = options.ySeries?.[index] ?? options.y;
 
     // Only pairs where both coordinates are real. Dropping the pair rather than
     // the value keeps x and y aligned; dropping one side would shift every
@@ -356,16 +380,20 @@ export function xyMarks(
       pairs.push({ xValue, yValue });
     }
 
-    const points: PointGeometry[] = pairs.map((p) => ({
-      x: options.x.scale(p.xValue),
-      y: options.y.scale(p.yValue),
-      value: p.yValue,
-    }));
+    /*
+     * A broken axis maps values inside a gap to NaN, so the drawn position has
+     * to be checked as well as the value. Dropping the pair is the whole point:
+     * an axis that says it does not show a range must not show a mark there.
+     */
+    const points: PointGeometry[] = pairs
+      .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
 
     const linePath = options.showLine
       ? [...pairs]
           .sort((a, b) => a.xValue - b.xValue)
-          .map((p) => ({ x: options.x.scale(p.xValue), y: options.y.scale(p.yValue) }))
+          .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue) }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
       : null;
 
     const tops = points.map((p) => p.y - (options.showPoints ? options.pointSizeMm / 2 : 0));

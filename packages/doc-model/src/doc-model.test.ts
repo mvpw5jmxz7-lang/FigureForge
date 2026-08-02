@@ -9,7 +9,9 @@ import {
   editDocument,
   formatMm,
   hashInputs,
+  contingencyCategories,
   inferFormat,
+  isContingency,
   loadArchive,
   mmToPt,
   parseDelimited,
@@ -139,6 +141,56 @@ describe('delimited parsing', () => {
     const parsed = parseDelimited('a,b,c\n1,2\n3,4,5');
     expect(parsed.rows[0]).toHaveLength(3);
     expect(parsed.rows[0]?.[2]).toBeNull();
+  });
+
+  it('takes an explicit delimiter, header rule and transpose', () => {
+    // Detection is a heuristic; when it is wrong the author needs a way to say
+    // so that does not involve re-shaping the file by hand.
+    const semi = parseDelimited('a;b\n1;2', { delimiter: ';' });
+    expect(semi.rows[0]).toEqual([1, 2]);
+
+    // 'x,y' over numbers detects as a header; forcing it off keeps the row.
+    const noHeader = parseDelimited('x,y\n1,2', { hasHeader: false });
+    expect(noHeader.hasHeader).toBe(false);
+    expect(noHeader.rows).toHaveLength(2);
+
+    const flipped = parseDelimited('Vehicle,10,11\nDrug,4,5', { transpose: true });
+    expect(flipped.rows.map((r) => r[0])).toEqual([10, 11]);
+  });
+
+  it('reads a sedimentation-style export as independent xy pairs', () => {
+    /*
+     * Repeated first-of-pair column names are the signal. The old rule demanded
+     * headers literally starting with x and y, so this table was read as
+     * `prism` — one shared x for every series, silently plotting run 2 against
+     * run 1's radii.
+     */
+    const columns = parseDelimited(
+      'Radius,C(s)_run1,Radius,C(s)_run2\n6.0,0.1,6.1,0.2\n6.5,0.4,6.6,0.5',
+    ).columns;
+    expect(inferFormat(columns)).toBe('sigmaplot');
+  });
+
+  it('still reads a genuinely shared-x table as prism', () => {
+    // Regression guard: the relaxed rule must not swallow the shared-x case,
+    // whose distinguishing feature is that the first-of-pair names differ.
+    expect(inferFormat(parseDelimited('Time,WT,KO,Rescue\n0,1,2,3').columns)).toBe('prism');
+    expect(inferFormat(parseDelimited('Dose,A,B,C\n0,1,2,3\n1,2,3,4').columns)).toBe('prism');
+  });
+
+  it('reads a contingency table row by row, like replicates', () => {
+    // Same shape, different meaning: the numbers are counts, so what may be
+    // *done* with them differs, which `isContingency` gates rather than this.
+    const table: Dataset = {
+      ...dataset('Group,Yes,No\nTreated,15,5\nControl,7,13'),
+      format: 'contingency',
+    };
+    const series = toSeries(table);
+    expect(series.map((s) => s.name)).toEqual(['Treated', 'Control']);
+    expect(series[0]?.values).toEqual([15, 5]);
+    expect(isContingency(table)).toBe(true);
+    expect(contingencyCategories(table)).toEqual(['Yes', 'No']);
+    expect(isContingency(dataset('Group,Value\nA,1'))).toBe(false);
   });
 
   it('infers each supported layout', () => {
@@ -495,6 +547,31 @@ describe('operations', () => {
         expect(overlaps).toBe(false);
       }
     }
+  });
+
+  it('plots a contingency table as plain counted bars', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const counts: Dataset = {
+      ...dataset('Group,Yes,No\nTreated,15,5\nControl,7,13', newId()),
+      format: 'contingency',
+    };
+
+    const doc = editDocument(base, (draft) => {
+      draft.datasets = [counts];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 50 },
+        datasetId: counts.id,
+      });
+    });
+
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    // An SEM over category counts is a standard error of nothing, and it looks
+    // entirely convincing on the page.
+    expect(plot.type === 'plot' && plot.errorBars).toBe('none');
+    expect(plot.type === 'plot' && plot.showPoints).toBe(false);
+    expect(plot.type === 'plot' && plot.plotType).toBe('bar');
+    expect(plot.type === 'plot' && plot.y.title).toBe('Count');
   });
 
   it('locks a node whose layer is locked', () => {

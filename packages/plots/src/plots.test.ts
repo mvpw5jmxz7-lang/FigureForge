@@ -165,6 +165,73 @@ describe('scales', () => {
     expect(formatTick(1000, 100)).toBe('1000');
   });
 
+  it('cuts a range out of a broken axis and keeps the rest monotonic', () => {
+    const scale = makeScale({
+      domain: { min: 0, max: 100 },
+      rangeMm: [60, 0],
+      tickStep: null,
+      kind: 'linear',
+      breaks: [{ from: 20, to: 80 }],
+    });
+
+    // 40 units of data over 58 mm of axis, the other 2 mm being the gap.
+    expect(scale.scale(0)).toBeCloseTo(60, 6);
+    expect(scale.scale(100)).toBeCloseTo(0, 6);
+    expect(scale.scale(10)).toBeGreaterThan(scale.scale(20));
+    expect(scale.scale(20)).toBeGreaterThan(scale.scale(80));
+    expect(scale.scale(80)).toBeGreaterThan(scale.scale(90));
+
+    // Equal spans on either side of the break get equal millimetres, because a
+    // break removes a range rather than compressing it.
+    expect(scale.scale(0) - scale.scale(20)).toBeCloseTo(scale.scale(80) - scale.scale(100), 6);
+    expect(scale.breaks).toHaveLength(1);
+  });
+
+  it('maps a value inside a break to NaN rather than to the edge of the gap', () => {
+    // Clamping would draw a mark at a value the axis explicitly does not show,
+    // which a reader takes as data.
+    const scale = makeScale({
+      domain: { min: 0, max: 100 },
+      rangeMm: [60, 0],
+      tickStep: null,
+      kind: 'linear',
+      breaks: [{ from: 20, to: 80 }],
+    });
+    expect(Number.isNaN(scale.scale(50))).toBe(true);
+    expect(scale.ticks.every((t) => t <= 20 + 1e-9 || t >= 80 - 1e-9)).toBe(true);
+  });
+
+  it('merges overlapping breaks and ignores ones outside the domain', () => {
+    const scale = makeScale({
+      domain: { min: 0, max: 100 },
+      rangeMm: [60, 0],
+      tickStep: null,
+      kind: 'linear',
+      // Two overlapping ranges would each reserve a gap and each subtract their
+      // span, so the axis would lose the shared region twice.
+      breaks: [
+        { from: 20, to: 50 },
+        { from: 40, to: 80 },
+        { from: 200, to: 300 },
+      ],
+    });
+    expect(scale.breaks).toHaveLength(1);
+    expect(scale.scale(0)).toBeCloseTo(60, 6);
+    expect(scale.scale(100)).toBeCloseTo(0, 6);
+  });
+
+  it('ignores breaks on a log axis', () => {
+    const scale = makeScale({
+      domain: { min: 1, max: 1000 },
+      rangeMm: [60, 0],
+      tickStep: null,
+      kind: 'log10',
+      breaks: [{ from: 10, to: 100 }],
+    });
+    expect(scale.breaks).toBeUndefined();
+    expect(Number.isFinite(scale.scale(50))).toBe(true);
+  });
+
   it('spaces band categories evenly', () => {
     const band = makeBandScale(['A', 'B', 'C'], [0, 90]);
     const centres = ['A', 'B', 'C'].map((n) => band.center(n));
@@ -268,6 +335,48 @@ describe('mark geometry', () => {
     // 9 → 5 mm, minus half the point size. A bracket placed off the whisker
     // instead would be drawn straight through the outlier.
     expect(mark!.topMm).toBeCloseTo(4.5, 6);
+  });
+
+  it('draws error bars in both directions unless asked otherwise', () => {
+    // The default has to be symmetric: the interval is symmetric, and drawing
+    // half of it states half of what was measured.
+    const [both] = categoricalMarks([{ name: 'A', values }], options({ showBar: true }));
+    expect(both!.errorBar!.upperOnly).toBe(false);
+    expect(both!.errorBar!.bottomMm).toBeGreaterThan(both!.errorBar!.topMm);
+
+    const [up] = categoricalMarks(
+      [{ name: 'A', values }],
+      options({ showBar: true, errorBarDirection: 'up' }),
+    );
+    expect(up!.errorBar!.upperOnly).toBe(true);
+  });
+
+  it('keeps both directions on a dot plot even when "up" is asked for', () => {
+    // With no bar there is nothing for the lower half to hide behind, so the
+    // convention does not apply and half a whisker would just be missing data.
+    const [mark] = categoricalMarks(
+      [{ name: 'A', values }],
+      options({ showBar: false, errorBarDirection: 'up' }),
+    );
+    expect(mark!.errorBar!.upperOnly).toBe(false);
+  });
+
+  it('drops points that fall inside an axis break', () => {
+    const broken = makeScale({
+      domain: { min: 0, max: 10 },
+      rangeMm: [50, 0],
+      tickStep: null,
+      kind: 'linear',
+      breaks: [{ from: 2.5, to: 4.5 }],
+    });
+    const [mark] = categoricalMarks(
+      [{ name: 'A', values }],
+      options({ y: broken, showPoints: true, showBar: true }),
+    );
+    // 3 and 4 are inside the break; 1, 2 and 5 survive.
+    expect(mark!.points.map((p) => p.value).sort((a, b) => a - b)).toEqual([1, 2, 5]);
+    expect(mark!.points.every((p) => Number.isFinite(p.y))).toBe(true);
+    expect(Number.isFinite(mark!.bar!.baselineMm)).toBe(true);
   });
 
   it('suppresses the error bar when the distribution is already drawn', () => {
