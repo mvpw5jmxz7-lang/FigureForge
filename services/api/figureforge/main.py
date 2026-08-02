@@ -79,7 +79,12 @@ class Group(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     test: str
-    groups: list[Group] = Field(min_length=2)
+    groups: list[Group] = Field(min_length=1)
+    # Paired x-values for correlating a single series against its own x axis
+    # (pearson/spearman/linear-regression only); every other test compares two
+    # or more named groups instead. `run_test` enforces which shape a given
+    # test requires.
+    x: Group | None = None
     alternative: Literal["two-sided", "less", "greater"] = "two-sided"
     correction: Literal[
         "none", "bonferroni", "holm", "benjamini-hochberg", "tukey", "dunn"
@@ -141,6 +146,8 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             correction=request.correction,
             alpha=request.alpha,
             welch=request.welch,
+            x=request.x.values if request.x else None,
+            x_name=request.x.name if request.x else "x",
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error

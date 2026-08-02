@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  analysisInputHash,
   ArchiveError,
   buildArchiveContents,
   createDocument,
@@ -17,6 +18,7 @@ import {
   significanceStars,
   toMm,
   toSeries,
+  xForHash,
   type Dataset,
 } from './index.js';
 import {
@@ -953,6 +955,33 @@ describe('input hashing', () => {
   it('changes when any value changes', () => {
     // This is what marks a displayed p-value stale after the data is edited.
     expect(hashInputs([1, 2, 3])).not.toBe(hashInputs([1, 2, 3.0001]));
+  });
+
+  it('analysisInputHash without x matches the pre-existing 2-argument form', () => {
+    // Every already-saved project's inputHash was computed by the 2-argument
+    // call. If the 3-argument form changed that output, every analysis in an
+    // existing .figureforge file would read as stale the moment it reopens.
+    const options = { test: 'ttest-welch' as const, correction: 'holm' as const };
+    const values = [[1, 2, 3], [4, 5, 6]];
+    expect(analysisInputHash(options, values)).toBe(
+      hashInputs({ test: options.test, correction: options.correction }, values),
+    );
+  });
+
+  it('analysisInputHash changes when x is supplied, and xForHash gates on series count', () => {
+    const options = { test: 'pearson' as const, correction: 'none' as const };
+    const values = [[1, 2, 3]];
+    const withoutX = analysisInputHash(options, values);
+    const withX = analysisInputHash(options, values, [4, 5, 6]);
+    expect(withX).not.toBe(withoutX);
+
+    expect(xForHash([{ name: 'y', values: [1, 2, 3], x: [4, 5, 6] }])).toEqual([4, 5, 6]);
+    expect(
+      xForHash([
+        { name: 'a', values: [1], x: [1] },
+        { name: 'b', values: [2], x: [2] },
+      ]),
+    ).toBeUndefined();
   });
 });
 

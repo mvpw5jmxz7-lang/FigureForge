@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–4 are done; phases 5–9 are not.**
+could be proven before breadth was added. **Phases 1–5 are done; phases 6–9 are not.**
 
 ---
 
@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 215 TypeScript + 59 Python tests
+make test        # 217 TypeScript + 68 Python tests
 make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -148,8 +148,13 @@ Each guards against a specific, common reporting error:
 - **Confidence intervals use the t distribution.** At n = 3 the correct
   multiplier is 4.303, not 1.96; the 1.96 shortcut badly understates the interval.
 - **Tests are verified against externally published values** — Student's 1908
-  sleep data and R's documented output for `t.test`, `aov`, `cor.test` — not
-  against numbers this code produced itself.
+  sleep data and R's documented output for `t.test`, `aov`, `cor.test`,
+  `chisq.test`, `wilcox.test`, and statsmodels' own documented `AnovaRM`
+  example — not against numbers this code produced itself. Spearman is the one
+  exception: R's `cor.test` computes an exact permutation p-value (AS 89) that
+  SciPy's t-approximation genuinely does not reproduce at low n, so that test
+  asserts against SciPy's own reproducible output and says so in a comment
+  rather than pretending to match R.
 - **One analysis per plot.** Re-running a test replaces the previous result and
   its brackets (`replaceAnalysisForPlot` + `removeBracketsForPlot`) rather than
   appending. Accumulating them stacked new brackets at the same heights as the
@@ -171,15 +176,20 @@ Each guards against a specific, common reporting error:
 
 ## Current state
 
-Phases 1–4 are on `master` plus the `feature/phase-4-images-annotations`
-branch. Run `git status` before assuming the tree is clean.
+Phases 1–4 are on `master`. Phase 5 (remaining stats surface) is on
+`feature/phase-5-remaining-stats-surface`, not yet merged. Run `git status`
+and `git branch` before assuming the tree is clean or which branch you're on.
 
-**Verified:** 215 TypeScript tests, 59 Python tests, typecheck and lint clean,
+**Verified:** 217 TypeScript tests, 68 Python tests, typecheck and lint clean,
 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
 Chromium against the running app — import, scale bars, annotations, crop and
-measure — because green tests do not mean the app runs.
+measure — because green tests do not mean the app runs. Phase 5's new paths
+(correlation on a scatter plot, repeated-measures ANOVA) were driven the same
+way: methods sentence read `F(3, 12) = 24.76, P < 0.001` against the
+statsmodels reference dataset, and Pearson on Anscombe's scatter data read
+`X vs Y, P = 0.002, r² = 0.67` with no console errors.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
 user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
@@ -261,6 +271,44 @@ exposed.
   carry a distinct `point-handle` role so the parity test's "exactly 8 resize
   handles" keeps its meaning.
 
+### Phase 5 — remaining stats surface
+
+Four gaps in the stats surface, all in the same slice: three tests worked
+server-side but were never exposed, one was declared but undispatchable, and
+correlation was unreachable for the plot type it matters most for.
+
+- **`wilcoxon`, `chi-square`, `linear-regression` were implemented and
+  R-verified but missing from the `TESTS` dropdown** in `SidePanel.tsx` —
+  purely a UI gap, no server change needed.
+- **`anova-rm` had no dispatch branch at all**, despite being in the
+  `StatTest` union and the `parametric` assumption-check set. Implemented via
+  `statsmodels.stats.anova.AnovaRM`, generalising `ttest-paired`'s existing
+  row-index-as-subject-id convention from two groups to N. Unbalanced designs
+  (unequal group lengths) are refused with a clear error rather than
+  approximated — row order is the only signal this shape has for subject
+  identity, so a length mismatch can't be resolved, only reported.
+- **Correlation was structurally unreachable for a `simple-xy` scatter
+  dataset.** Two independent blockers, both fixed: the `continuousPlot` gate
+  in `SidePanel.tsx` refused *any* test on a numeric-x plot (now relaxed
+  specifically for `pearson`/`spearman`/`linear-regression` when there's a
+  single series carrying paired `x`), and the server had no `x` parameter at
+  all (`run_test` in `tests.py` now pre-transforms a single series plus `x`
+  into the same two-key `groups` shape every dispatch branch already expects,
+  so the branches themselves needed no changes).
+- **`analysisInputHash` gained an optional third `x` argument, additive
+  only.** The 2-argument call must keep hashing exactly as before — every
+  already-saved project's `inputHash` was computed that way, and this is the
+  same "data changed on an untouched figure" bug class the input-hash
+  composition rule above already exists to prevent. `xForHash(series)` is the
+  one place that decides whether a persisted analysis's series carry x
+  (exactly one series present is a sufficient signal, since every other test
+  requires at least two).
+- **Spearman's p-value is not asserted against R.** R's `cor.test` computes an
+  exact permutation p-value for this sample size; SciPy's `spearmanr` uses a
+  t-approximation. The two legitimately disagree at low n — the test asserts
+  SciPy's own reproducible value and documents why, rather than forcing a
+  match that isn't real.
+
 ### The editing iteration (after phases 1–2)
 
 A round of reported bugs and requests, all fixed on the phase 1–2 surface:
@@ -301,7 +349,7 @@ Phases 5–9, with the actual entry points:
 |---|---|---|
 | 3 | **done** — all 9 plot types render | `PlotGeometry` is a discriminated union on `kind: 'categorical' \| 'continuous'`; `renderNumericXTicks` is the numeric x axis |
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
-| 5 | remaining stats surface | `services/api/figureforge/stats/tests.py` |
+| 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | export/QC hardening, autofixes | `packages/render/src/quality.ts` |
 | 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; needs the DOM-volume answer below first |
 | 8 | Electron shell | new; see the sidecar risk below |
@@ -309,8 +357,6 @@ Phases 5–9, with the actual entry points:
 
 ### Already scaffolded but unused
 
-- **Statistical tests** `chi-square`, `linear-regression`, `wilcoxon` are
-  implemented in the API but absent from the UI dropdown in `SidePanel.tsx`.
 - **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
   templates and honoured by `autoLayout`, but nothing lets a user author a slot
   directly — templates are the only way to set one.
@@ -330,16 +376,6 @@ Phases 5–9, with the actual entry points:
   series, since pooling groups invents a bimodal shape belonging to neither.
   `computePlotGeometry` returns null for an unsupported combination, so a type
   set some other way draws nothing rather than something wrong.
-- **`anova-rm` is in the `StatTest` union and in the `parametric` set
-  (`tests.py:250`) but has no dispatch branch**, so calling it raises
-  `Unsupported test: anova-rm`. It is not in the UI dropdown, so it is not
-  user-reachable — but the type says it works.
-- **`pearson`/`spearman` correlate two y-series against each other, never a
-  series against its own x.** `run()` in `SidePanel.tsx` posts only
-  `Series.values`, and `tests.py` takes `groups[names[0]]` vs `groups[names[1]]`.
-  For a `simple-xy` dataset `toSeries` yields a single series, so the run bails
-  at "at least two groups" — the correlation test is **unreachable for the
-  canonical scatter case**. Both tests are in the UI dropdown today.
 
 ---
 

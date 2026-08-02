@@ -9,6 +9,7 @@
  * Computation itself happens in the Python service; nothing here runs a test.
  */
 
+import type { Series } from './data.js';
 import type { AnalysisId, DatasetId, NodeId } from './nodes.js';
 
 export type StatTest =
@@ -172,6 +173,25 @@ export const isStale = (analysis: Analysis, currentHash: string): boolean =>
 export function analysisInputHash(
   options: { test: StatTest; correction: Correction },
   values: readonly (readonly number[])[],
+  x?: readonly number[],
 ): string {
-  return hashInputs({ test: options.test, correction: options.correction }, values);
+  // The 2-argument form must keep hashing exactly as before: every already-
+  // saved project's inputHash was computed that way, and passing a 3rd
+  // argument only when x is undefined would flip every existing analysis to
+  // "stale" the moment a project is reopened.
+  return x === undefined
+    ? hashInputs({ test: options.test, correction: options.correction }, values)
+    : hashInputs({ test: options.test, correction: options.correction }, values, x);
+}
+
+/**
+ * The x-values to fold into an analysis's hash, if any.
+ *
+ * A persisted analysis can only have exactly one group in `spec.groups` when
+ * it is a series correlated against its own x — every other test requires at
+ * least two groups. So "exactly one series" is a safe, sufficient signal; no
+ * per-test check is needed here.
+ */
+export function xForHash(series: readonly Series[]): readonly number[] | undefined {
+  return series.length === 1 ? series[0]?.x : undefined;
 }

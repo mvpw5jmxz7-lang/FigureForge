@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from scipy import stats as sps
+from statsmodels.stats.anova import AnovaRM
 from statsmodels.stats.multitest import multipletests
 
 Alternative = Literal["two-sided", "less", "greater"]
@@ -233,7 +235,32 @@ def run_test(
     correction: Correction = "none",
     alpha: float = 0.05,
     welch: bool = True,
+    x: Sequence[float] | None = None,
+    x_name: str = "x",
 ) -> TestOutcome:
+    if x is not None:
+        # A series correlated against its own x column (e.g. a scatter plot's
+        # simple-xy dataset) arrives as one named series plus a separate x
+        # array, not two named series. Fold it into the two-key shape every
+        # dispatch branch below already expects, so nothing past this point
+        # needs to know the difference.
+        if test not in ("pearson", "spearman", "linear-regression"):
+            raise ValueError(f'"{test}" does not accept a separate x series; provide two groups.')
+        if len(groups) != 1:
+            raise ValueError("Correlating a series against its own x needs exactly one series.")
+        (series_name, values), = groups.items()
+        if series_name == x_name:
+            raise ValueError(f'The series and its x-axis cannot both be named "{x_name}".')
+        if len(x) != len(values):
+            raise ValueError("x and the series must have the same number of points.")
+        xs = np.asarray(x, dtype=float)
+        ys = np.asarray(values, dtype=float)
+        # A NaN in either column must drop that whole pair together; cleaning
+        # each column independently (as the generic path below does for
+        # unrelated groups) would shift x and y out of alignment.
+        mask = np.isfinite(xs) & np.isfinite(ys)
+        groups = {x_name: xs[mask].tolist(), series_name: ys[mask].tolist()}
+
     cleaned = {name: _clean(values) for name, values in groups.items()}
 
     if len(cleaned) < 2:
@@ -355,6 +382,52 @@ def _dispatch(
             _pairwise(groups, run),
             Omnibus(float(f_stat), float(p), [float(df_between), float(df_within)]),
         )
+
+    if test == "anova-rm":
+        # run_test's generic "at least two groups" check above already rules
+        # out a single condition before dispatch is reached.
+        arrays = [groups[n] for n in names]
+        lengths = {len(a) for a in arrays}
+        if len(lengths) != 1:
+            # Row order is the only signal this shape has for subject identity
+            # (the same convention ttest-paired already relies on for two
+            # groups), so an unequal count can't be resolved - which subject
+            # would be missing which condition is not knowable from the data.
+            detail = ", ".join(f'"{n}" has {len(a)}' for n, a in zip(names, arrays, strict=True))
+            raise ValueError(
+                "Repeated-measures ANOVA needs the same number of subjects in every "
+                f"condition (row order is treated as subject identity): {detail}."
+            )
+        n_subjects = lengths.pop()
+        if n_subjects < 2:
+            raise ValueError("Repeated-measures ANOVA needs at least two subjects.")
+
+        long_df = pd.DataFrame({
+            "value": np.concatenate(arrays),
+            "condition": np.repeat(names, n_subjects),
+            "subject": np.tile(np.arange(n_subjects), len(names)),
+        })
+        fit = AnovaRM(long_df, depvar="value", subject="subject", within=["condition"]).fit()
+        row = fit.anova_table.loc["condition"]
+        f_stat = float(row["F Value"])
+        df1 = float(row["Num DF"])
+        df2 = float(row["Den DF"])
+        p = float(row["Pr > F"])
+
+        # Pairwise follow-ups use the same paired convention as ttest-paired;
+        # correction is applied by the caller, consistent with anova-one-way.
+        def run(na, a, nb, b):
+            result = sps.ttest_rel(a, b, alternative="two-sided")
+            differences = a - b
+            n = len(differences)
+            sd_diff = differences.std(ddof=1) if n > 1 else 0.0
+            d = float(differences.mean() / sd_diff) if sd_diff > 0 else float("nan")
+            return Comparison(
+                na, nb, float(result.statistic), float(result.pvalue), float(result.pvalue),
+                float(n - 1), None, d, "Cohen's dz", [len(a), len(b)],
+            )
+
+        return TestOutcome(_pairwise(groups, run), Omnibus(f_stat, p, [df1, df2]))
 
     if test == "kruskal-wallis":
         arrays = [groups[n] for n in names]

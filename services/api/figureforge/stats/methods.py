@@ -112,7 +112,7 @@ def methods_sentence(
 
 
 def _omnibus_clause(test: str, omnibus: Omnibus) -> str:
-    if test == "anova-one-way" and omnibus.df and len(omnibus.df) == 2:
+    if test in ("anova-one-way", "anova-rm") and omnibus.df and len(omnibus.df) == 2:
         return (
             f"The omnibus test was significant "
             f"(F({omnibus.df[0]:.0f}, {omnibus.df[1]:.0f}) = {omnibus.statistic:.2f}, "
