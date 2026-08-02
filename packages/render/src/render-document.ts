@@ -9,7 +9,7 @@
 import {
   CONTINUOUS_X_PLOT_TYPES,
   absoluteFrame,
-  isEffectivelyLocked,
+  isLocked,
   childrenOf,
   findAsset,
   findDataset,
@@ -1377,7 +1377,7 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
 
     // No handles on a locked node: offering a grip that cannot move is worse
     // than offering none.
-    if (isEffectivelyLocked(doc.nodes, id)) continue;
+    if (isLocked(doc, id)) continue;
 
     for (const handle of RESIZE_HANDLES) {
       outlines.push(

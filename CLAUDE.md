@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 217 TypeScript + 68 Python tests
+make test        # 223 TypeScript + 68 Python tests
 make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -176,11 +176,12 @@ Each guards against a specific, common reporting error:
 
 ## Current state
 
-Phases 1–4 are on `master`. Phase 5 (remaining stats surface) is on
-`feature/phase-5-remaining-stats-surface`, not yet merged. Run `git status`
-and `git branch` before assuming the tree is clean or which branch you're on.
+Phases 1–5 are on `master`. A three-stage round of reported bugs and requests
+follows; **stage A (`fix/reported-bugs`) is done**, stages B and C are not — see
+"The reported-bug rounds" below. Run `git status` and `git branch` before
+assuming the tree is clean or which branch you're on.
 
-**Verified:** 217 TypeScript tests, 68 Python tests, typecheck and lint clean,
+**Verified:** 223 TypeScript tests, 68 Python tests, typecheck and lint clean,
 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
@@ -189,7 +190,12 @@ measure — because green tests do not mean the app runs. Phase 5's new paths
 (correlation on a scatter plot, repeated-measures ANOVA) were driven the same
 way: methods sentence read `F(3, 12) = 24.76, P < 0.001` against the
 statsmodels reference dataset, and Pearson on Anscombe's scatter data read
-`X vs Y, P = 0.002, r² = 0.67` with no console errors.
+`X vs Y, P = 0.002, r² = 0.67` with no console errors. Stage A was driven the
+same way, in **dark mode** (the text-editor bug only appears there): panel
+selection, double-click entry, Escape, Delete, grouping, stats following the
+selection onto panel b, the non-significant notice, the template control at
+4/5/6 panels, an import after a template with no overlap across 7 panels, the
+Layers eye, and the editor reading `rgb(232,234,237) on rgb(31,34,39)`.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
 user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
@@ -339,6 +345,70 @@ the parity test could catch — both are now covered:
 - Setting a panel's frame through the Inspector without `resizePanel` left its
   plot at the old size inside the resized panel.
 
+### The reported-bug rounds (after phase 5)
+
+Seventeen items reported from real use, split into three stages so each can be
+verified and redirected before the next. **Stage A is merged; B and C are not.**
+
+- Stage A — bugs: canvas selection, templates, import overlap, layer visibility,
+  stats annotation, text editing, scale bar colour.
+- Stage B — editor UX: figure title and chosen save filename, copy/paste,
+  z-order reordering, plot margins that grow with their labels.
+- Stage C — plotting and data: two-directional error bars, broken and secondary
+  axes, log/semi-log axis UI, marker and tick options in the Inspector, import
+  format options, contingency tables and Fisher's exact test.
+
+#### Stage A, and what each bug actually was
+
+Three of the eight reports named a symptom whose cause was somewhere else
+entirely. Recorded here so they are not "fixed" a second time in the wrong place.
+
+- **"Panels can't be deleted" and "Group doesn't group" are one bug.** Every
+  scene node calls `stopPropagation` before reporting itself (`react.tsx`), so
+  the renderer always names the *deepest* node under the cursor: clicking a
+  panel selected its plot, and a group's own `<g>` never received the event at
+  all. `deleteNode` and `addGroup` were both correct the whole time. Canvas
+  clicks now resolve through `selectionTarget` in `Canvas.tsx` — a click selects
+  the outermost container, double-click steps inside (`enteredId`), Escape steps
+  back out. The renderer is untouched, so export fidelity is unaffected.
+- **"No statistical labels after a test" was the Stats tab annotating a
+  different panel.** `activePlot` fell back to `plots[0]` — *insertion* order,
+  not reading order — and nothing tied it to the canvas selection, so selecting
+  panel c and hitting Run silently re-annotated panel a. The tab now follows the
+  selection (`plotFromSelection`), with the dropdown kept as an override.
+  Separately, every reason a bracket might not appear used to be silent: all
+  comparisons above α, `addBracket` returning null, correlation having nothing
+  to span. Each is now stated in a notice under the button. Reproduced in a real
+  browser before being changed — the model path was never broken, and
+  `make acceptance` proves it still is not.
+- **"Imported panel lands on an existing one" was a stale `slot`.**
+  `applyAutoLayout` replayed each panel's `slot` from an earlier template
+  against a freshly suggested grid of a different shape, so an old panel's span
+  covered the new panel's cell. A slot is only meaningful against the grid it
+  was authored for, so a template-less layout now clears it. The second half:
+  every import created its panel at a hardcoded `(4, 4)`, which sorts *first* in
+  `readingOrder` and took panel a's cell — `nextPanelFrame` places it below
+  everything instead.
+- **"Templates can't be applied" was a control that disappears.**
+  `templatesForPanelCount` only covered 1–4 panels and the Toolbar hid the whole
+  `<select>` when the list was empty. Templates for 5 and 6 (and a second 4)
+  were added, and the control now shows a disabled reason rather than vanishing.
+  A test asserts every template gives every panel its own cell.
+- **The in-place text editor was white-on-white.** `:root` declares
+  `color-scheme: light dark`, so an `<input>` the app does not colour takes its
+  text colour from the OS scheme; `.text-edit-overlay` hardcoded a white
+  background and set no colour. Both now track the theme. The app's generic
+  input rule only matched `input[type='number'|'file']`, so bare `input` was
+  added to it too.
+- **The Layers padlock was inert.** `isEffectivelyLocked` only sees the node
+  map, so it could never consult `layer.locked`. `isLocked(doc, id)` in
+  `document.ts` is the document-aware replacement every call site now uses.
+- **Scale bars default to black**, not white. White is right only over a dark
+  micrograph. The Inspector's colour control also stopped discarding
+  `fill.opacity` on every change.
+- **The Layers list can hide as well as delete.** `hidden` and the renderer's
+  support for it already existed; the only toggle was buried in the Inspector.
+
 ---
 
 ## What's next
@@ -359,13 +429,8 @@ Phases 5–9, with the actual entry points:
 
 - **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
   templates and honoured by `autoLayout`, but nothing lets a user author a slot
-  directly — templates are the only way to set one.
-- **Group semantics are half-shipped, deliberately.** `addGroup`/`ungroup`
-  preserve every member's page position, and the Toolbar and Inspector expose
-  them — but clicking the canvas still selects the leaf, so a group is only
-  reachable from the Layers list. Real semantics (click selects the outermost
-  group, double-click enters it) is a substantial change to canvas selection,
-  the one path everything else depends on. The UI says so rather than pretending.
+  directly — templates are the only way to set one. It is also now *cleared*
+  whenever layout runs without a template; see stage A below for why.
 
 ### Declared-but-missing things — check before trusting the types
 

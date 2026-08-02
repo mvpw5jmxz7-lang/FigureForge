@@ -183,6 +183,29 @@ export function addPlot(
   return plot;
 }
 
+/**
+ * Where to put a panel that is about to be created, before layout runs.
+ *
+ * Every import path used to drop its new panel at a fixed `(4, 4)`. Layout runs
+ * straight afterwards and assigns cells by `readingOrder`, which sorts on
+ * `frame.y` then `frame.x` — so the brand new panel sorted *first* and took
+ * panel a's cell, displacing every existing panel by one. Placing it below
+ * everything already on the page makes it sort last, which is where an author
+ * expects a freshly imported panel to appear.
+ */
+export function nextPanelFrame(
+  draft: FigureDocument,
+  size: { width: number; height: number },
+  marginMm = 4,
+): RectMm {
+  let bottom = marginMm;
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type !== 'panel') continue;
+    bottom = Math.max(bottom, node.frame.y + node.frame.height + marginMm);
+  }
+  return { x: marginMm, y: bottom, width: size.width, height: size.height };
+}
+
 /** Add a panel with a plot inside it, the common case. */
 export function addPanelWithPlot(
   draft: FigureDocument,
@@ -317,11 +340,20 @@ export function applyAutoLayout(
 
   const grid = template?.grid ?? options.grid ?? suggestGrid(panels.length);
 
+  /*
+   * A slot is only meaningful against the grid it was authored for. Replaying
+   * one from an earlier template against a freshly suggested grid silently
+   * reinterprets its row/col — a 2-column template's `{row:0,col:0,rowSpan:2}`
+   * becomes a whole column of a 3-column grid — and the panel then covers the
+   * cell a newly imported panel was assigned, which is how an import came to
+   * land on top of an existing panel. A plain auto-layout is by definition not
+   * a template arrangement, so the stale slot is dropped rather than reused.
+   */
   const frames = autoLayout(
     panels.map((p, index) => ({
       id: p.id,
       aspectLock: p.aspectLock,
-      slot: template ? (template.slots[index] ?? null) : (p.slot ?? null),
+      slot: template ? (template.slots[index] ?? null) : null,
     })),
     grid,
     {
@@ -335,7 +367,9 @@ export function applyAutoLayout(
     const frame = frames.get(panel.id);
     if (!frame) continue;
 
-    if (template) panel.slot = template.slots[index] ?? null;
+    // Cleared with the arrangement it belonged to, so the next plain layout
+    // cannot resurrect it against a differently shaped grid.
+    panel.slot = template ? (template.slots[index] ?? null) : null;
 
     const dx = frame.x - panel.frame.x;
     const dy = frame.y - panel.frame.y;
@@ -676,7 +710,10 @@ export function addScaleBar(
     // Kept in step with labelPosition, which is what the renderer reads.
     showLabel: labelPosition !== 'none',
     style: options.fontSizePt !== undefined ? { fontSizePt: options.fontSizePt } : {},
-    fill: options.fill ?? { color: '#ffffff' },
+    // Black by default. A white bar is right only over a dark micrograph, and
+    // it is invisible everywhere else — including on the white page a bar
+    // dropped outside an image sits on.
+    fill: options.fill ?? { color: '#000000' },
     barHeightMm,
     labelPosition,
     calibrationSource: options.calibrationSource ?? 'unknown',

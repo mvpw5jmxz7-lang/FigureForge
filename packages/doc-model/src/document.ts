@@ -9,6 +9,7 @@
 import type { Analysis } from './analysis.js';
 import type { Dataset } from './data.js';
 import type { DisplayUnit } from './units.js';
+import { isEffectivelyLocked } from './nodes.js';
 import type { AssetId, FigureNode, LayerId, NodeId, NodeMap } from './nodes.js';
 
 /** Bumped whenever a migration is required to read older files. */
@@ -160,6 +161,21 @@ export const findLayer = (doc: FigureDocument, id: string): Layer | undefined =>
 
 export const layerByName = (doc: FigureDocument, name: string): Layer | undefined =>
   doc.layers.find((l) => l.name === name);
+
+/**
+ * Locked by the node, an ancestor, *or* its layer.
+ *
+ * `isEffectivelyLocked` only sees the node map, so it could never consult the
+ * layer — which made the Layers panel's padlock inert: a "locked" layer's nodes
+ * could still be dragged, nudged and deleted. Anything holding the whole
+ * document should ask this instead.
+ */
+export function isLocked(doc: FigureDocument, id: NodeId): boolean {
+  const node = doc.nodes[id];
+  if (!node) return true;
+  if (findLayer(doc, node.layerId)?.locked) return true;
+  return isEffectivelyLocked(doc.nodes, id);
+}
 
 /** All nodes assigned to a layer, in draw order. */
 export function nodesInLayer(doc: FigureDocument, layerId: LayerId): FigureNode[] {

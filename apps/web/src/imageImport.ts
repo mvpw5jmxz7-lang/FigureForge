@@ -154,17 +154,18 @@ export async function importImage(file: File): Promise<ImportedImage> {
 }
 
 /**
- * Frame for a newly inserted image, fitted to the page.
+ * Size for a newly inserted image, fitted to the page.
  *
  * Sized from the aspect ratio rather than dropped in at a fixed rectangle: an
  * image inserted at the wrong shape either letterboxes or has to be corrected
- * by hand before anything else can be judged.
+ * by hand before anything else can be judged. Size only — where the panel goes
+ * is `nextPanelFrame`'s decision, since that depends on what is already there.
  */
-export function initialImageFrame(
+export function initialImageSize(
   aspect: number,
   pageWidthMm: number,
   pageHeightMm: number,
-): { x: number; y: number; width: number; height: number } {
+): { width: number; height: number } {
   const maxWidth = Math.min(80, pageWidthMm - 8);
   const maxHeight = Math.min(70, pageHeightMm - 8);
 
@@ -174,5 +175,5 @@ export function initialImageFrame(
     height = maxHeight;
     width = height * (aspect > 0 ? aspect : 1);
   }
-  return { x: 4, y: 4, width, height };
+  return { width, height };
 }

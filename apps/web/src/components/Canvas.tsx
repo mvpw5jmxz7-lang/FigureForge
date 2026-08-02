@@ -9,8 +9,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   absoluteFrame,
+  ancestorsOf,
   deleteNode,
-  isEffectivelyLocked,
+  isLocked,
   recordBracketOffset,
   repositionBrackets,
   rescaleArrowPoints,
@@ -84,6 +85,37 @@ function aspectLockFor(node: FigureDocument['nodes'][string]): number | null {
   return null;
 }
 
+/** Node types a click groups into rather than through. */
+const CONTAINER_TYPES = new Set(['panel', 'group', 'image']);
+
+/**
+ * The node a click on `id` should actually select.
+ *
+ * Every scene node stops pointer propagation before reporting itself, so the
+ * renderer always names the *deepest* thing under the cursor. Taken literally
+ * that meant clicking a bar selected the plot and never the panel around it,
+ * and a group could not be selected on the canvas at all — the two together
+ * read as "Delete doesn't remove panels" and "Group doesn't group".
+ *
+ * So a click selects the outermost container by default, and double-clicking a
+ * container steps inside it, which is how every other layout editor behaves.
+ * `enteredId` is the container the user has stepped into; clicks within it
+ * select one level deeper.
+ */
+function selectionTarget(doc: FigureDocument, id: NodeId, enteredId: NodeId | null): NodeId {
+  // ancestorsOf is nearest-first; outermost-first is what a click walks down.
+  const chain = [...ancestorsOf(doc.nodes, id)].reverse();
+  if (chain.length === 0) return id;
+
+  if (enteredId !== null) {
+    const index = chain.findIndex((n) => n.id === enteredId);
+    if (index >= 0) return chain[index + 1]?.id ?? id;
+    // Clicked outside the container being edited; the entry is dropped by the
+    // caller and this click behaves like any other.
+  }
+  return chain[0]!.id;
+}
+
 /** A text node being edited in place. */
 interface TextEdit {
   nodeId: NodeId;
@@ -107,6 +139,8 @@ export function Canvas({
   const { document: doc } = api;
   const [guides, setGuides] = useState<AlignmentGuide[]>([]);
   const [textEdit, setTextEdit] = useState<TextEdit | null>(null);
+  /** Container the user has double-clicked into; null means top level. */
+  const [enteredId, setEnteredId] = useState<NodeId | null>(null);
   const dragRef = useRef<DragState | null>(null);
 
   const cropCandidate = cropNodeId ? doc.nodes[cropNodeId] : undefined;
@@ -133,16 +167,24 @@ export function Canvas({
 
   const handlePointerDown = useCallback(
     (nodeId: NodeId, event: React.PointerEvent) => {
+      // Stepping outside the container being edited leaves it.
+      const inside =
+        enteredId !== null &&
+        (nodeId === enteredId || ancestorsOf(doc.nodes, nodeId).some((n) => n.id === enteredId));
+      if (enteredId !== null && !inside) setEnteredId(null);
+
+      const targetId = selectionTarget(doc, nodeId, inside ? enteredId : null);
+
       const additive = event.shiftKey || event.metaKey;
       const next = additive
-        ? selectedIds.includes(nodeId)
-          ? selectedIds.filter((id) => id !== nodeId)
-          : [...selectedIds, nodeId]
-        : [nodeId];
+        ? selectedIds.includes(targetId)
+          ? selectedIds.filter((id) => id !== targetId)
+          : [...selectedIds, targetId]
+        : [targetId];
 
       onSelectionChange(next);
 
-      if (isEffectivelyLocked(doc.nodes, nodeId)) return;
+      if (isLocked(doc, targetId)) return;
 
       const frames = new Map<NodeId, RectMm>();
       for (const id of next) {
@@ -151,14 +193,14 @@ export function Canvas({
       }
 
       dragRef.current = {
-        nodeId,
+        nodeId: targetId,
         startClientX: event.clientX,
         startClientY: event.clientY,
         originalFrames: frames,
       };
       (event.target as Element).setPointerCapture?.(event.pointerId);
     },
-    [doc, selectedIds, onSelectionChange],
+    [doc, enteredId, selectedIds, onSelectionChange],
   );
 
   // --- resize -------------------------------------------------------------
@@ -166,7 +208,7 @@ export function Canvas({
   const handleHandlePointerDown = useCallback(
     (nodeId: NodeId, handle: string, event: React.PointerEvent) => {
       const node = doc.nodes[nodeId];
-      if (!node || isEffectivelyLocked(doc.nodes, nodeId)) return;
+      if (!node || isLocked(doc, nodeId)) return;
 
       const point = POINT_HANDLE.exec(handle);
       if (point && node.type === 'arrow') {
@@ -219,7 +261,7 @@ export function Canvas({
         const { pointIndex, pointOrigin } = drag;
         api.commit('Aim arrow', (draft) => {
           const node = draft.nodes[drag.nodeId];
-          if (node?.type !== 'arrow' || isEffectivelyLocked(draft.nodes, drag.nodeId)) return;
+          if (node?.type !== 'arrow' || isLocked(draft, drag.nodeId)) return;
           // The point is held in page space through the drag and converted
           // back at the end, because normaliseArrowFrame moves the frame
           // origin underneath a frame-relative delta.
@@ -256,7 +298,7 @@ export function Canvas({
 
         api.commit('Resize', (draft) => {
           const node = draft.nodes[drag.nodeId];
-          if (!node || isEffectivelyLocked(draft.nodes, drag.nodeId)) return;
+          if (!node || isLocked(draft, drag.nodeId)) return;
 
           // Panels carry a plot and a page-space label that must follow, or the
           // panel letter is left behind and the plot keeps its old size.
@@ -305,7 +347,7 @@ export function Canvas({
       api.commit('Move', (draft) => {
         for (const [id, original] of drag.originalFrames) {
           const node = draft.nodes[id];
-          if (!node || isEffectivelyLocked(draft.nodes, id)) continue;
+          if (!node || isLocked(draft, id)) continue;
           node.frame = { ...original, x: original.x + appliedDx, y: original.y + appliedDy };
         }
       });
@@ -338,11 +380,19 @@ export function Canvas({
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+
+      // Step back out of a container. Checked before the selection guard, since
+      // leaving one is meaningful even with nothing selected.
+      if (event.key === 'Escape' && enteredId !== null) {
+        setEnteredId(null);
+        return;
+      }
+
       if (selectedIds.length === 0) return;
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
-        const doomed = selectedIds.filter((id) => !isEffectivelyLocked(doc.nodes, id));
+        const doomed = selectedIds.filter((id) => !isLocked(doc, id));
         if (doomed.length === 0) return;
 
         api.transaction('Delete', () => {
@@ -381,7 +431,7 @@ export function Canvas({
       api.commit('Nudge', (draft) => {
         for (const id of selectedIds) {
           const node = draft.nodes[id];
-          if (!node || isEffectivelyLocked(draft.nodes, id)) continue;
+          if (!node || isLocked(draft, id)) continue;
           node.frame = {
             ...node.frame,
             x: node.frame.x + direction[0] * step,
@@ -393,14 +443,28 @@ export function Canvas({
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [api, doc, onSelectionChange, selectedIds]);
+  }, [api, doc, enteredId, onSelectionChange, selectedIds]);
 
-  // --- editing text in place ----------------------------------------------
+  // --- entering a container, or editing text in place ----------------------
 
   const handleDoubleClick = useCallback(
     (nodeId: NodeId) => {
       const node = doc.nodes[nodeId];
       if (!node) return;
+
+      /*
+       * Double-click steps into whatever the single click just selected, so a
+       * panel's plot, a group's members and a micrograph's scale bar are all
+       * reachable without giving up panel- and group-level selection. Text
+       * nodes are never containers, so the in-place editor below is unaffected.
+       */
+      const outer = selectionTarget(doc, nodeId, enteredId);
+      const outerNode = doc.nodes[outer];
+      if (outer !== nodeId && outerNode && CONTAINER_TYPES.has(outerNode.type)) {
+        setEnteredId(outer);
+        onSelectionChange([selectionTarget(doc, nodeId, outer)]);
+        return;
+      }
 
       // Only nodes that own their string. Tick labels come from the data and
       // axis titles live on the plot, so both are edited in the Inspector.
@@ -410,7 +474,7 @@ export function Canvas({
           : node.type === 'bracket'
             ? node.label
             : null;
-      if (current === null || isEffectivelyLocked(doc.nodes, nodeId)) return;
+      if (current === null || isLocked(doc, nodeId)) return;
 
       const frame = absoluteFrame(doc.nodes, nodeId);
       if (!frame) return;
@@ -428,7 +492,7 @@ export function Canvas({
         },
       });
     },
-    [doc, zoom],
+    [doc, enteredId, onSelectionChange, zoom],
   );
 
   const commitTextEdit = useCallback(() => {
@@ -450,7 +514,13 @@ export function Canvas({
   const heightPx = doc.page.heightMm * PX_PER_MM * zoom;
 
   return (
-    <div className="canvas-scroll" onPointerDown={() => onSelectionChange([])}>
+    <div
+      className="canvas-scroll"
+      onPointerDown={() => {
+        onSelectionChange([]);
+        setEnteredId(null);
+      }}
+    >
       <div
         className="canvas-page"
         style={{ width: widthPx, height: heightPx }}

@@ -18,6 +18,7 @@ import {
   findDataset,
   imagesUsingAsset,
   isStale,
+  nextPanelFrame,
   relabelPanels,
   removeAsset,
   removeBracketsForPlot,
@@ -45,7 +46,7 @@ import { analyze, ApiError } from '../api.js';
 import { InspectorTab } from './Inspector.js';
 import { datasetFromText } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
-import { ACCEPTED_IMAGE_TYPES, importImage, initialImageFrame } from '../imageImport.js';
+import { ACCEPTED_IMAGE_TYPES, importImage, initialImageSize } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
 
 export type Tab = 'data' | 'inspector' | 'stats' | 'quality' | 'layers';
@@ -159,7 +160,9 @@ function DataTab({
       });
       commit('Add panel', (draft) => {
         addPanelWithPlot(draft, newId, {
-          frame: { x: 4, y: 4, width: 60, height: 50 },
+          // Below whatever is already on the page, so auto-layout's reading
+          // order puts the new panel last rather than in panel a's cell.
+          frame: nextPanelFrame(draft, { width: 60, height: 50 }),
           name: dataset.name,
           datasetId: dataset.id,
           plotType: 'bar-dot',
@@ -221,7 +224,10 @@ function DataTab({
           naturalPx: imported.naturalPx,
         });
         addPanelWithImage(draft, newId, {
-          frame: initialImageFrame(imported.aspect, draft.page.widthMm, draft.page.heightMm),
+          frame: nextPanelFrame(
+            draft,
+            initialImageSize(imported.aspect, draft.page.widthMm, draft.page.heightMm),
+          ),
           name: imported.filename,
           assetId,
           // Vector sources carry {0,0}: there is no pixel grid to record, and
@@ -257,7 +263,7 @@ function DataTab({
 
     commit('Insert image', (draft) => {
       const { image } = addPanelWithImage(draft, newId, {
-        frame: initialImageFrame(aspect, draft.page.widthMm, draft.page.heightMm),
+        frame: nextPanelFrame(draft, initialImageSize(aspect, draft.page.widthMm, draft.page.heightMm)),
         name: asset.filename,
         assetId,
         naturalPx,
@@ -480,11 +486,49 @@ const CORRECTIONS: { id: Correction; label: string }[] = [
   { id: 'benjamini-hochberg', label: 'Benjamini-Hochberg (FDR)' },
 ];
 
-function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
+const CORRECTION_LABEL = Object.fromEntries(CORRECTIONS.map((c) => [c.id, c.label])) as Record<
+  Correction,
+  string
+>;
+
+/**
+ * The plot the canvas selection refers to, directly or through its panel.
+ *
+ * Selecting a panel is how a user says "this graph", so a panel resolves to the
+ * plot inside it rather than to nothing.
+ */
+function plotFromSelection(doc: FigureDocument, selectedIds: readonly NodeId[]): NodeId | '' {
+  for (const id of selectedIds) {
+    const node = doc.nodes[id];
+    if (!node) continue;
+    if (node.type === 'plot') return node.id;
+    const plotChild = childrenOf(doc.nodes, node.id).find((c) => c.type === 'plot');
+    if (plotChild) return plotChild.id;
+  }
+  return '';
+}
+
+function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps) {
   const { document: doc, commit, newId } = api;
   const [test, setTest] = useState<StatTest>('ttest-welch');
   const [correction, setCorrection] = useState<Correction>('holm');
   const [plotId, setPlotId] = useState<NodeId | ''>('');
+  const [notice, setNotice] = useState<string | null>(null);
+
+  /*
+   * Follow the canvas. The dropdown used to be the only way to say which plot a
+   * test annotates, and it defaulted to whichever plot happened to be created
+   * first — so selecting panel c and hitting Run silently re-annotated panel a,
+   * which reads exactly like "the test produced no labels". Selecting a plot
+   * (or its panel) now moves the dropdown with it; the dropdown stays an
+   * override until the selection changes again.
+   */
+  const [selectionEcho, setSelectionEcho] = useState<NodeId | ''>('');
+  const selectedPlotId = plotFromSelection(doc, selectedIds);
+  if (selectedPlotId !== selectionEcho) {
+    setSelectionEcho(selectedPlotId);
+    if (selectedPlotId) setPlotId(selectedPlotId);
+  }
 
   const plots = Object.values(doc.nodes).filter((n): n is PlotNode => n.type === 'plot');
   const activePlot = plots.find((p) => p.id === plotId) ?? plots[0];
@@ -521,6 +565,7 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
 
     setBusy('Running analysis');
     onError(null);
+    setNotice(null);
 
     const options = { ...defaultAnalysisOptions(), correction };
 
@@ -559,6 +604,9 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         computedAt: new Date().toISOString(),
       };
 
+      let placed = 0;
+      let unplaceable = 0;
+
       api.transaction('Run analysis', () => {
         // Replace, never accumulate: a plot carries one result, so re-running
         // supersedes the previous one instead of stacking a second set of
@@ -571,25 +619,60 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
 
           // Measured from the renderer's own band scale so bracket ends land on
           // the bars; the gap grows per bracket so stacked ones do not collide.
-          const measurements = measurePlot(draft, activePlot, theme) ?? undefined;
-          let placed = 0;
-          result.comparisons.forEach((comparison, index) => {
-            if (comparison.pAdjusted > options.alpha) return;
-            addBracket(draft, newId, {
-              plotId: activePlot.id,
-              analysis,
-              comparisonIndex: index,
-              gapMm: 2 + placed * 3.5,
-              measurements,
+          // The *draft's* node, not the one captured from the previous document
+          // state: mixing the two puts a revoked Immer proxy into `measurePlot`'s
+          // identity-keyed cache.
+          const draftPlot = draft.nodes[activePlot.id];
+          const measurements =
+            draftPlot?.type === 'plot' ? (measurePlot(draft, draftPlot, theme) ?? undefined) : undefined;
+
+          // A correlation has no two categories to span, so there is nothing to
+          // bracket — the result belongs in the table and the methods sentence.
+          if (!xyCorrelation) {
+            result.comparisons.forEach((comparison, index) => {
+              if (comparison.pAdjusted > options.alpha) return;
+              const bracket = addBracket(draft, newId, {
+                plotId: activePlot.id,
+                analysis,
+                comparisonIndex: index,
+                gapMm: 2 + placed * 3.5,
+                measurements,
+              });
+              if (bracket) placed++;
+              else unplaceable++;
             });
-            placed++;
-          });
+          }
 
           // Bring any bracket on another panel back onto its bars too, in case
           // the layout moved since it was placed.
           repositionBrackets(draft, measureAllPlots(draft, theme));
         });
       });
+
+      // Every one of these used to be silent, so "the test ran and nothing
+      // appeared" was indistinguishable from a broken feature.
+      const panelName = activePlot.parentId
+        ? (doc.nodes[activePlot.parentId]?.name ?? activePlot.name)
+        : activePlot.name;
+      if (xyCorrelation) {
+        setNotice(
+          `Correlation on ${panelName}: the result is in the table below. A numeric x axis has no ` +
+            'categories to span, so no bracket is drawn.',
+        );
+      } else if (unplaceable > 0) {
+        setNotice(
+          `${unplaceable} of ${result.comparisons.length} comparisons could not be placed on ` +
+            `${panelName} — the analysed group names no longer match the plot's data.`,
+        );
+      } else if (placed === 0) {
+        const how = correction === 'none' ? '' : ` after ${CORRECTION_LABEL[correction]}`;
+        setNotice(
+          `No comparison reached α = ${options.alpha}${how}, so no bracket was added to ` +
+            `${panelName}. The p-values are in the table below.`,
+        );
+      } else {
+        setNotice(`${placed} bracket${placed === 1 ? '' : 's'} added to ${panelName}.`);
+      }
     } catch (error) {
       onError(
         error instanceof ApiError
@@ -662,6 +745,8 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
       >
         Run and annotate
       </button>
+
+      {notice && <p className="hint notice">{notice}</p>}
 
       {analyses.map((analysis) => {
         // The document stores the input hash precisely so drift is detectable;
@@ -910,7 +995,12 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
               {nodesByLayer(layer.id).map((node) => (
                 <li
                   key={node.id}
-                  className={selectedIds.includes(node.id) ? 'selected' : ''}
+                  className={[
+                    selectedIds.includes(node.id) ? 'selected' : '',
+                    node.hidden ? 'node-hidden' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
                   onClick={() => onSelectionChange([node.id])}
                 >
                   <span className="node-type">{node.type}</span>
@@ -918,6 +1008,22 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
                     {node.name}
                     {provenance(node) && <em className="provenance">{provenance(node)}</em>}
                   </span>
+                  {/* Hiding is the reversible answer; deleting is not. Without
+                      this the only way to take something out of the figure from
+                      here was to remove it, and nothing put it back. */}
+                  <button
+                    className="icon"
+                    title={node.hidden ? 'Show' : 'Hide'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commit('Toggle visibility', (draft) => {
+                        const target = draft.nodes[node.id];
+                        if (target) target.hidden = !target.hidden;
+                      });
+                    }}
+                  >
+                    {node.hidden ? '◌' : '●'}
+                  </button>
                   <button
                     className="icon danger"
                     title="Delete"

@@ -37,6 +37,7 @@ import {
   MIN_CROP,
   normaliseArrowFrame,
   normaliseCrop,
+  nextPanelFrame,
   relabelPanels,
   removeBracketsForPlot,
   renameDataset,
@@ -60,7 +61,8 @@ import {
   snapFrame,
   suggestGrid,
 } from './layout.js';
-import { findLayoutTemplate } from './templates.js';
+import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './templates.js';
+import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
 
 // ---------------------------------------------------------------------------
@@ -434,6 +436,104 @@ describe('operations', () => {
       expect(node.frame.height).toBeCloseTo(panel.frame.height, 6);
     }
   });
+
+  it('places a new panel below everything already on the page', () => {
+    const { doc } = sampleDocument();
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+    const lowest = Math.max(...panels.map((p) => p.frame.y + p.frame.height));
+
+    const frame = nextPanelFrame(doc, { width: 60, height: 50 });
+
+    // Below, so `readingOrder` sorts it last and auto-layout gives it the new
+    // cell instead of displacing panel a.
+    expect(frame.y).toBeGreaterThan(lowest);
+    expect(frame.width).toBe(60);
+  });
+
+  it('drops a stale template slot when a plain auto-layout runs', () => {
+    const { doc, newId } = sampleDocument();
+
+    // Two panels arranged 2:1, then a third imported with no template.
+    const templated = editDocument(doc, (draft) => {
+      applyAutoLayout(draft, {
+        marginMm: 2,
+        gutterMm: 5,
+        labelGutterMm: 4,
+        template: findLayoutTemplate('two-thirds-one-third')!,
+      });
+    });
+    expect(
+      Object.values(templated.nodes).some((n) => n.type === 'panel' && n.slot !== null),
+    ).toBe(true);
+
+    const ds = templated.datasets[0]!;
+    const grown = editDocument(templated, (draft) => {
+      addPanelWithPlot(draft, newId, {
+        frame: nextPanelFrame(draft, { width: 60, height: 50 }),
+        datasetId: ds.id,
+        name: 'Three',
+      });
+      applyAutoLayout(draft, { marginMm: 2, gutterMm: 5, labelGutterMm: 4 });
+    });
+
+    const panels = Object.values(grown.nodes).filter((n) => n.type === 'panel');
+    // A slot authored for a 2-column weighted grid would otherwise be replayed
+    // against the new 3-column one, putting two panels in the same cell.
+    expect(panels.every((p) => p.slot === null)).toBe(true);
+
+    for (const [i, a] of panels.entries()) {
+      for (const b of panels.slice(i + 1)) {
+        const overlaps =
+          a.frame.x < b.frame.x + b.frame.width - 1e-9 &&
+          b.frame.x < a.frame.x + a.frame.width - 1e-9 &&
+          a.frame.y < b.frame.y + b.frame.height - 1e-9 &&
+          b.frame.y < a.frame.y + a.frame.height - 1e-9;
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
+
+  it('locks a node whose layer is locked', () => {
+    const { doc } = sampleDocument();
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    expect(isLocked(doc, panel.id)).toBe(false);
+
+    // The Layers padlock only ever set this flag; nothing read it, so a locked
+    // layer's nodes could still be dragged, nudged and deleted.
+    const locked = editDocument(doc, (draft) => {
+      const layer = draft.layers.find((l) => l.id === panel.layerId)!;
+      layer.locked = true;
+    });
+    expect(isLocked(locked, panel.id)).toBe(true);
+  });
+});
+
+describe('layout templates', () => {
+  it('offers a template for every panel count up to six', () => {
+    for (const count of [1, 2, 3, 4, 5, 6]) {
+      expect(templatesForPanelCount(count).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('gives every panel its own cell', () => {
+    for (const template of LAYOUT_TEMPLATES) {
+      expect(template.slots).toHaveLength(template.panelCount);
+
+      // Two panels sharing a slot would stack on top of each other, which is
+      // exactly the overlap this round of fixes exists to remove.
+      const occupied = new Set<string>();
+      for (const slot of template.slots) {
+        for (let r = slot.row; r < slot.row + (slot.rowSpan ?? 1); r++) {
+          for (let c = slot.col; c < slot.col + (slot.colSpan ?? 1); c++) {
+            expect(occupied.has(`${r},${c}`)).toBe(false);
+            occupied.add(`${r},${c}`);
+            expect(r).toBeLessThan(template.grid.rows);
+            expect(c).toBeLessThan(template.grid.columns);
+          }
+        }
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -609,6 +709,13 @@ describe('scale bars', () => {
     const { doc, bar } = barDocument();
     expect(scaleBarWidthMm(doc.nodes, bar.id)).toBeCloseTo(1.0, 10);
     expect(doc.nodes[bar.id]!.frame.width).toBeCloseTo(1.0, 10);
+  });
+
+  it('draws black unless asked otherwise', () => {
+    // White is right only over a dark micrograph and invisible everywhere else,
+    // including on the page a bar dragged off its image sits on.
+    const { bar } = barDocument();
+    expect(bar.type === 'scale-bar' && bar.fill.color).toBe('#000000');
   });
 
   it('halves when its image is halved — the integrity property', () => {
