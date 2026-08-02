@@ -129,6 +129,29 @@ button.icon.danger:hover { color: var(--danger); }
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
 }
 
+/* Crop chrome. HTML above the SVG, so none of it can reach an export. */
+.crop-overlay { position: absolute; z-index: 4; touch-action: none; }
+.crop-shade { position: absolute; background: rgba(0, 0, 0, 0.55); pointer-events: none; }
+.crop-window {
+  position: absolute;
+  cursor: move;
+  outline: 1px solid #fff;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.crop-grip {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: #fff;
+}
+.crop-grip[data-grip='nw'], .crop-grip[data-grip='se'] { cursor: nwse-resize; }
+.crop-grip[data-grip='ne'], .crop-grip[data-grip='sw'] { cursor: nesw-resize; }
+.crop-grip[data-grip='n'], .crop-grip[data-grip='s'] { cursor: ns-resize; }
+.crop-grip[data-grip='e'], .crop-grip[data-grip='w'] { cursor: ew-resize; }
+
 [data-node-id] { cursor: pointer; }
 [data-selected='true'] { outline: none; }
 /* Resize cursors by compass direction. Kept in CSS rather than on the scene

@@ -69,6 +69,8 @@ export interface SidePanelProps {
   /** Verbatim import text keyed by archive path; written here, saved in App. */
   dataOriginals: Map<string, string>;
   exportDpi: number;
+  cropNodeId: NodeId | null;
+  onCropNodeChange: (id: NodeId | null) => void;
 }
 
 export function SidePanel(props: SidePanelProps) {
@@ -91,6 +93,8 @@ export function SidePanel(props: SidePanelProps) {
             theme={props.theme}
             selectedIds={props.selectedIds}
             onSelectionChange={props.onSelectionChange}
+            cropNodeId={props.cropNodeId}
+            onCropNodeChange={props.onCropNodeChange}
           />
         )}
         {tab === 'stats' && <StatsTab {...props} />}

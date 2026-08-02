@@ -112,6 +112,8 @@ export function App() {
   const dataOriginals = useRef(new Map<string, string>());
 
   const [selectedIds, setSelectedIds] = useState<NodeId[]>([]);
+  /** Image being cropped directly on canvas. Editor state, never the document. */
+  const [cropNodeId, setCropNodeId] = useState<NodeId | null>(null);
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -124,6 +126,17 @@ export function App() {
   useEffect(() => {
     void health().then(setApiUp);
   }, []);
+
+  // Escape leaves crop mode. A mode with no visible way out is how a user
+  // concludes the canvas has stopped responding.
+  useEffect(() => {
+    if (cropNodeId === null) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setCropNodeId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [cropNodeId]);
 
   // --- export -------------------------------------------------------------
 
@@ -261,10 +274,16 @@ export function App() {
           api={api}
           theme={theme}
           selectedIds={selectedIds}
-          onSelectionChange={setSelectedIds}
+          onSelectionChange={(ids) => {
+            setSelectedIds(ids);
+            // Selecting something else ends the crop: leaving the overlay up
+            // over a node that is no longer selected is an invisible mode.
+            if (ids[0] !== cropNodeId) setCropNodeId(null);
+          }}
           zoom={zoom}
           showGrid={showGrid}
           assetUrls={assets.urls}
+          cropNodeId={cropNodeId}
         />
 
         <SidePanel
@@ -277,6 +296,8 @@ export function App() {
           assets={assets}
           dataOriginals={dataOriginals.current}
           exportDpi={dpi}
+          cropNodeId={cropNodeId}
+          onCropNodeChange={setCropNodeId}
         />
       </main>
 

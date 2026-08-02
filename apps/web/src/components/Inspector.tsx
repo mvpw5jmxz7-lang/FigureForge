@@ -98,9 +98,18 @@ export interface InspectorProps {
   theme: Theme;
   selectedIds: NodeId[];
   onSelectionChange: (ids: NodeId[]) => void;
+  cropNodeId: NodeId | null;
+  onCropNodeChange: (id: NodeId | null) => void;
 }
 
-export function InspectorTab({ api, theme, selectedIds, onSelectionChange }: InspectorProps) {
+export function InspectorTab({
+  api,
+  theme,
+  selectedIds,
+  onSelectionChange,
+  cropNodeId,
+  onCropNodeChange,
+}: InspectorProps) {
   const { document: doc, commit } = api;
 
   if (selectedIds.length === 0) {
@@ -174,7 +183,16 @@ export function InspectorTab({ api, theme, selectedIds, onSelectionChange }: Ins
         </label>
       )}
       {node.type === 'panel' && <PanelFields api={api} node={node} />}
-      {node.type === 'image' && <ImageFields api={api} node={node} doc={doc} theme={theme} />}
+      {node.type === 'image' && (
+        <ImageFields
+          api={api}
+          node={node}
+          doc={doc}
+          theme={theme}
+          cropping={cropNodeId === node.id}
+          onCropNodeChange={onCropNodeChange}
+        />
+      )}
       {node.type === 'scale-bar' && <ScaleBarFields api={api} node={node} doc={doc} />}
       {node.type === 'arrow' && <ArrowFields api={api} node={node} />}
       {node.type === 'shape' && <ShapeFields api={api} node={node} />}
@@ -532,11 +550,15 @@ function ImageFields({
   node,
   doc,
   theme,
+  cropping,
+  onCropNodeChange,
 }: {
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'image' }>;
   doc: FigureDocument;
   theme: Theme;
+  cropping: boolean;
+  onCropNodeChange: (id: NodeId | null) => void;
 }) {
   const { commit } = api;
   const asset = findAsset(doc, node.assetId);
@@ -575,7 +597,17 @@ function ImageFields({
       </label>
 
       <h4>Crop</h4>
-      <p className="hint">Percent of the source image. Cropping keeps full resolution.</p>
+      <button
+        className={cropping ? 'primary' : ''}
+        onClick={() => onCropNodeChange(cropping ? null : node.id)}
+      >
+        {cropping ? 'Done cropping' : 'Crop on canvas'}
+      </button>
+      <p className="hint">
+        {cropping
+          ? 'Drag the window or its corners over the image. Escape when done.'
+          : 'Percent of the source image. Cropping keeps full resolution.'}
+      </p>
       <div className="field-row">
         {CROP_KEYS.map((key) => (
           <label className="field" key={key}>

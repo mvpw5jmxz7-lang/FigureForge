@@ -18,10 +18,12 @@ import {
   resizePanel,
   resyncScaleBars,
   setArrowPoint,
+  setImageCrop,
   snapFrame,
   snapResize,
   type AlignmentGuide,
   type FigureDocument,
+  type FigureNode,
   type NodeId,
   type RectMm,
   type ResizeHandle,
@@ -41,6 +43,8 @@ export interface CanvasProps {
   zoom: number;
   showGrid: boolean;
   assetUrls: Record<string, string>;
+  /** Image being cropped on canvas, or null. Owned by the Inspector's toggle. */
+  cropNodeId: NodeId | null;
 }
 
 interface DragState {
@@ -93,11 +97,15 @@ export function Canvas({
   zoom,
   showGrid,
   assetUrls,
+  cropNodeId,
 }: CanvasProps) {
   const { document: doc } = api;
   const [guides, setGuides] = useState<AlignmentGuide[]>([]);
   const [textEdit, setTextEdit] = useState<TextEdit | null>(null);
   const dragRef = useRef<DragState | null>(null);
+
+  const cropCandidate = cropNodeId ? doc.nodes[cropNodeId] : undefined;
+  const cropTarget = cropCandidate?.type === 'image' ? cropCandidate : null;
 
   const resolveAsset = useCallback((assetId: string) => assetUrls[assetId], [assetUrls]);
 
@@ -444,6 +452,12 @@ export function Canvas({
         })}
         <GuideOverlay guides={guides} doc={doc} zoom={zoom} />
 
+        {/* Crop chrome, like the text editor, is HTML above the SVG and never
+            a scene node. Resize handles are proven not to leak into an export
+            by the parity test; crop chrome would have no such guard, and it is
+            editor state rather than part of the drawing. */}
+        {cropTarget && <CropOverlay api={api} node={cropTarget} zoom={zoom} theme={theme} />}
+
         {/* Editing overlay: an HTML input above the SVG, never in the scene. */}
         {textEdit && (
           <input
@@ -470,6 +484,164 @@ export function Canvas({
             }}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+/** The eight grips on the crop window, as fractions of its box. */
+const CROP_GRIPS: readonly { id: string; fx: number; fy: number }[] = [
+  { id: 'nw', fx: 0, fy: 0 },
+  { id: 'n', fx: 0.5, fy: 0 },
+  { id: 'ne', fx: 1, fy: 0 },
+  { id: 'e', fx: 1, fy: 0.5 },
+  { id: 'se', fx: 1, fy: 1 },
+  { id: 's', fx: 0.5, fy: 1 },
+  { id: 'sw', fx: 0, fy: 1 },
+  { id: 'w', fx: 0, fy: 0.5 },
+];
+
+/**
+ * Direct-manipulation crop.
+ *
+ * The numeric fields in the Inspector are precise and reproducible; they are
+ * useless for the actual job, which is "cut the burned-in scale bar off the
+ * bottom of this micrograph". That needs to be done by eye, against the image.
+ *
+ * Positioned over the image's `absoluteFrame`, exactly as the text editor is —
+ * HTML above the SVG, so none of this can reach an export.
+ */
+function CropOverlay({
+  api,
+  node,
+  zoom,
+  theme,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'image' }>;
+  zoom: number;
+  theme: Theme;
+}) {
+  const { document: doc } = api;
+  const dragRef = useRef<{
+    grip: string | null;
+    startX: number;
+    startY: number;
+    crop: { x: number; y: number; width: number; height: number };
+  } | null>(null);
+
+  const frame = absoluteFrame(doc.nodes, node.id);
+  if (!frame) return null;
+
+  const pxPerMm = PX_PER_MM * zoom;
+  const box = {
+    left: frame.x * pxPerMm,
+    top: frame.y * pxPerMm,
+    width: frame.width * pxPerMm,
+    height: frame.height * pxPerMm,
+  };
+
+  const crop = node.crop;
+  // The window is drawn in the image's own normalised space, which is what the
+  // model stores — no conversion, so what is dragged is what is saved.
+  const window = {
+    left: crop.x * box.width,
+    top: crop.y * box.height,
+    width: crop.width * box.width,
+    height: crop.height * box.height,
+  };
+
+  const onGripDown = (grip: string | null) => (event: React.PointerEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    dragRef.current = { grip, startX: event.clientX, startY: event.clientY, crop: { ...crop } };
+    (event.target as Element).setPointerCapture?.(event.pointerId);
+  };
+
+  const onMove = (event: React.PointerEvent): void => {
+    const drag = dragRef.current;
+    if (!drag) return;
+
+    const dx = (event.clientX - drag.startX) / box.width;
+    const dy = (event.clientY - drag.startY) / box.height;
+    const start = drag.crop;
+
+    let next = { ...start };
+    if (drag.grip === null) {
+      // Moving the window, not resizing it: the extent is fixed and only the
+      // origin travels, so the framing changes without the magnification.
+      next = { ...start, x: start.x + dx, y: start.y + dy };
+    } else {
+      if (drag.grip.includes('w')) {
+        next.x = start.x + dx;
+        next.width = start.width - dx;
+      }
+      if (drag.grip.includes('e')) next.width = start.width + dx;
+      if (drag.grip.includes('n')) {
+        next.y = start.y + dy;
+        next.height = start.height - dy;
+      }
+      if (drag.grip.includes('s')) next.height = start.height + dy;
+    }
+
+    // setImageCrop clamps into the unit square and re-derives the scale bars,
+    // so a drag cannot produce a state the numeric fields could not.
+    api.commit('Crop image', (draft) => {
+      setImageCrop(draft, node.id, next);
+      repositionBrackets(draft, measureAllPlots(draft, theme));
+    });
+  };
+
+  const endDrag = (): void => {
+    dragRef.current = null;
+  };
+
+  return (
+    <div
+      className="crop-overlay"
+      style={box}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={onMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+    >
+      {/* Four dimmed bands rather than one box with a hole: a single element
+          cannot both darken the discarded region and leave the kept region
+          untinted, and tinting what is kept misrepresents the result. */}
+      <div className="crop-shade" style={{ left: 0, top: 0, width: '100%', height: window.top }} />
+      <div
+        className="crop-shade"
+        style={{
+          left: 0,
+          top: window.top + window.height,
+          width: '100%',
+          height: box.height - window.top - window.height,
+        }}
+      />
+      <div
+        className="crop-shade"
+        style={{ left: 0, top: window.top, width: window.left, height: window.height }}
+      />
+      <div
+        className="crop-shade"
+        style={{
+          left: window.left + window.width,
+          top: window.top,
+          width: box.width - window.left - window.width,
+          height: window.height,
+        }}
+      />
+
+      <div className="crop-window" style={window} onPointerDown={onGripDown(null)}>
+        {CROP_GRIPS.map((grip) => (
+          <div
+            key={grip.id}
+            className="crop-grip"
+            data-grip={grip.id}
+            style={{ left: `${grip.fx * 100}%`, top: `${grip.fy * 100}%` }}
+            onPointerDown={onGripDown(grip.id)}
+          />
+        ))}
       </div>
     </div>
   );
