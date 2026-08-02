@@ -145,6 +145,71 @@ class TestRaster:
             assert abs(image.size[0] - expected) <= 2
 
 
+class TestEmbeddedRasters:
+    """Figures with micrographs in them.
+
+    Embedded rasters had no coverage at all before image panels existed, and
+    EPS is where they break: eps2write is a vector device that re-emits image
+    data at the device resolution, so a silently blank or silently resampled
+    micrograph would pass every other check in this file.
+    """
+
+    #: A 2x2 red PNG, small enough to read but a real decodable image.
+    RASTER = (
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4"
+        "nGP8z8DAwMDAxAADRDEAWFsCBQlnMcgAAAAASUVORK5CYII="
+    )
+
+    @pytest.fixture(scope="class")
+    def raster_svg(self) -> str:
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH_MM}mm"
+ height="{HEIGHT_MM}mm" viewBox="0 0 {WIDTH_MM:g} {HEIGHT_MM:g}">
+  <rect x="0" y="0" width="{WIDTH_MM:g}" height="{HEIGHT_MM:g}" fill="#ffffff"/>
+  <image href="{self.RASTER}" x="10" y="10" width="40" height="40"
+   preserveAspectRatio="xMidYMid meet" image-rendering="pixelated"/>
+  <text x="4" y="6" font-size="2.8222">Micrograph</text>
+</svg>"""
+
+    def test_pdf_carries_the_embedded_image(self, raster_svg):
+        import asyncio
+
+        async def build() -> bytes:
+            try:
+                return await render(
+                    ExportRequest(
+                        svg=raster_svg, width_mm=WIDTH_MM, height_mm=HEIGHT_MM, format="pdf"
+                    )
+                )
+            finally:
+                await shutdown_browser()
+
+        pdf = asyncio.run(build())
+        # An image XObject is how a raster reaches a PDF; without one the
+        # micrograph was dropped and the page is text on white.
+        assert b"/Subtype /Image" in pdf or b"/Subtype/Image" in pdf
+        assert len(re.findall(rb"/Type\s*/Page[^s]", pdf)) == 1
+
+    def test_eps_conversion_survives_an_embedded_raster(self, raster_svg):
+        import asyncio
+
+        async def build() -> bytes:
+            try:
+                return await render(
+                    ExportRequest(
+                        svg=raster_svg, width_mm=WIDTH_MM, height_mm=HEIGHT_MM, format="eps"
+                    )
+                )
+            finally:
+                await shutdown_browser()
+
+        eps = asyncio.run(build())
+        assert eps.startswith(b"%!PS-Adobe")
+        assert b"%%BoundingBox" in eps
+        # Ghostscript emits raster data through an image operator. Its absence
+        # means the conversion silently discarded the micrograph.
+        assert b"image" in eps
+
+
 class TestResolutionCheck:
     def test_computes_effective_dpi(self):
         # A 1000 px image placed 84.67 mm wide is exactly 300 dpi.
