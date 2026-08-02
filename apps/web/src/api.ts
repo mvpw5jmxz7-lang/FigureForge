@@ -123,6 +123,22 @@ export async function health(): Promise<boolean> {
   }
 }
 
+/**
+ * A filename a filesystem will accept, derived from the figure's title.
+ *
+ * The title is the default rather than the answer — every save offers it for
+ * editing. It used to be neither: the title was never exposed in the UI, so
+ * every figure saved itself under whatever the sample document was called.
+ */
+export function safeFilename(title: string, fallback = 'figure'): string {
+  const cleaned = title
+    .replace(/[/\\?%*:|"<>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  return cleaned === '' ? fallback : cleaned;
+}
+
 /** Trigger a browser download of an exported blob. */
 export function download(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);

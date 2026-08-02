@@ -8,6 +8,7 @@ import {
   applyAutoLayout,
   formatMm,
   relabelPanels,
+  reorderNode,
   repositionBrackets,
   suggestGrid,
   templatesForPanelCount,
@@ -204,6 +205,21 @@ export function Toolbar({
           ))}
         </select>
 
+        {/* The title has always existed on the document and named every saved
+            file, but nothing ever showed it — so every figure downloaded itself
+            under the sample document's name. */}
+        <input
+          className="figure-title"
+          value={doc.title}
+          placeholder="Untitled figure"
+          title="Figure title — the default name for saves and exports"
+          onChange={(e) =>
+            commit('Rename figure', (draft) => {
+              draft.title = e.target.value;
+            })
+          }
+        />
+
         <label className="field">
           Height
           <input
@@ -333,11 +349,37 @@ export function Toolbar({
           title={
             selectedIds.length < 2
               ? 'Select two or more items sharing a parent'
-              : 'Group — reachable from the Layers list; clicking the canvas still selects the item'
+              : 'Group — click any member to select the group, double-click to step inside'
           }
         >
           Group
         </button>
+      </div>
+
+      {/* Draw order for whatever is selected. Layers has the same two steps per
+          row; this is the version that works while you are looking at the page. */}
+      <div className="toolbar-group">
+        {(
+          [
+            ['front', 'Bring to front'],
+            ['forward', 'Bring forward'],
+            ['backward', 'Send backward'],
+            ['back', 'Send to back'],
+          ] as const
+        ).map(([where, label]) => (
+          <button
+            key={where}
+            disabled={selectedIds.length === 0}
+            title={label}
+            onClick={() =>
+              commit(label, (draft) => {
+                for (const id of selectedIds) reorderNode(draft, id, where);
+              })
+            }
+          >
+            {{ front: '⤒', forward: '↑', backward: '↓', back: '⤓' }[where]}
+          </button>
+        ))}
       </div>
 
       <div className="toolbar-group right">

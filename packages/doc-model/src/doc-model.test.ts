@@ -31,9 +31,12 @@ import {
   addPanelWithPlot,
   addScaleBar,
   addShape,
+  addText,
   applyAutoLayout,
   deleteNode,
+  duplicateNode,
   imagesUsingAsset,
+  isDerivedNode,
   MIN_CROP,
   normaliseArrowFrame,
   normaliseCrop,
@@ -41,6 +44,7 @@ import {
   relabelPanels,
   removeBracketsForPlot,
   renameDataset,
+  reorderNode,
   reparentNode,
   replaceAnalysisForPlot,
   repositionBrackets,
@@ -505,6 +509,102 @@ describe('operations', () => {
       layer.locked = true;
     });
     expect(isLocked(locked, panel.id)).toBe(true);
+  });
+});
+
+describe('duplicate and draw order', () => {
+  it('copies a panel with its plot and its label, all under fresh ids', () => {
+    const { doc, newId } = sampleDocument();
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const before = Object.keys(doc.nodes).length;
+
+    let copyId: string | null = null;
+    const after = editDocument(doc, (draft) => {
+      copyId = duplicateNode(draft, newId, panel.id, { x: 3, y: 3 });
+    });
+
+    // Panel + plot + label, exactly as `deleteNode` removes them.
+    expect(Object.keys(after.nodes).length).toBe(before + 3);
+    const copy = after.nodes[copyId!]!;
+    expect(copy.id).not.toBe(panel.id);
+    expect(copy.frame.x).toBeCloseTo(panel.frame.x + 3, 6);
+
+    const copiedPlot = Object.values(after.nodes).find(
+      (n) => n.type === 'plot' && n.parentId === copy.id,
+    )!;
+    expect(copiedPlot.id).not.toBe(
+      Object.values(doc.nodes).find((n) => n.type === 'plot' && n.parentId === panel.id)!.id,
+    );
+    // The dataset is an input, not part of the figure element: copying a panel
+    // must not fork the data behind it.
+    expect(copiedPlot.type === 'plot' && copiedPlot.datasetId).toBe(doc.datasets[0]!.id);
+
+    const copiedLabel = Object.values(after.nodes).find(
+      (n) => n.type === 'panel-label' && n.panelId === copy.id,
+    );
+    expect(copiedLabel).toBeDefined();
+  });
+
+  it('remaps a copied bracket onto the copied plot', () => {
+    const { doc, newId, plotId } = annotatedDocument();
+    const panelId = doc.nodes[plotId]!.parentId!;
+
+    let copyId: string | null = null;
+    const after = editDocument(doc, (draft) => {
+      copyId = duplicateNode(draft, newId, panelId);
+    });
+
+    const copiedPlot = Object.values(after.nodes).find(
+      (n) => n.type === 'plot' && n.parentId === copyId,
+    )!;
+    const brackets = Object.values(after.nodes).filter((n) => n.type === 'bracket');
+    expect(brackets).toHaveLength(2);
+    // A bracket left pointing at the original would put "P < 0.001" over a plot
+    // whose test never produced it.
+    expect(brackets.some((b) => b.type === 'bracket' && b.plotId === copiedPlot.id)).toBe(true);
+    expect(brackets.some((b) => b.type === 'bracket' && b.plotId === plotId)).toBe(true);
+  });
+
+  it('names the derived nodes that must not be copied alone', () => {
+    const { doc } = annotatedDocument();
+    const label = Object.values(doc.nodes).find((n) => n.type === 'panel-label')!;
+    const bracket = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+
+    expect(isDerivedNode(label)).toBe(true);
+    expect(isDerivedNode(bracket)).toBe(true);
+    expect(isDerivedNode(panel)).toBe(false);
+  });
+
+  it('reorders siblings and renumbers z with no gaps', () => {
+    const { doc, newId } = sampleDocument();
+    const withText = editDocument(doc, (draft) => {
+      for (const text of ['one', 'two', 'three']) {
+        addText(draft, newId, { frame: { x: 0, y: 0, width: 10, height: 4 }, text });
+      }
+    });
+
+    const order = (d: typeof withText): string[] =>
+      Object.values(d.nodes)
+        .filter((n) => n.type === 'text')
+        .sort((a, b) => a.z - b.z)
+        .map((n) => (n.type === 'text' ? n.text : ''));
+
+    expect(order(withText)).toEqual(['one', 'two', 'three']);
+
+    const first = Object.values(withText.nodes).find((n) => n.type === 'text' && n.text === 'one')!;
+    const front = editDocument(withText, (draft) => reorderNode(draft, first.id, 'front'));
+    expect(order(front)).toEqual(['two', 'three', 'one']);
+
+    const back = editDocument(front, (draft) => reorderNode(draft, first.id, 'backward'));
+    expect(order(back)).toEqual(['two', 'one', 'three']);
+
+    // Renumbered 0..n-1 every time, so repeated steps cannot drift apart.
+    const zs = Object.values(back.nodes)
+      .filter((n) => n.parentId === null)
+      .map((n) => n.z)
+      .sort((a, b) => a - b);
+    expect(zs).toEqual(zs.map((_, i) => i));
   });
 });
 

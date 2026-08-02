@@ -11,6 +11,8 @@ import {
   absoluteFrame,
   ancestorsOf,
   deleteNode,
+  duplicateNode,
+  isDerivedNode,
   isLocked,
   recordBracketOffset,
   repositionBrackets,
@@ -63,6 +65,9 @@ interface DragState {
   /** The dragged point's start position, in page space. */
   pointOrigin?: { x: number; y: number };
 }
+
+/** How far a pasted copy sits from its original, in millimetres. */
+const PASTE_OFFSET_MM = 3;
 
 /** Arrow endpoint grips carry `data-handle="point-0"`, `"point-1"`, … */
 const POINT_HANDLE = /^point-(\d+)$/;
@@ -142,6 +147,8 @@ export function Canvas({
   /** Container the user has double-clicked into; null means top level. */
   const [enteredId, setEnteredId] = useState<NodeId | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  /** Ids last copied. Cleared only by another copy — pasting is repeatable. */
+  const clipboardRef = useRef<NodeId[]>([]);
 
   const cropCandidate = cropNodeId ? doc.nodes[cropNodeId] : undefined;
   const cropTarget = cropCandidate?.type === 'image' ? cropCandidate : null;
@@ -385,6 +392,49 @@ export function Canvas({
       // leaving one is meaningful even with nothing selected.
       if (event.key === 'Escape' && enteredId !== null) {
         setEnteredId(null);
+        return;
+      }
+
+      /*
+       * Copy and paste through an in-app clipboard rather than the OS one. The
+       * payload is a set of node ids, not serialised nodes: pasting has to run
+       * against the *current* document anyway, and routing figure geometry
+       * through `navigator.clipboard` would mean a permissions prompt and a
+       * round trip for no gain. Derived nodes cannot be copied alone — see
+       * `isDerivedNode`.
+       */
+      const accel = event.ctrlKey || event.metaKey;
+      if (accel && (event.key === 'c' || event.key === 'C')) {
+        const copyable = selectedIds.filter((id) => {
+          const node = doc.nodes[id];
+          return node !== undefined && !isDerivedNode(node);
+        });
+        clipboardRef.current = copyable;
+        return;
+      }
+
+      if (accel && (event.key === 'v' || event.key === 'V' || event.key === 'd' || event.key === 'D')) {
+        // Ctrl+D duplicates the selection in place of the clipboard's contents.
+        const source =
+          event.key === 'd' || event.key === 'D'
+            ? selectedIds.filter((id) => {
+                const node = doc.nodes[id];
+                return node !== undefined && !isDerivedNode(node);
+              })
+            : clipboardRef.current;
+        if (source.length === 0) return;
+        event.preventDefault();
+
+        const created: NodeId[] = [];
+        api.commit('Paste', (draft) => {
+          for (const id of source) {
+            // Offset so the copy is visible rather than exactly covering its
+            // original, which reads as nothing having happened.
+            const copy = duplicateNode(draft, api.newId, id, { x: PASTE_OFFSET_MM, y: PASTE_OFFSET_MM });
+            if (copy) created.push(copy);
+          }
+        });
+        if (created.length > 0) onSelectionChange(created);
         return;
       }
 

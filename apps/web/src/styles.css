@@ -50,6 +50,7 @@ body {
 .toolbar-group { display: flex; align-items: center; gap: 8px; }
 .toolbar-group.right { margin-left: auto; }
 .brand { font-weight: 650; letter-spacing: -0.01em; margin-right: 4px; }
+.figure-title { width: 240px; font-weight: 550; }
 
 /* `input` unqualified as well as the typed selectors: `:root` declares
    `color-scheme: light dark`, so a text input the app does not colour picks its
@@ -359,7 +360,28 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 
 /* --- status bar --------------------------------------------------------- */
 
+/* Naming a save. Anchored to the status bar rather than centred over the
+   figure, so the page it is about stays visible. */
+.save-dialog {
+  position: absolute;
+  bottom: 46px;
+  left: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 320px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+}
+.save-dialog .hint { margin: 0; }
+.save-dialog code { font-size: 11px; }
+
 .statusbar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;

@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 223 TypeScript + 68 Python tests
+make test        # 229 TypeScript + 68 Python tests
 make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -177,11 +177,11 @@ Each guards against a specific, common reporting error:
 ## Current state
 
 Phases 1–5 are on `master`. A three-stage round of reported bugs and requests
-follows; **stage A (`fix/reported-bugs`) is done**, stages B and C are not — see
-"The reported-bug rounds" below. Run `git status` and `git branch` before
+follows; **stages A and B are done**, stage C is not — see "The reported-bug
+rounds" below. Run `git status` and `git branch` before
 assuming the tree is clean or which branch you're on.
 
-**Verified:** 223 TypeScript tests, 68 Python tests, typecheck and lint clean,
+**Verified:** 229 TypeScript tests, 68 Python tests, typecheck and lint clean,
 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
@@ -195,7 +195,11 @@ same way, in **dark mode** (the text-editor bug only appears there): panel
 selection, double-click entry, Escape, Delete, grouping, stats following the
 selection onto panel b, the non-significant notice, the template control at
 4/5/6 panels, an import after a template with no overlap across 7 panels, the
-Layers eye, and the editor reading `rgb(232,234,237) on rgb(31,34,39)`.
+Layers eye, and the editor reading `rgb(232,234,237) on rgb(31,34,39)`. Stage B
+likewise: a save named `my-chosen-name.figureforge` from the dialog and adopted
+as the title, Ctrl+V and Ctrl+D on a text label and on a whole panel, Send to
+back reordering the DOM, and a five-figure-count import with no axis label
+outside its panel.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
 user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
@@ -409,6 +413,55 @@ entirely. Recorded here so they are not "fixed" a second time in the wrong place
 - **The Layers list can hide as well as delete.** `hidden` and the renderer's
   support for it already existed; the only toggle was buried in the Inspector.
 
+#### Stage B, and the one thing that needed care
+
+Three of the four were additive. The fourth changes plot geometry.
+
+- **Plot gutters are measured, not assumed.** `theme.spacing.plotMarginMm` was
+  applied verbatim, so a five-figure tick label plus a y title simply ran out of
+  the panel — and panels do not clip, so the overflow landed on the neighbouring
+  panel and then the page. `requiredMargin` now sizes the left and bottom
+  gutters from the labels that will actually be drawn, through `text-width.ts`'s
+  static tables — never the DOM, or the canvas and the exporter would disagree.
+  Two things make this safe to rely on:
+  - **Exactly two passes, never a loop.** Tick *values* are chosen from the axis
+    length, which depends on the margin, which depends on how wide those values
+    print. The dependency is circular and a convergence loop could oscillate
+    between two label sets, so the geometry is built once against the theme's
+    margin, measured, and rebuilt once against the answer. It terminates by
+    construction.
+  - **The 90° category-label budget is a share of the *panel*, not the plot
+    area.** It used to be `plotHeight * 0.45`; now that the plot area shrinks to
+    make room for exactly those labels, measuring against it fed the depth back
+    into the budget and truncated the names the second pass existed to fit. The
+    existing "goes vertical rather than truncating" test caught it.
+  - A figure whose labels already fit is byte-identical, which a regression test
+    asserts — otherwise every saved document would re-lay itself out on open.
+- **`duplicateNode` is `deleteNode`'s inverse**, including its panel-label
+  special case, and it remaps every reference *within* the copied set: a copied
+  panel's bracket annotates the copied plot, not the original, which would
+  otherwise put a "P < 0.001" over a plot whose test never produced it.
+  References *out* of the set — `assetId`, `datasetId`, `analysisId` — are
+  shared on purpose, since copying a figure element must not fork its data.
+  `structuredClone` cannot clone an Immer proxy, so nodes go through `current()`
+  first. Derived nodes (`bracket`, `panel-label`, `scale-bar`) are refused as
+  standalone copies: alone they would dangle, and
+  `checkReferentialIntegrity` would reject the save.
+- **The clipboard is in-app**, a list of node ids in a ref, not
+  `navigator.clipboard`. Pasting has to run against the current document
+  anyway, so serialising figure geometry through the OS clipboard would buy a
+  permissions prompt and nothing else. Ctrl/Cmd+C, +V and +D live in the same
+  Canvas keydown effect as Delete, which already ignores events aimed at form
+  fields.
+- **`reorderNode` renumbers every sibling `0..n-1`** rather than nudging one z.
+  `nextZ` only ever appended, so before this the only way to change what covered
+  what was to delete a node and add it back. The Layers list is now sorted
+  highest-z-first, so the top of the list is the top of the stack.
+- **The figure title is editable.** It always existed on the document and always
+  named the saved file — nothing ever showed it, so every figure downloaded
+  itself under the sample document's name. Saving now asks for a name and keeps
+  it as the title, so the document and the file on disk stop disagreeing.
+
 ---
 
 ## What's next
@@ -453,7 +506,8 @@ Phases 5–9, with the actual entry points:
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
-| **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. |
+| **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
+| **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | Quality checker findings carry `autoFixable: true`, but no fixer is wired up and the UI offers no button. Either build them or stop claiming it. |
 | **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
 | **Cropped images ship at full size** | `renderImage` embeds the whole asset and discards the out-of-crop pixels with a `clipPath`, so a 100 MP image cropped to 10% still uploads 100 MP. Shipping *only* the cropped region at full resolution is pixel-identical to the screen, so unlike downsampling it is value-preserving — it needs an `OffscreenCanvas` re-encode, which is phase 6 work. The export size guard (128 MiB, client pre-check plus a `Content-Length` middleware) is the interim answer. |
