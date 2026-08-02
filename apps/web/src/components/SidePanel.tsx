@@ -71,6 +71,10 @@ export interface SidePanelProps {
   exportDpi: number;
   cropNodeId: NodeId | null;
   onCropNodeChange: (id: NodeId | null) => void;
+  measureNodeId: NodeId | null;
+  /** Length of the last ruler drag, in source pixels; null until one happens. */
+  measuredPx: number | null;
+  onMeasureNodeChange: (id: NodeId | null) => void;
 }
 
 export function SidePanel(props: SidePanelProps) {
@@ -95,6 +99,9 @@ export function SidePanel(props: SidePanelProps) {
             onSelectionChange={props.onSelectionChange}
             cropNodeId={props.cropNodeId}
             onCropNodeChange={props.onCropNodeChange}
+            measureNodeId={props.measureNodeId}
+            measuredPx={props.measuredPx}
+            onMeasureNodeChange={props.onMeasureNodeChange}
           />
         )}
         {tab === 'stats' && <StatsTab {...props} />}

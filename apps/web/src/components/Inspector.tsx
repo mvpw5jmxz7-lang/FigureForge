@@ -8,6 +8,7 @@
  * just plots.
  */
 
+import { useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   childrenOf,
@@ -100,6 +101,9 @@ export interface InspectorProps {
   onSelectionChange: (ids: NodeId[]) => void;
   cropNodeId: NodeId | null;
   onCropNodeChange: (id: NodeId | null) => void;
+  measureNodeId: NodeId | null;
+  measuredPx: number | null;
+  onMeasureNodeChange: (id: NodeId | null) => void;
 }
 
 export function InspectorTab({
@@ -109,6 +113,9 @@ export function InspectorTab({
   onSelectionChange,
   cropNodeId,
   onCropNodeChange,
+  measureNodeId,
+  measuredPx,
+  onMeasureNodeChange,
 }: InspectorProps) {
   const { document: doc, commit } = api;
 
@@ -193,7 +200,16 @@ export function InspectorTab({
           onCropNodeChange={onCropNodeChange}
         />
       )}
-      {node.type === 'scale-bar' && <ScaleBarFields api={api} node={node} doc={doc} />}
+      {node.type === 'scale-bar' && (
+        <ScaleBarFields
+          api={api}
+          node={node}
+          doc={doc}
+          measuring={measureNodeId === node.id}
+          measuredPx={measureNodeId === node.id ? measuredPx : null}
+          onMeasureNodeChange={onMeasureNodeChange}
+        />
+      )}
       {node.type === 'arrow' && <ArrowFields api={api} node={node} />}
       {node.type === 'shape' && <ShapeFields api={api} node={node} />}
       {node.type === 'group' && (
@@ -684,14 +700,33 @@ function ScaleBarFields({
   api,
   node,
   doc,
+  measuring,
+  measuredPx,
+  onMeasureNodeChange,
 }: {
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'scale-bar' }>;
   doc: FigureDocument;
+  measuring: boolean;
+  measuredPx: number | null;
+  onMeasureNodeChange: (id: NodeId | null) => void;
 }) {
   const { commit } = api;
   const source = node.calibrationSource ?? 'unknown';
   const drawnMm = scaleBarWidthMm(doc.nodes, node.id);
+  const [knownLength, setKnownLength] = useState('');
+
+  const applyMeasurement = (): void => {
+    const known = Number(knownLength);
+    if (!measuredPx || !Number.isFinite(known) || known <= 0) return;
+    commit('Calibrate from measurement', (draft) =>
+      // The ruler reports source pixels and the user supplies what that
+      // distance is, so pixels-per-unit falls straight out.
+      setScaleBarCalibration(draft, node.id, measuredPx / known, 'measured'),
+    );
+    onMeasureNodeChange(null);
+    setKnownLength('');
+  };
 
   const setBar = (label: string, patch: Partial<typeof node>): void => {
     commit(label, (draft) => {
@@ -763,6 +798,54 @@ function ScaleBarFields({
         {node.pixelsPerUnit.toFixed(4)} px per {node.unitLabel}
         {drawnMm !== null && ` · bar draws ${drawnMm.toFixed(2)} mm`}
       </p>
+
+      {/* The workflow for a legacy micrograph: no metadata, but a scale bar
+          burned into the pixels. Measuring that bar is the only way to
+          recover the pixel size. */}
+      <button
+        className={measuring ? 'primary' : ''}
+        onClick={() => onMeasureNodeChange(measuring ? null : node.id)}
+      >
+        {measuring ? 'Cancel measuring' : 'Calibrate from the image'}
+      </button>
+
+      {measuring && (
+        <>
+          <p className="hint">
+            {measuredPx
+              ? `Measured ${Math.round(measuredPx)} px. How long is that?`
+              : 'Drag across a feature of known length — a burned-in scale bar, usually.'}
+          </p>
+          {measuredPx !== null && (
+            <div className="field-row measured-length">
+              {/* Not "Length": the bar's own length field is a few lines up,
+                  and two identically labelled numbers in one panel is how the
+                  wrong one gets filled in. */}
+              <label className="field">
+                That distance is ({node.unitLabel})
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  autoFocus
+                  value={knownLength}
+                  onChange={(e) => setKnownLength(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') applyMeasurement();
+                  }}
+                />
+              </label>
+              <button
+                className="primary"
+                disabled={!(Number(knownLength) > 0)}
+                onClick={applyMeasurement}
+              >
+                Set scale
+              </button>
+            </div>
+          )}
+        </>
+      )}
 
       <h4>Appearance</h4>
       <div className="field-row">

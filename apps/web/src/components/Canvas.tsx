@@ -45,6 +45,9 @@ export interface CanvasProps {
   assetUrls: Record<string, string>;
   /** Image being cropped on canvas, or null. Owned by the Inspector's toggle. */
   cropNodeId: NodeId | null;
+  /** Scale bar being calibrated by measuring a feature, or null. */
+  measureNodeId: NodeId | null;
+  onMeasured: (imagePixels: number) => void;
 }
 
 interface DragState {
@@ -98,6 +101,8 @@ export function Canvas({
   showGrid,
   assetUrls,
   cropNodeId,
+  measureNodeId,
+  onMeasured,
 }: CanvasProps) {
   const { document: doc } = api;
   const [guides, setGuides] = useState<AlignmentGuide[]>([]);
@@ -106,6 +111,15 @@ export function Canvas({
 
   const cropCandidate = cropNodeId ? doc.nodes[cropNodeId] : undefined;
   const cropTarget = cropCandidate?.type === 'image' ? cropCandidate : null;
+
+  // The measuring ruler is drawn over the bar's parent image, since what is
+  // being measured is a feature of the micrograph, not of the bar.
+  const measureBar = measureNodeId ? doc.nodes[measureNodeId] : undefined;
+  const measureImage =
+    measureBar?.type === 'scale-bar' && measureBar.parentId
+      ? doc.nodes[measureBar.parentId]
+      : undefined;
+  const measureTarget = measureImage?.type === 'image' ? measureImage : null;
 
   const resolveAsset = useCallback((assetId: string) => assetUrls[assetId], [assetUrls]);
 
@@ -458,6 +472,10 @@ export function Canvas({
             editor state rather than part of the drawing. */}
         {cropTarget && <CropOverlay api={api} node={cropTarget} zoom={zoom} theme={theme} />}
 
+        {measureTarget && (
+          <MeasureOverlay doc={doc} node={measureTarget} zoom={zoom} onMeasured={onMeasured} />
+        )}
+
         {/* Editing overlay: an HTML input above the SVG, never in the scene. */}
         {textEdit && (
           <input
@@ -643,6 +661,107 @@ function CropOverlay({
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Drag a ruler across a feature of known length to calibrate the image.
+ *
+ * The workflow for every legacy micrograph: no metadata, but a scale bar
+ * burned into the pixels by whatever software exported it. Measuring that bar
+ * is the only way to recover the pixel size, and it is why an uncalibrated bar
+ * does not have to stay uncalibrated.
+ *
+ * Reports the distance in *source image pixels*, so the answer is a property
+ * of the micrograph and survives the panel being resized afterwards.
+ */
+function MeasureOverlay({
+  doc,
+  node,
+  zoom,
+  onMeasured,
+}: {
+  doc: FigureDocument;
+  node: Extract<FigureNode, { type: 'image' }>;
+  zoom: number;
+  onMeasured: (imagePixels: number) => void;
+}) {
+  const [line, setLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const dragRef = useRef(false);
+
+  const frame = absoluteFrame(doc.nodes, node.id);
+  if (!frame) return null;
+
+  const pxPerMm = PX_PER_MM * zoom;
+  const box = {
+    left: frame.x * pxPerMm,
+    top: frame.y * pxPerMm,
+    width: frame.width * pxPerMm,
+    height: frame.height * pxPerMm,
+  };
+
+  // Screen pixels → source pixels. The visible span is what the crop retained,
+  // so a measurement on a cropped image still refers to the original grid.
+  const visiblePx = node.naturalPx.width * (node.crop.width || 1);
+  const sourcePxPerScreenPx = box.width > 0 ? visiblePx / box.width : 0;
+
+  const local = (event: React.PointerEvent): { x: number; y: number } => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  const lengthPx = line
+    ? Math.hypot(line.x2 - line.x1, line.y2 - line.y1) * sourcePxPerScreenPx
+    : 0;
+
+  return (
+    <div
+      className="measure-overlay"
+      style={box}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const point = local(e);
+        dragRef.current = true;
+        setLine({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+        (e.target as Element).setPointerCapture?.(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!dragRef.current || !line) return;
+        const point = local(e);
+        setLine({ ...line, x2: point.x, y2: point.y });
+      }}
+      onPointerUp={() => {
+        dragRef.current = false;
+        if (lengthPx > 0) onMeasured(lengthPx);
+      }}
+    >
+      <svg width={box.width} height={box.height}>
+        {line && (
+          <>
+            <line
+              x1={line.x1}
+              y1={line.y1}
+              x2={line.x2}
+              y2={line.y2}
+              stroke="#ff2d55"
+              strokeWidth={2}
+            />
+            {/* End caps, so the exact endpoints are visible against a busy
+                micrograph rather than lost in it. */}
+            {[
+              [line.x1, line.y1],
+              [line.x2, line.y2],
+            ].map(([x, y], i) => (
+              <circle key={i} cx={x} cy={y} r={4} fill="#fff" stroke="#ff2d55" strokeWidth={2} />
+            ))}
+          </>
+        )}
+      </svg>
+      <span className="measure-readout">
+        {line ? `${Math.round(lengthPx)} px` : 'Drag across a feature of known length'}
+      </span>
     </div>
   );
 }

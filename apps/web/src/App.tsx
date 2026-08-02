@@ -114,6 +114,10 @@ export function App() {
   const [selectedIds, setSelectedIds] = useState<NodeId[]>([]);
   /** Image being cropped directly on canvas. Editor state, never the document. */
   const [cropNodeId, setCropNodeId] = useState<NodeId | null>(null);
+  /** Scale bar being calibrated by measuring a feature of known length. */
+  const [measureNodeId, setMeasureNodeId] = useState<NodeId | null>(null);
+  /** What the last ruler drag measured, in source pixels, awaiting a length. */
+  const [measuredPx, setMeasuredPx] = useState<number | null>(null);
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,16 +131,19 @@ export function App() {
     void health().then(setApiUp);
   }, []);
 
-  // Escape leaves crop mode. A mode with no visible way out is how a user
-  // concludes the canvas has stopped responding.
+  // Escape leaves crop and measure mode. A mode with no visible way out is how
+  // a user concludes the canvas has stopped responding.
   useEffect(() => {
-    if (cropNodeId === null) return;
+    if (cropNodeId === null && measureNodeId === null) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setCropNodeId(null);
+      if (event.key !== 'Escape') return;
+      setCropNodeId(null);
+      setMeasureNodeId(null);
+      setMeasuredPx(null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [cropNodeId]);
+  }, [cropNodeId, measureNodeId]);
 
   // --- export -------------------------------------------------------------
 
@@ -279,11 +286,17 @@ export function App() {
             // Selecting something else ends the crop: leaving the overlay up
             // over a node that is no longer selected is an invisible mode.
             if (ids[0] !== cropNodeId) setCropNodeId(null);
+            if (ids[0] !== measureNodeId) {
+              setMeasureNodeId(null);
+              setMeasuredPx(null);
+            }
           }}
           zoom={zoom}
           showGrid={showGrid}
           assetUrls={assets.urls}
           cropNodeId={cropNodeId}
+          measureNodeId={measureNodeId}
+          onMeasured={setMeasuredPx}
         />
 
         <SidePanel
@@ -298,6 +311,12 @@ export function App() {
           exportDpi={dpi}
           cropNodeId={cropNodeId}
           onCropNodeChange={setCropNodeId}
+          measureNodeId={measureNodeId}
+          measuredPx={measuredPx}
+          onMeasureNodeChange={(id) => {
+            setMeasureNodeId(id);
+            setMeasuredPx(null);
+          }}
         />
       </main>
 
