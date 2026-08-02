@@ -131,7 +131,23 @@ const imageSchema = z.object({
   type: z.literal('image'),
   assetId: z.string(),
   naturalPx: z.object({ width: nonNeg, height: nonNeg }),
-  crop: z.object({ x: finite, y: finite, width: nonNeg, height: nonNeg }),
+  /**
+   * Normalised source coordinates. The extents are `.gt(0)` rather than merely
+   * non-negative because zero divides by zero in `renderImage` (`width /
+   * crop.width`) while reading as a *full* frame in `checkImageResolution`,
+   * which uses `crop.width || 1` — the same document giving two different
+   * answers. `normaliseCrop` in operations.ts is the writer that enforces it.
+   *
+   * Narrowing a schema can reject a previously valid file, which would normally
+   * force a SCHEMA_VERSION bump. It cannot here: nothing could create an image
+   * node before this change, so no file in existence contains one.
+   */
+  crop: z.object({
+    x: finite.min(0).max(1),
+    y: finite.min(0).max(1),
+    width: finite.gt(0).max(1),
+    height: finite.gt(0).max(1),
+  }),
   preserveAspect: z.boolean(),
 });
 
@@ -191,11 +207,14 @@ const scaleBarSchema = z.object({
   length: finite.positive(),
   unitLabel: z.string(),
   pixelsPerUnit: finite.positive(),
+  /** Deprecated in the drawing path; `labelPosition` decides. See nodes.ts. */
   showLabel: z.boolean(),
   style: textStyleSchema,
   fill: fillSchema,
   barHeightMm: nonNeg,
   labelPosition: z.enum(['above', 'below', 'none']),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  calibrationSource: z.enum(['metadata', 'manual', 'measured', 'unknown']).optional(),
 });
 
 const groupSchema = z.object({ ...nodeBaseShape, type: z.literal('group') });

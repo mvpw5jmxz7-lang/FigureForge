@@ -20,18 +20,35 @@ import {
   type Dataset,
 } from './index.js';
 import {
+  addArrow,
+  addAsset,
   addBracket,
+  addGroup,
+  addImage,
+  addPanelWithImage,
   addPanelWithPlot,
+  addScaleBar,
+  addShape,
   applyAutoLayout,
   deleteNode,
+  imagesUsingAsset,
+  MIN_CROP,
+  normaliseArrowFrame,
+  normaliseCrop,
   relabelPanels,
   removeBracketsForPlot,
   renameDataset,
   reparentNode,
   replaceAnalysisForPlot,
   repositionBrackets,
+  resizePanel,
+  scaleBarWidthMm,
+  setArrowPoint,
+  setImageCrop,
+  ungroup,
   type PlotMeasurements,
 } from './operations.js';
+import { absoluteFrame } from './nodes.js';
 import {
   alignFrames,
   autoLayout,
@@ -418,6 +435,358 @@ describe('operations', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Images, scale bars and annotations
+// ---------------------------------------------------------------------------
+
+/** TIFF magic plus bytes that are not valid UTF-8, so any text round trip
+ *  through the archive corrupts them detectably rather than silently. */
+const TIFF_BYTES = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 0xff, 0xfe, 0x00, 0x80, 0xc0, 0x01]);
+
+function imageDocument(options: { naturalPx?: { width: number; height: number } } = {}) {
+  const newId = createIdFactory();
+  const base = createDocument({
+    widthMm: 183,
+    heightMm: 75,
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  const assetId = newId();
+  const naturalPx = options.naturalPx ?? { width: 1000, height: 800 };
+
+  const doc = editDocument(base, (draft) => {
+    addAsset(draft, {
+      id: assetId,
+      filename: 'micrograph.tif',
+      mimeType: 'image/tiff',
+      byteLength: TIFF_BYTES.length,
+      naturalPx,
+    });
+    addPanelWithImage(draft, newId, {
+      frame: { x: 0, y: 0, width: 50, height: 40 },
+      assetId,
+      naturalPx,
+      name: 'Micrograph',
+    });
+  });
+
+  const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+  return { doc, newId, assetId, image };
+}
+
+describe('assets and image panels', () => {
+  it('derives an archive path from the filename extension', () => {
+    const { doc, assetId } = imageDocument();
+    expect(doc.assets[0]!.path).toBe(`assets/${assetId}.tif`);
+  });
+
+  it('is idempotent on asset id, so re-importing does not duplicate', () => {
+    const { doc, assetId } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addAsset(draft, {
+        id: assetId,
+        filename: 'micrograph.tif',
+        mimeType: 'image/tiff',
+        byteLength: 10,
+        naturalPx: null,
+      });
+    });
+    expect(after.assets).toHaveLength(1);
+  });
+
+  it('refuses an image whose asset was never registered', () => {
+    const { doc, newId } = imageDocument();
+    expect(() =>
+      editDocument(doc, (draft) => {
+        addImage(draft, newId, {
+          assetId: 'nope',
+          frame: { x: 0, y: 0, width: 10, height: 10 },
+          naturalPx: { width: 10, height: 10 },
+        });
+      }),
+    ).toThrow(/No such asset/);
+  });
+
+  it('locks the panel to the image aspect ratio so layout reserves the right cell', () => {
+    const { doc } = imageDocument({ naturalPx: { width: 1000, height: 500 } });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    expect(panel.type === 'panel' && panel.aspectLock).toBeCloseTo(2, 10);
+  });
+
+  it('names the image after its file, not "Image 1"', () => {
+    const { image } = imageDocument();
+    expect(image.name).toBe('Micrograph');
+    // …and without an explicit name, the filename stands in.
+    const { doc, newId, assetId } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addImage(draft, newId, {
+        assetId,
+        frame: { x: 0, y: 0, width: 10, height: 10 },
+        naturalPx: { width: 10, height: 10 },
+      });
+    });
+    const added = Object.values(after.nodes).filter((n) => n.type === 'image').at(-1)!;
+    expect(added.name).toBe('micrograph.tif');
+  });
+
+  it('keeps images filling their panel through a re-layout', () => {
+    const { doc, image } = imageDocument();
+    // Auto-layout used to resize only plots, so a micrograph kept its old size
+    // inside a resized panel — visible as the image no longer filling it.
+    const laid = editDocument(doc, (draft) =>
+      applyAutoLayout(draft, { marginMm: 2, gutterMm: 5, labelGutterMm: 4 }),
+    );
+    const panel = laid.nodes[image.parentId!]!;
+    expect(laid.nodes[image.id]!.frame.width).toBeCloseTo(panel.frame.width, 6);
+    expect(laid.nodes[image.id]!.frame.height).toBeCloseTo(panel.frame.height, 6);
+  });
+
+  it('tracks which images use an asset, so orphans are findable', () => {
+    const { doc, assetId, image } = imageDocument();
+    expect(imagesUsingAsset(doc.nodes, assetId)).toHaveLength(1);
+
+    const after = editDocument(doc, (draft) => deleteNode(draft, image.id));
+    expect(imagesUsingAsset(after.nodes, assetId)).toHaveLength(0);
+    // The record survives: undo must be able to bring the node back.
+    expect(after.assets).toHaveLength(1);
+  });
+});
+
+describe('crop', () => {
+  it('never yields a zero extent, which the renderer would divide by', () => {
+    const crop = normaliseCrop({ x: 0, y: 0, width: 0, height: 0 });
+    expect(crop.width).toBeGreaterThanOrEqual(MIN_CROP);
+    expect(crop.height).toBeGreaterThanOrEqual(MIN_CROP);
+  });
+
+  it('clamps an extent that would run past the source edge', () => {
+    expect(normaliseCrop({ x: 0.9, y: 0, width: 0.5, height: 1 }).width).toBeCloseTo(0.1, 10);
+  });
+
+  it('clamps negative and out-of-range origins into the unit square', () => {
+    const crop = normaliseCrop({ x: -0.3, y: 4, width: 1, height: 1 });
+    expect(crop.x).toBe(0);
+    expect(crop.y).toBeCloseTo(1 - MIN_CROP, 10);
+  });
+
+  it('falls back to the full frame for missing or non-finite values', () => {
+    expect(normaliseCrop(undefined)).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    expect(normaliseCrop({ width: Number.NaN, height: Infinity }).width).toBe(1);
+  });
+
+  it('survives the archive, so a crop narrower than the schema floor cannot be saved', () => {
+    const { doc, image } = imageDocument();
+    const cropped = editDocument(doc, (draft) =>
+      setImageCrop(draft, image.id, { x: 0.25, width: 0.5 }),
+    );
+    const loaded = loadArchive(saveArchive(buildArchiveContents(cropped)));
+    const back = loaded.document.nodes[image.id]!;
+    expect(back.type === 'image' && back.crop).toEqual({ x: 0.25, y: 0, width: 0.5, height: 1 });
+  });
+});
+
+describe('scale bars', () => {
+  /** 1000 px wide, shown 50 mm wide → 0.05 mm per pixel. At 2 px/µm a 10 µm
+   *  bar spans 20 px, so it must draw exactly 1.0 mm. */
+  function barDocument() {
+    const { doc, newId, image } = imageDocument();
+    const withBar = editDocument(doc, (draft) => {
+      addScaleBar(draft, newId, {
+        imageId: image.id,
+        length: 10,
+        pixelsPerUnit: 2,
+        unitLabel: 'µm',
+        calibrationSource: 'metadata',
+      });
+    });
+    const bar = Object.values(withBar.nodes).find((n) => n.type === 'scale-bar')!;
+    return { doc: withBar, bar, image, newId };
+  }
+
+  it('derives its width from the image calibration', () => {
+    const { doc, bar } = barDocument();
+    expect(scaleBarWidthMm(doc.nodes, bar.id)).toBeCloseTo(1.0, 10);
+    expect(doc.nodes[bar.id]!.frame.width).toBeCloseTo(1.0, 10);
+  });
+
+  it('halves when its image is halved — the integrity property', () => {
+    const { doc, bar, image } = barDocument();
+    const panelId = image.parentId!;
+    const resized = editDocument(doc, (draft) =>
+      resizePanel(draft, panelId, { x: 0, y: 0, width: 25, height: 20 }),
+    );
+    expect(scaleBarWidthMm(resized.nodes, bar.id)).toBeCloseTo(0.5, 10);
+    // The frame follows too, or the selection chrome sits where the bar is not.
+    expect(resized.nodes[bar.id]!.frame.width).toBeCloseTo(0.5, 10);
+  });
+
+  it('doubles when the image is cropped to half its width', () => {
+    const { doc, bar, image } = barDocument();
+    // Half as many source pixels span the same millimetres, so each pixel is
+    // twice as wide on the page and the bar must grow to match.
+    const cropped = editDocument(doc, (draft) => setImageCrop(draft, image.id, { width: 0.5 }));
+    expect(scaleBarWidthMm(cropped.nodes, bar.id)).toBeCloseTo(2.0, 10);
+  });
+
+  it('refuses a target that is not an image', () => {
+    const { doc, newId } = imageDocument();
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    let bar: unknown = 'unset';
+    editDocument(doc, (draft) => {
+      bar = addScaleBar(draft, newId, { imageId: panel.id, length: 10, pixelsPerUnit: 2 });
+    });
+    expect(bar).toBeNull();
+  });
+
+  it('keeps showLabel in step with labelPosition', () => {
+    const { doc, newId, image } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addScaleBar(draft, newId, {
+        imageId: image.id,
+        length: 10,
+        pixelsPerUnit: 2,
+        labelPosition: 'none',
+      });
+    });
+    const bar = Object.values(after.nodes).find((n) => n.type === 'scale-bar')!;
+    expect(bar.type === 'scale-bar' && bar.showLabel).toBe(false);
+  });
+
+  it('records calibration provenance, defaulting to unknown', () => {
+    const { doc, newId, image } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addScaleBar(draft, newId, { imageId: image.id, length: 10, pixelsPerUnit: 2 });
+    });
+    const bar = Object.values(after.nodes).find((n) => n.type === 'scale-bar')!;
+    expect(bar.type === 'scale-bar' && bar.calibrationSource).toBe('unknown');
+  });
+});
+
+describe('annotations', () => {
+  it('always writes at least two points, which the schema requires', () => {
+    const { doc, newId } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addArrow(draft, newId, { points: [{ x: 0, y: 0 }] });
+    });
+    const arrow = Object.values(after.nodes).find((n) => n.type === 'arrow')!;
+    expect(arrow.type === 'arrow' && arrow.points.length).toBeGreaterThanOrEqual(2);
+    // The real test: a one-point arrow would make the project unloadable.
+    expect(() => loadArchive(saveArchive(buildArchiveContents(after)))).not.toThrow();
+  });
+
+  it('rebases the frame when a point is dragged past the origin', () => {
+    const { doc, newId } = imageDocument();
+    let arrowId = '';
+    const withArrow = editDocument(doc, (draft) => {
+      arrowId = addArrow(draft, newId, { frame: { x: 20, y: 20, width: 10, height: 10 } }).id;
+    });
+
+    const moved = editDocument(withArrow, (draft) =>
+      setArrowPoint(draft, arrowId, 0, { x: -5, y: -4 }),
+    );
+    const arrow = moved.nodes[arrowId]!;
+
+    expect(arrow.type === 'arrow' && Math.min(...arrow.points.map((p) => p.x))).toBe(0);
+    expect(arrow.frame.x).toBeCloseTo(15, 10);
+    expect(arrow.frame.y).toBeCloseTo(16, 10);
+  });
+
+  it('leaves an already-normalised arrow alone', () => {
+    const { doc, newId } = imageDocument();
+    let arrowId = '';
+    const withArrow = editDocument(doc, (draft) => {
+      arrowId = addArrow(draft, newId).id;
+    });
+    const before = withArrow.nodes[arrowId]!.frame;
+    const after = editDocument(withArrow, (draft) => normaliseArrowFrame(draft, arrowId));
+    expect(after.nodes[arrowId]!.frame).toEqual(before);
+  });
+
+  it('creates shapes unfilled, since an annotation outlines rather than hides', () => {
+    const { doc, newId } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } });
+    });
+    const shape = Object.values(after.nodes).find((n) => n.type === 'shape')!;
+    expect(shape.type === 'shape' && shape.fill).toBeNull();
+    expect(shape.type === 'shape' && shape.stroke).not.toBeNull();
+  });
+});
+
+describe('grouping', () => {
+  function twoShapes() {
+    const { doc, newId } = imageDocument();
+    const ids: string[] = [];
+    const after = editDocument(doc, (draft) => {
+      ids.push(addShape(draft, newId, { shape: 'rect', frame: { x: 10, y: 10, width: 20, height: 10 } }).id);
+      ids.push(addShape(draft, newId, { shape: 'ellipse', frame: { x: 50, y: 30, width: 20, height: 10 } }).id);
+    });
+    return { doc: after, ids, newId };
+  }
+
+  it('preserves every member position on the page', () => {
+    const { doc, ids, newId } = twoShapes();
+    const before = ids.map((id) => absoluteFrame(doc.nodes, id)!);
+
+    const grouped = editDocument(doc, (draft) => {
+      addGroup(draft, newId, ids);
+    });
+
+    for (const [index, id] of ids.entries()) {
+      const now = absoluteFrame(grouped.nodes, id)!;
+      expect(now.x).toBeCloseTo(before[index]!.x, 6);
+      expect(now.y).toBeCloseTo(before[index]!.y, 6);
+    }
+  });
+
+  it('sizes the group to the union of its members', () => {
+    const { doc, ids, newId } = twoShapes();
+    const grouped = editDocument(doc, (draft) => {
+      addGroup(draft, newId, ids);
+    });
+    const group = Object.values(grouped.nodes).find((n) => n.type === 'group')!;
+    expect(group.frame).toEqual({ x: 10, y: 10, width: 60, height: 30 });
+  });
+
+  it('restores positions on ungroup', () => {
+    const { doc, ids, newId } = twoShapes();
+    const before = ids.map((id) => absoluteFrame(doc.nodes, id)!);
+
+    let groupId = '';
+    const grouped = editDocument(doc, (draft) => {
+      groupId = addGroup(draft, newId, ids)!.id;
+    });
+    const flat = editDocument(grouped, (draft) => ungroup(draft, groupId));
+
+    expect(flat.nodes[groupId]).toBeUndefined();
+    for (const [index, id] of ids.entries()) {
+      const now = absoluteFrame(flat.nodes, id)!;
+      expect(now.x).toBeCloseTo(before[index]!.x, 6);
+      expect(now.y).toBeCloseTo(before[index]!.y, 6);
+    }
+  });
+
+  it('refuses a selection spread across different parents', () => {
+    const { doc, ids, newId } = twoShapes();
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    let group: unknown = 'unset';
+    editDocument(doc, (draft) => {
+      group = addGroup(draft, newId, [ids[0]!, image.id]);
+    });
+    expect(group).toBeNull();
+  });
+
+  it('refuses a selection of fewer than two nodes', () => {
+    const { doc, ids, newId } = twoShapes();
+    let group: unknown = 'unset';
+    editDocument(doc, (draft) => {
+      group = addGroup(draft, newId, [ids[0]!]);
+    });
+    expect(group).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Store / undo
 // ---------------------------------------------------------------------------
 
@@ -501,6 +870,41 @@ describe('.figureforge archive', () => {
 
     // Reproducibility rests on the original bytes surviving untouched.
     expect(loaded.dataFiles.get(path)).toBe(original);
+  });
+
+  it('stores image assets byte for byte', () => {
+    const { doc } = imageDocument();
+    const path = doc.assets[0]!.path;
+
+    const bytes = saveArchive(
+      buildArchiveContents(doc, new Map(), new Map([[path, TIFF_BYTES]])),
+    );
+    const loaded = loadArchive(bytes);
+
+    // The same reproducibility claim `data/` makes, for binaries: the bytes a
+    // reviewer extracts must be the bytes that were imported. TIFF_BYTES is
+    // deliberately not valid UTF-8, so a stray text round trip corrupts it.
+    expect(loaded.assets.get(path)).toEqual(TIFF_BYTES);
+    expect(loaded.warnings).toHaveLength(0);
+  });
+
+  it('warns rather than fails when an asset binary is missing', () => {
+    const { doc } = imageDocument();
+    // A figure whose micrograph is missing still opens, and draws a placeholder
+    // — losing one image must not cost the author the whole project.
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.warnings.join(' ')).toMatch(/micrograph\.tif.*missing/);
+  });
+
+  it('rejects an image whose asset was never registered', () => {
+    const { doc, image } = imageDocument();
+    const broken = editDocument(doc, (draft) => {
+      const node = draft.nodes[image.id]!;
+      if (node.type === 'image') node.assetId = 'does-not-exist';
+    });
+    expect(() => loadArchive(saveArchive(buildArchiveContents(broken)))).toThrow(
+      /broken internal references/,
+    );
   });
 
   it('rejects a file that is not a project', () => {

@@ -52,7 +52,13 @@ export type SceneRole =
   | 'scale-bar-label'
   | 'legend'
   /** Editor chrome only; never present in an exported scene. */
-  | 'resize-handle';
+  | 'resize-handle'
+  /**
+   * An arrow endpoint grip. Kept distinct from 'resize-handle' so counting
+   * handles still means "the eight compass grips" — the parity test asserts
+   * exactly 8, and folding these in would quietly break that assertion's point.
+   */
+  | 'point-handle';
 
 export const el = (
   tag: string,
