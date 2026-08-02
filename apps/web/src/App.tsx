@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ARCHIVE_EXTENSION,
   buildArchiveContents,
   loadArchive,
   saveArchive,
+  type FigureDocument,
   type NodeId,
 } from '@figureforge/doc-model';
 import { renderDocument, toSvgString } from '@figureforge/render';
@@ -11,10 +12,65 @@ import { resolveTheme } from '@figureforge/theme';
 import { Canvas } from './components/Canvas.js';
 import { SidePanel } from './components/SidePanel.js';
 import { Toolbar } from './components/Toolbar.js';
-import { download, exportFigure, health, type ExportFormat } from './api.js';
+import { decodeImage, download, exportFigure, health, type ExportFormat } from './api.js';
+import { useAssets, type AssetStore } from './assets.js';
 import { createSampleDocument } from './sample.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
+
+/**
+ * Refuse to POST an export beyond this size.
+ *
+ * Mirrors MAX_EXPORT_BYTES on the service. Checked here as well so the author
+ * is told immediately rather than after uploading a hundred megabytes to be
+ * rejected — and the message can name the images responsible, which the
+ * server, seeing only a string, cannot.
+ */
+const MAX_EXPORT_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Rebuild display proxies for assets the browser cannot draw.
+ *
+ * Only TIFF needs this, and only after opening a project: the archive stores
+ * the original bytes and nothing else, so the PNG the canvas draws has to be
+ * regenerated. The alternative — caching a proxy inside the archive — doubles
+ * its size and creates a second artefact that can disagree with the first.
+ *
+ * The cost is that opening a TIFF-bearing project needs the API. A failure
+ * here is reported and left at that: the images render as placeholders, which
+ * is honest, and every other part of the figure still works.
+ */
+async function rehydrateProxies(
+  document: FigureDocument,
+  store: AssetStore,
+  onError: (message: string) => void,
+): Promise<void> {
+  const pending = document.assets.filter(
+    (asset) => asset.mimeType === 'image/tiff' && store.has(asset.id),
+  );
+  if (pending.length === 0) return;
+
+  for (const asset of pending) {
+    const original = store.originalBytes(asset.id);
+    if (!original) continue;
+    try {
+      const decoded = await decodeImage(
+        new File([new Uint8Array(original)], asset.filename, { type: asset.mimeType }),
+      );
+      store.add(asset.id, {
+        original,
+        mimeType: asset.mimeType,
+        display: decoded.png,
+        displayMimeType: 'image/png',
+      });
+    } catch (caught) {
+      onError(
+        `Could not redisplay "${asset.filename}": ${String(caught)}. ` +
+          'The original is still in the project; the analysis service may be down.',
+      );
+    }
+  }
+}
 
 const EXPORT_FORMATS: { id: ExportFormat; label: string; vector: boolean }[] = [
   { id: 'pdf', label: 'PDF', vector: true },
@@ -43,7 +99,25 @@ export function App() {
   const api = useDocument(createSampleDocument);
   useUndoShortcuts(api);
 
+  const assets = useAssets(api.document);
+
+  /**
+   * Verbatim source text for every imported dataset, keyed by archive path.
+   *
+   * A ref rather than state: nothing renders from it, and it must survive undo
+   * exactly as the asset bytes do. Without this the app archived a
+   * re-serialised CSV from `datasetToCsv` — so the "byte for byte" claim held
+   * for the tests and the acceptance script but not for the actual product.
+   */
+  const dataOriginals = useRef(new Map<string, string>());
+
   const [selectedIds, setSelectedIds] = useState<NodeId[]>([]);
+  /** Image being cropped directly on canvas. Editor state, never the document. */
+  const [cropNodeId, setCropNodeId] = useState<NodeId | null>(null);
+  /** Scale bar being calibrated by measuring a feature of known length. */
+  const [measureNodeId, setMeasureNodeId] = useState<NodeId | null>(null);
+  /** What the last ruler drag measured, in source pixels, awaiting a length. */
+  const [measuredPx, setMeasuredPx] = useState<number | null>(null);
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +131,20 @@ export function App() {
     void health().then(setApiUp);
   }, []);
 
+  // Escape leaves crop and measure mode. A mode with no visible way out is how
+  // a user concludes the canvas has stopped responding.
+  useEffect(() => {
+    if (cropNodeId === null && measureNodeId === null) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      setCropNodeId(null);
+      setMeasureNodeId(null);
+      setMeasuredPx(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [cropNodeId, measureNodeId]);
+
   // --- export -------------------------------------------------------------
 
   const runExport = useCallback(
@@ -65,8 +153,27 @@ export function App() {
       setError(null);
       try {
         // Render without editor chrome: no selection outlines, no grid.
-        const scene = renderDocument(api.document, { theme });
+        // Assets resolve to data URIs, never the canvas's blob URLs: those are
+        // meaningless outside this tab, so the service would render blanks.
+        const scene = renderDocument(api.document, {
+          theme,
+          resolveAsset: assets.resolveForExport,
+        });
         const svg = toSvgString(scene, { xmlDeclaration: format === 'svg' });
+
+        if (svg.length > MAX_EXPORT_BYTES) {
+          const largest = [...api.document.assets]
+            .sort((a, b) => b.byteLength - a.byteLength)
+            .slice(0, 3)
+            .map((a) => `${a.filename} (${(a.byteLength / 1e6).toFixed(0)} MB)`);
+          setError(
+            `This figure is ${(svg.length / 1e6).toFixed(0)} MB with its images embedded, ` +
+              `over the ${(MAX_EXPORT_BYTES / 1e6).toFixed(0)} MB export limit. ` +
+              (largest.length > 0 ? `Largest: ${largest.join(', ')}. ` : '') +
+              'Crop them, place them smaller, or supply lower-resolution originals.',
+          );
+          return;
+        }
 
         const blob = await exportFigure({
           svg,
@@ -84,32 +191,62 @@ export function App() {
         setBusy(null);
       }
     },
-    [api.document, theme, dpi],
+    [api.document, theme, dpi, assets],
   );
 
   // --- project file -------------------------------------------------------
 
   const saveProject = useCallback(() => {
-    const bytes = saveArchive(buildArchiveContents(api.document));
+    const bytes = saveArchive(
+      // Both side-stores go in, or the archive keeps the metadata and loses
+      // the thing it describes: a project whose micrographs are grey boxes and
+      // whose "verbatim" CSV was re-serialised on the way out.
+      buildArchiveContents(
+        api.document,
+        dataOriginals.current,
+        assets.store.archiveMap(api.document),
+      ),
+    );
     // Copy into a fresh buffer: the zip may sit in a larger pooled ArrayBuffer.
     download(
       new Blob([new Uint8Array(bytes)], { type: 'application/zip' }),
       `${api.document.title.slice(0, 60) || 'figure'}${ARCHIVE_EXTENSION}`,
     );
-  }, [api.document]);
+  }, [api.document, assets.store]);
 
   const openProject = useCallback(
     async (file: File) => {
       try {
         const result = loadArchive(new Uint8Array(await file.arrayBuffer()));
+
+        // Load the bytes before resetting the document. The other order shows
+        // one frame of placeholders where the images should be.
+        assets.store.clear();
+        for (const asset of result.document.assets) {
+          const bytes = result.assets.get(asset.path);
+          if (!bytes) continue;
+          // TIFF cannot be drawn by the browser, so its proxy has to be
+          // rebuilt. Held as the original for now: `renderImage` falls back to
+          // a placeholder, and the decode replaces it when it lands.
+          assets.store.add(asset.id, {
+            original: bytes,
+            mimeType: asset.mimeType,
+            display: bytes,
+            displayMimeType: asset.mimeType,
+          });
+        }
+
+        dataOriginals.current = new Map(result.dataFiles);
         api.store.reset(result.document);
         setSelectedIds([]);
         setError(result.warnings.length > 0 ? result.warnings.join(' ') : null);
+
+        await rehydrateProxies(result.document, assets.store, setError);
       } catch (caught) {
         setError(`Could not open project: ${String(caught)}`);
       }
     },
-    [api.store],
+    [api.store, assets.store],
   );
 
   return (
@@ -118,6 +255,7 @@ export function App() {
         api={api}
         theme={theme}
         selectedIds={selectedIds}
+        onSelectionChange={setSelectedIds}
         zoom={zoom}
         onZoomChange={setZoom}
         onFit={() => setZoom(fitZoom(api.document.page.widthMm))}
@@ -143,10 +281,22 @@ export function App() {
           api={api}
           theme={theme}
           selectedIds={selectedIds}
-          onSelectionChange={setSelectedIds}
+          onSelectionChange={(ids) => {
+            setSelectedIds(ids);
+            // Selecting something else ends the crop: leaving the overlay up
+            // over a node that is no longer selected is an invisible mode.
+            if (ids[0] !== cropNodeId) setCropNodeId(null);
+            if (ids[0] !== measureNodeId) {
+              setMeasureNodeId(null);
+              setMeasuredPx(null);
+            }
+          }}
           zoom={zoom}
           showGrid={showGrid}
-          assetUrls={{}}
+          assetUrls={assets.urls}
+          cropNodeId={cropNodeId}
+          measureNodeId={measureNodeId}
+          onMeasured={setMeasuredPx}
         />
 
         <SidePanel
@@ -156,6 +306,17 @@ export function App() {
           onSelectionChange={setSelectedIds}
           onError={setError}
           setBusy={setBusy}
+          assets={assets}
+          dataOriginals={dataOriginals.current}
+          exportDpi={dpi}
+          cropNodeId={cropNodeId}
+          onCropNodeChange={setCropNodeId}
+          measureNodeId={measureNodeId}
+          measuredPx={measuredPx}
+          onMeasureNodeChange={(id) => {
+            setMeasureNodeId(id);
+            setMeasuredPx(null);
+          }}
         />
       </main>
 

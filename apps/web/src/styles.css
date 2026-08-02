@@ -129,6 +129,43 @@ button.icon.danger:hover { color: var(--danger); }
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
 }
 
+/* Crop chrome. HTML above the SVG, so none of it can reach an export. */
+.crop-overlay { position: absolute; z-index: 4; touch-action: none; }
+.crop-shade { position: absolute; background: rgba(0, 0, 0, 0.55); pointer-events: none; }
+.crop-window {
+  position: absolute;
+  cursor: move;
+  outline: 1px solid #fff;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.crop-grip {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: #fff;
+}
+.crop-grip[data-grip='nw'], .crop-grip[data-grip='se'] { cursor: nwse-resize; }
+.crop-grip[data-grip='ne'], .crop-grip[data-grip='sw'] { cursor: nesw-resize; }
+.crop-grip[data-grip='n'], .crop-grip[data-grip='s'] { cursor: ns-resize; }
+.crop-grip[data-grip='e'], .crop-grip[data-grip='w'] { cursor: ew-resize; }
+
+.measure-overlay { position: absolute; z-index: 4; cursor: crosshair; touch-action: none; }
+.measure-readout {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 [data-node-id] { cursor: pointer; }
 [data-selected='true'] { outline: none; }
 /* Resize cursors by compass direction. Kept in CSS rather than on the scene
@@ -218,6 +255,20 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 }
 .rename:hover { border-color: var(--border); }
 .rename:focus { border-color: var(--accent); background: #fff; outline: none; }
+
+/* Asset rows carry an action row as well as a name, so they wrap rather than
+   squeezing three things onto one 340 px line. */
+.list.assets li { flex-wrap: wrap; }
+.list.assets li .rename { cursor: default; font-weight: 600; }
+.list.assets li .field-row { flex-basis: 100%; gap: 6px; align-items: center; }
+.list.assets .warning { display: inline; margin: 0; }
+
+.group-label {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 .result { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .warning { color: var(--warn); font-size: 11px; margin: 3px 0; }

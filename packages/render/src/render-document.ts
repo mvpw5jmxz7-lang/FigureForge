@@ -15,6 +15,7 @@ import {
   findDataset,
   findLayer,
   ptToMm,
+  scaleBarWidthMm,
   toSeries,
   type ArrowNode,
   type BracketNode,
@@ -405,6 +406,11 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
   const href = asset ? options.resolveAsset?.(node.assetId) : undefined;
   const { width, height } = node.frame;
 
+  // Scale bars and annotations are parented to the image — `renderScaleBar`
+  // reads its parent's calibration — so an image that dropped its children
+  // would silently omit the one object claiming to be a measurement.
+  const overlays = renderChildren(node, doc, options);
+
   if (!href) {
     // Placeholder keeps layout honest when an asset is missing or still loading.
     return group({}, [
@@ -413,6 +419,7 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
         fill: '#f2f2f2', stroke: '#bbbbbb', 'stroke-width': 0.2,
         'stroke-dasharray': '1 1',
       }),
+      ...overlays,
     ], { role: 'image' });
   }
 
@@ -430,14 +437,21 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
     'image-rendering': 'pixelated',
   }, undefined, { role: 'image' });
 
-  if (!isCropped) return image;
+  // The wrapper carries no role: the <image> element inside already has it, and
+  // counting the role twice would make "how many images are there" wrong.
+  if (!isCropped) {
+    return overlays.length === 0 ? image : group({}, [image, ...overlays]);
+  }
 
   const clipId = `clip-${node.id}`;
+  // The clip is the image's own frame, so overlays sit inside it too — a scale
+  // bar that overhung the micrograph it measures would be nonsense.
   return group({ 'clip-path': `url(#${clipId})` }, [
     el('defs', {}, [
       el('clipPath', { id: clipId }, [el('rect', { x: 0, y: 0, width, height })]),
     ]),
     image,
+    ...overlays,
   ]);
 }
 
@@ -448,17 +462,9 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
  * a data integrity problem, not a cosmetic one.
  */
 function renderScaleBar(node: ScaleBarNode, doc: FigureDocument, theme: Theme): SceneNode {
-  const parent = node.parentId ? doc.nodes[node.parentId] : undefined;
-
-  let barWidthMm = node.frame.width;
-  if (parent?.type === 'image') {
-    const image = parent;
-    const visiblePx = image.naturalPx.width * (image.crop.width || 1);
-    if (visiblePx > 0) {
-      const mmPerPixel = image.frame.width / visiblePx;
-      barWidthMm = node.length * node.pixelsPerUnit * mmPerPixel;
-    }
-  }
+  // The arithmetic lives in doc-model so that `resyncScaleBars` — which keeps
+  // the selection chrome on the bar — and this, which draws it, cannot disagree.
+  const barWidthMm = scaleBarWidthMm(doc.nodes, node.id) ?? node.frame.width;
 
   const children: SceneNode[] = [
     el('rect', {
@@ -471,7 +477,10 @@ function renderScaleBar(node: ScaleBarNode, doc: FigureDocument, theme: Theme): 
     }, undefined, { role: 'scale-bar' }),
   ];
 
-  if (node.showLabel && node.labelPosition !== 'none') {
+  // `labelPosition` is the single authority. `showLabel` says the same thing a
+  // second time, and reading both is how a control ends up doing nothing
+  // because the *other* field is still off.
+  if (node.labelPosition !== 'none') {
     const sizePt = node.style.fontSizePt ?? theme.type.scaleBarPt;
     const sizeMm = ptToMm(sizePt);
     const above = node.labelPosition === 'above';
@@ -1389,6 +1398,34 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
           { nodeId: id, role: 'resize-handle' },
         ),
       );
+    }
+
+    // Arrow endpoints get their own grips. Without them an arrow could only be
+    // scaled by its bounding box, so "point at that cell" would mean nudging a
+    // rectangle until the tip happened to land — which is not an interaction.
+    // Only for a lone selection: eight grips plus N more across a multi-select
+    // is a field of squares with no discernible target.
+    const node = doc.nodes[id];
+    if (node?.type === 'arrow' && selectedIds.length === 1) {
+      for (const [index, point] of node.points.entries()) {
+        outlines.push(
+          el(
+            'circle',
+            {
+              cx: frame.x + point.x,
+              cy: frame.y + point.y,
+              r: HANDLE_HALF_MM,
+              fill: '#0a84ff',
+              stroke: '#ffffff',
+              'stroke-width': 0.2,
+              'vector-effect': 'non-scaling-stroke',
+              'data-handle': `point-${index}`,
+            },
+            undefined,
+            { nodeId: id, role: 'point-handle' },
+          ),
+        );
+      }
     }
   }
   return group({}, outlines);

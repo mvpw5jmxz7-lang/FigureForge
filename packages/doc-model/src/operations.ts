@@ -13,9 +13,10 @@ import type { Analysis } from './analysis.js';
 import { significanceStars } from './analysis.js';
 import type { Dataset } from './data.js';
 import { toSeries } from './data.js';
-import type { FigureDocument } from './document.js';
+import type { Asset, FigureDocument } from './document.js';
 import { layerByName, nextZ } from './document.js';
-import type { RectMm } from './geometry.js';
+import type { PointMm, RectMm } from './geometry.js';
+import { union } from './geometry.js';
 import {
   autoLayout,
   readingOrder,
@@ -26,14 +27,24 @@ import {
 import type { LayoutTemplate } from './templates.js';
 import { CONTINUOUS_X_PLOT_TYPES } from './nodes.js';
 import type {
+  ArrowNode,
+  AssetId,
   AxisSpec,
   BracketNode,
+  CalibrationSource,
+  Fill,
   FigureNode,
+  GroupNode,
+  ImageNode,
   NodeId,
+  NodeMap,
   PanelLabelNode,
   PanelNode,
   PlotNode,
   PlotType,
+  ScaleBarNode,
+  ShapeNode,
+  Stroke,
   TextNode,
 } from './nodes.js';
 
@@ -330,18 +341,31 @@ export function applyAutoLayout(
     const dy = frame.y - panel.frame.y;
     panel.frame = frame;
 
-    // Plots fill their panel, so they follow the panel's new size.
-    for (const child of Object.values(draft.nodes)) {
-      if (child.parentId === panel.id && child.type === 'plot') {
-        child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
-      }
-    }
+    fillPanelChildren(draft, panel.id, frame);
 
     // Labels live in page space, so they must be translated by hand.
     for (const node of Object.values(draft.nodes)) {
       if (node.type === 'panel-label' && node.panelId === panel.id) {
         node.frame = { ...node.frame, x: node.frame.x + dx, y: node.frame.y + dy };
       }
+    }
+  }
+
+  // An image that changed size changes what a millimetre on it means.
+  resyncScaleBars(draft);
+}
+
+/**
+ * Stretch a panel's content children to fill it.
+ *
+ * One implementation shared by `applyAutoLayout` and `resizePanel`. They had
+ * drifted — auto-layout resized only plots while resize handled images too, so
+ * a micrograph kept its old size the moment the layout was re-run.
+ */
+function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm): void {
+  for (const child of Object.values(draft.nodes)) {
+    if (child.parentId === panelId && (child.type === 'plot' || child.type === 'image')) {
+      child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
     }
   }
 }
@@ -361,17 +385,332 @@ export function resizePanel(draft: FigureDocument, panelId: NodeId, frame: RectM
   const dy = frame.y - panel.frame.y;
   panel.frame = frame;
 
-  for (const child of Object.values(draft.nodes)) {
-    if (child.parentId === panel.id && (child.type === 'plot' || child.type === 'image')) {
-      child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
-    }
-  }
+  fillPanelChildren(draft, panel.id, frame);
 
   for (const node of Object.values(draft.nodes)) {
     if (node.type === 'panel-label' && node.panelId === panel.id) {
       node.frame = { ...node.frame, x: node.frame.x + dx, y: node.frame.y + dy };
     }
   }
+
+  resyncScaleBars(draft);
+}
+
+// ---------------------------------------------------------------------------
+// Assets and image panels
+// ---------------------------------------------------------------------------
+
+export interface AddAssetOptions {
+  id: AssetId;
+  filename: string;
+  mimeType: string;
+  byteLength: number;
+  /** Null for vector sources, which have no intrinsic pixel size. */
+  naturalPx: { width: number; height: number } | null;
+  /** Defaults to `assets/<id>` with the filename's extension. */
+  path?: string;
+}
+
+/** File extension including the dot, or '' when there is none. */
+function extensionOf(filename: string): string {
+  const match = /\.[A-Za-z0-9]+$/.exec(filename);
+  return match ? match[0].toLowerCase() : '';
+}
+
+/**
+ * Register a binary attachment.
+ *
+ * Only the *metadata* lives in the document. The bytes are held outside it, by
+ * the app's asset store: `store.ts` records every edit as an Immer patch plus
+ * its inverse, so a megabyte of micrograph in the document would be cloned into
+ * the undo history on every unrelated edit.
+ *
+ * Idempotent on id, so re-importing the same file does not duplicate the entry.
+ */
+export function addAsset(draft: FigureDocument, options: AddAssetOptions): Asset {
+  const existing = draft.assets.find((a) => a.id === options.id);
+  if (existing) return existing;
+
+  const asset: Asset = {
+    id: options.id,
+    filename: options.filename,
+    mimeType: options.mimeType,
+    path: options.path ?? `assets/${options.id}${extensionOf(options.filename)}`,
+    byteLength: options.byteLength,
+    naturalPx: options.naturalPx,
+  };
+  draft.assets = [...draft.assets, asset];
+  return asset;
+}
+
+/** Drop an asset record. The bytes are the caller's to forget, or not. */
+export function removeAsset(draft: FigureDocument, assetId: AssetId): void {
+  draft.assets = draft.assets.filter((a) => a.id !== assetId);
+}
+
+/** Image nodes referencing an asset. Empty means the asset is an orphan. */
+export function imagesUsingAsset(nodes: NodeMap, assetId: AssetId): ImageNode[] {
+  return Object.values(nodes).filter(
+    (n): n is ImageNode => n.type === 'image' && n.assetId === assetId,
+  );
+}
+
+/**
+ * Smallest crop extent. Below 1% the image is magnified a hundredfold and the
+ * resolution check is already shouting; the floor exists to keep the extent off
+ * zero, which is a division, not a very small picture.
+ */
+export const MIN_CROP = 0.01;
+
+export type Crop01 = { x: number; y: number; width: number; height: number };
+
+export const FULL_CROP: Crop01 = { x: 0, y: 0, width: 1, height: 1 };
+
+/**
+ * Clamp a crop into the unit square with a non-zero extent.
+ *
+ * The renderer divides by `crop.width`, so zero yields an image of infinite
+ * width; the quality checker reads the same zero as `crop.width || 1` and
+ * reports the picture as uncropped. One document, two answers — so the crop is
+ * normalised on the way in rather than defended against three times over.
+ */
+export function normaliseCrop(crop: Partial<Crop01> | null | undefined): Crop01 {
+  const finiteOr = (value: number | undefined, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+  const x = Math.min(Math.max(finiteOr(crop?.x, 0), 0), 1 - MIN_CROP);
+  const y = Math.min(Math.max(finiteOr(crop?.y, 0), 0), 1 - MIN_CROP);
+  const width = Math.min(Math.max(finiteOr(crop?.width, 1), MIN_CROP), 1 - x);
+  const height = Math.min(Math.max(finiteOr(crop?.height, 1), MIN_CROP), 1 - y);
+
+  return { x, y, width, height };
+}
+
+export function setImageCrop(
+  draft: FigureDocument,
+  id: NodeId,
+  crop: Partial<Crop01>,
+): void {
+  const node = draft.nodes[id];
+  if (!node || node.type !== 'image') return;
+  node.crop = normaliseCrop({ ...node.crop, ...crop });
+  // Cropping changes how many source pixels span the frame, which is exactly
+  // the ratio a scale bar's length is derived from.
+  resyncScaleBars(draft);
+}
+
+export interface AddImageOptions {
+  assetId: AssetId;
+  frame: RectMm;
+  naturalPx: { width: number; height: number };
+  name?: string;
+  parentId?: NodeId | null;
+  crop?: Partial<Crop01>;
+  preserveAspect?: boolean;
+}
+
+/**
+ * Add an image node.
+ *
+ * Throws when the asset is not registered. `checkReferentialIntegrity` rejects
+ * a document whose image points at an unknown asset, so the alternative is a
+ * figure that edits perfectly and then cannot be saved — the mistake is made
+ * loud here instead. Register the asset and the node in the *same* commit.
+ */
+export function addImage(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddImageOptions,
+): ImageNode {
+  const asset = draft.assets.find((a) => a.id === options.assetId);
+  if (!asset) {
+    throw new Error(
+      `No such asset: ${options.assetId}. Register it with addAsset in the same commit.`,
+    );
+  }
+
+  const parentId = options.parentId ?? null;
+  const id = newId();
+  const node: ImageNode = {
+    ...baseNode(
+      id,
+      // The filename is what the author recognises in the Layers list; "Image 4"
+      // is the unreadability the provenance column exists to fix.
+      options.name ?? asset.filename,
+      layerId(draft, 'Images'),
+      options.frame,
+      parentId,
+      nextZ(draft.nodes, parentId),
+    ),
+    type: 'image',
+    assetId: options.assetId,
+    naturalPx: options.naturalPx,
+    crop: normaliseCrop(options.crop),
+    // A stretched micrograph misstates distances measured on it, which is a
+    // data problem rather than a cosmetic one. Opt out, never opt in.
+    preserveAspect: options.preserveAspect ?? true,
+  };
+  draft.nodes[id] = node;
+  return node;
+}
+
+/** Add a panel with an image inside it, the common case. */
+export function addPanelWithImage(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddPanelOptions & Omit<AddImageOptions, 'parentId'>,
+): { panel: PanelNode; image: ImageNode } {
+  const preserveAspect = options.preserveAspect ?? true;
+  const ratio =
+    preserveAspect && options.naturalPx.height > 0
+      ? options.naturalPx.width / options.naturalPx.height
+      : null;
+
+  // Give auto-layout the image's shape so it reserves a correctly proportioned
+  // cell; without it the panel is a generic rectangle and the image letterboxes
+  // inside it, which reads as unexplained white space.
+  const panel = addPanel(draft, newId, { ...options, aspectLock: options.aspectLock ?? ratio });
+  const image = addImage(draft, newId, {
+    ...options,
+    parentId: panel.id,
+    frame: { x: 0, y: 0, width: panel.frame.width, height: panel.frame.height },
+  });
+  return { panel, image };
+}
+
+// ---------------------------------------------------------------------------
+// Scale bars
+// ---------------------------------------------------------------------------
+
+/**
+ * On-page width of a scale bar, derived from its parent image's calibration and
+ * current size.
+ *
+ * The single implementation: `renderScaleBar` calls this rather than repeating
+ * the arithmetic. Two copies would drift, and the symptom is a bar that is
+ * correct when placed and quietly wrong ever after — the worst possible failure
+ * for the one object in a figure that claims to be a measurement.
+ *
+ * Returns null when the bar is not parented to an image, in which case its own
+ * frame width stands.
+ */
+export function scaleBarWidthMm(nodes: NodeMap, id: NodeId): number | null {
+  const bar = nodes[id];
+  if (!bar || bar.type !== 'scale-bar') return null;
+
+  const parent = bar.parentId ? nodes[bar.parentId] : undefined;
+  if (!parent || parent.type !== 'image') return null;
+
+  const visiblePx = parent.naturalPx.width * (parent.crop.width || 1);
+  if (visiblePx <= 0 || parent.frame.width <= 0) return null;
+
+  const mmPerPixel = parent.frame.width / visiblePx;
+  return bar.length * bar.pixelsPerUnit * mmPerPixel;
+}
+
+/**
+ * Re-derive every scale bar's frame width from its image.
+ *
+ * The drawn bar is computed, but the selection outline and the eight resize
+ * grips come from `frame` — so without this the chrome sits somewhere the bar
+ * is not. The direct parallel is `repositionBrackets`, and it is called from
+ * the same places for the same reason.
+ */
+export function resyncScaleBars(draft: FigureDocument): void {
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type !== 'scale-bar') continue;
+    const width = scaleBarWidthMm(draft.nodes, node.id);
+    if (width !== null && width > 0) node.frame = { ...node.frame, width };
+  }
+}
+
+export interface AddScaleBarOptions {
+  /** Must be an image: the bar takes its length from that image's calibration. */
+  imageId: NodeId;
+  length: number;
+  pixelsPerUnit: number;
+  unitLabel?: string;
+  calibrationSource?: CalibrationSource;
+  labelPosition?: 'above' | 'below' | 'none';
+  fill?: Fill;
+  barHeightMm?: number;
+  /** Inset from the image's bottom-right corner. */
+  insetMm?: number;
+  fontSizePt?: number;
+}
+
+/**
+ * Add a scale bar over an image.
+ *
+ * Returns null for a non-image target rather than placing an uncalibrated bar
+ * somewhere arbitrary — the renderer would fall back to the node's own frame
+ * width, which is a bar of no particular length asserting a measurement.
+ */
+export function addScaleBar(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddScaleBarOptions,
+): ScaleBarNode | null {
+  const image = draft.nodes[options.imageId];
+  if (!image || image.type !== 'image') return null;
+
+  const inset = options.insetMm ?? 2;
+  const barHeightMm = options.barHeightMm ?? 0.6;
+  const labelPosition = options.labelPosition ?? 'above';
+  const id = newId();
+
+  const node: ScaleBarNode = {
+    ...baseNode(
+      id,
+      `Scale bar — ${options.length} ${options.unitLabel ?? 'µm'}`,
+      layerId(draft, 'Annotations'),
+      // Provisional; resyncScaleBars derives the real width below.
+      { x: inset, y: image.frame.height - inset - barHeightMm, width: 10, height: barHeightMm },
+      image.id,
+      nextZ(draft.nodes, image.id),
+    ),
+    type: 'scale-bar',
+    length: options.length,
+    unitLabel: options.unitLabel ?? 'µm',
+    pixelsPerUnit: options.pixelsPerUnit,
+    // Kept in step with labelPosition, which is what the renderer reads.
+    showLabel: labelPosition !== 'none',
+    style: options.fontSizePt !== undefined ? { fontSizePt: options.fontSizePt } : {},
+    fill: options.fill ?? { color: '#ffffff' },
+    barHeightMm,
+    labelPosition,
+    calibrationSource: options.calibrationSource ?? 'unknown',
+  };
+
+  draft.nodes[id] = node;
+
+  const width = scaleBarWidthMm(draft.nodes, id);
+  if (width !== null && width > 0) {
+    // Bottom-right, the conventional corner, once the true width is known.
+    node.frame = { ...node.frame, x: Math.max(0, image.frame.width - inset - width), width };
+  }
+
+  return node;
+}
+
+/**
+ * Set a bar's calibration, keeping `calibrationSource` honest.
+ *
+ * Provenance that is not updated alongside the number it describes is worse
+ * than no provenance, so the two only move together.
+ */
+export function setScaleBarCalibration(
+  draft: FigureDocument,
+  id: NodeId,
+  pixelsPerUnit: number,
+  source: CalibrationSource,
+): void {
+  const node = draft.nodes[id];
+  if (node?.type !== 'scale-bar') return;
+  if (!Number.isFinite(pixelsPerUnit) || pixelsPerUnit <= 0) return;
+  node.pixelsPerUnit = pixelsPerUnit;
+  node.calibrationSource = source;
+  resyncScaleBars(draft);
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +1043,187 @@ export function addText(
   };
   draft.nodes[id] = node;
   return node;
+}
+
+// ---------------------------------------------------------------------------
+// Annotations: arrows, shapes, groups
+// ---------------------------------------------------------------------------
+
+const DEFAULT_ANNOTATION_STROKE: Stroke = { color: '#000000', widthMm: 0.35, cap: 'round' };
+
+export interface AddArrowOptions {
+  frame?: RectMm;
+  /** Relative to the frame origin. Fewer than two falls back to the default. */
+  points?: readonly PointMm[];
+  stroke?: Stroke;
+  head?: 'none' | 'triangle' | 'open';
+  tail?: 'none' | 'triangle' | 'open';
+  headSizeMm?: number;
+  parentId?: NodeId | null;
+}
+
+export function addArrow(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddArrowOptions = {},
+): ArrowNode {
+  const frame = options.frame ?? { x: 10, y: 10, width: 20, height: 10 };
+  // Up and to the right: an arrow's default job is to point at a feature.
+  const fallback: PointMm[] = [
+    { x: 0, y: frame.height },
+    { x: frame.width, y: 0 },
+  ];
+  // The schema requires at least two points; a shorter list would validate on
+  // screen and make the saved project unloadable.
+  const points =
+    options.points && options.points.length >= 2 ? [...options.points] : fallback;
+
+  const parentId = options.parentId ?? null;
+  const id = newId();
+  const node: ArrowNode = {
+    ...baseNode(id, 'Arrow', layerId(draft, 'Annotations'), frame, parentId, nextZ(draft.nodes, parentId)),
+    type: 'arrow',
+    points,
+    stroke: options.stroke ?? DEFAULT_ANNOTATION_STROKE,
+    head: options.head ?? 'triangle',
+    headSizeMm: options.headSizeMm ?? 1.6,
+    tail: options.tail ?? 'none',
+  };
+  draft.nodes[id] = node;
+  return node;
+}
+
+/**
+ * Re-fit an arrow's frame around its points.
+ *
+ * Points are frame-relative, so dragging one past the origin would put it at a
+ * negative coordinate and leave the selection outline behind. Rebasing keeps
+ * the chrome on the arrow.
+ */
+export function normaliseArrowFrame(draft: FigureDocument, id: NodeId): void {
+  const node = draft.nodes[id];
+  if (node?.type !== 'arrow' || node.points.length === 0) return;
+
+  const xs = node.points.map((p) => p.x);
+  const ys = node.points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+
+  node.points = node.points.map((p) => ({ x: p.x - minX, y: p.y - minY }));
+  node.frame = {
+    x: node.frame.x + minX,
+    y: node.frame.y + minY,
+    width: Math.max(...xs) - minX,
+    height: Math.max(...ys) - minY,
+  };
+}
+
+export function setArrowPoint(
+  draft: FigureDocument,
+  id: NodeId,
+  index: number,
+  point: PointMm,
+): void {
+  const node = draft.nodes[id];
+  if (node?.type !== 'arrow') return;
+  if (index < 0 || index >= node.points.length) return;
+  node.points = node.points.map((p, i) => (i === index ? point : p));
+  normaliseArrowFrame(draft, id);
+}
+
+/** Scale an arrow's points into a resized frame, so a drag stretches the line. */
+export function rescaleArrowPoints(draft: FigureDocument, id: NodeId, frame: RectMm): void {
+  const node = draft.nodes[id];
+  if (node?.type !== 'arrow') return;
+  const sx = node.frame.width > 0 ? frame.width / node.frame.width : 1;
+  const sy = node.frame.height > 0 ? frame.height / node.frame.height : 1;
+  node.points = node.points.map((p) => ({ x: p.x * sx, y: p.y * sy }));
+  node.frame = frame;
+}
+
+export interface AddShapeOptions {
+  shape: 'rect' | 'ellipse' | 'line';
+  frame: RectMm;
+  fill?: Fill | null;
+  stroke?: Stroke | null;
+  cornerRadiusMm?: number;
+  parentId?: NodeId | null;
+}
+
+export function addShape(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddShapeOptions,
+): ShapeNode {
+  const parentId = options.parentId ?? null;
+  const id = newId();
+  const name = options.shape === 'rect' ? 'Rectangle' : options.shape === 'ellipse' ? 'Ellipse' : 'Line';
+
+  const node: ShapeNode = {
+    ...baseNode(id, name, layerId(draft, 'Annotations'), options.frame, parentId, nextZ(draft.nodes, parentId)),
+    type: 'shape',
+    shape: options.shape,
+    // Unfilled by default: a shape over a micrograph is nearly always an
+    // outline drawing attention to something, not a patch hiding it.
+    fill: options.fill ?? null,
+    stroke: options.stroke === undefined ? DEFAULT_ANNOTATION_STROKE : options.stroke,
+    ...(options.cornerRadiusMm !== undefined ? { cornerRadiusMm: options.cornerRadiusMm } : {}),
+  };
+  draft.nodes[id] = node;
+  return node;
+}
+
+/**
+ * Wrap nodes in a group, preserving every member's position on the page.
+ *
+ * Refuses a selection whose members do not share a parent: regrouping across
+ * panels would silently reparent geometry the user never touched.
+ */
+export function addGroup(
+  draft: FigureDocument,
+  newId: () => string,
+  ids: readonly NodeId[],
+  name?: string,
+): GroupNode | null {
+  const members = ids.map((id) => draft.nodes[id]).filter((n): n is FigureNode => n !== undefined);
+  if (members.length < 2) return null;
+
+  const parentId = members[0]!.parentId;
+  if (members.some((n) => n.parentId !== parentId)) return null;
+
+  const bounds = union(members.map((n) => n.frame));
+  if (!bounds) return null;
+
+  const id = newId();
+  const group: GroupNode = {
+    ...baseNode(
+      id,
+      name ?? `Group of ${members.length}`,
+      members[0]!.layerId,
+      bounds,
+      parentId,
+      nextZ(draft.nodes, parentId),
+    ),
+    type: 'group',
+  };
+  draft.nodes[id] = group;
+
+  // reparentNode already compensates for the new origin, so the members do not
+  // move on the page — which is the whole contract of grouping.
+  for (const member of members) reparentNode(draft, member.id, id);
+  return group;
+}
+
+/** Dissolve a group, reparenting its children to the group's own parent. */
+export function ungroup(draft: FigureDocument, groupId: NodeId): NodeId[] {
+  const group = draft.nodes[groupId];
+  if (group?.type !== 'group') return [];
+
+  const children = Object.values(draft.nodes).filter((n) => n.parentId === groupId);
+  for (const child of children) reparentNode(draft, child.id, group.parentId);
+
+  delete draft.nodes[groupId];
+  return children.map((c) => c.id);
 }
 
 export function addDataset(draft: FigureDocument, dataset: Dataset): void {

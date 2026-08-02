@@ -245,6 +245,16 @@ export interface BracketNode extends NodeBase {
   tickMm: number;
 }
 
+/**
+ * Where a scale bar's calibration came from.
+ *
+ * Provenance, not decoration: a bar drawn from a number the user guessed is a
+ * false measurement in a published figure, and the quality checker has to be
+ * able to tell that apart from one read out of the micrograph's own metadata.
+ * `pixelsPerUnit` alone cannot say which it is.
+ */
+export type CalibrationSource = 'metadata' | 'manual' | 'measured' | 'unknown';
+
 export interface ScaleBarNode extends NodeBase {
   type: 'scale-bar';
   /** Bar length in real-world units, e.g. 10 (µm). */
@@ -252,11 +262,20 @@ export interface ScaleBarNode extends NodeBase {
   unitLabel: string;
   /** Image pixels per real-world unit; ties the bar to the micrograph. */
   pixelsPerUnit: number;
+  /**
+   * Deprecated in the drawing path: `labelPosition: 'none'` is the single
+   * authority on whether a label is drawn. Two fields meaning the same thing is
+   * how a control ends up doing nothing because the *other* field is still off.
+   * Kept because it is required in the schema, and removing it would be a
+   * breaking change to save one boolean. `addScaleBar` keeps the two in step.
+   */
   showLabel: boolean;
   style: TextStyle;
   fill: Fill;
   barHeightMm: number;
   labelPosition: 'above' | 'below' | 'none';
+  /** Optional: post-dates SCHEMA_VERSION 1. Absent reads as 'unknown'. */
+  calibrationSource?: CalibrationSource;
 }
 
 export interface GroupNode extends NodeBase {

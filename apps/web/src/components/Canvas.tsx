@@ -13,12 +13,17 @@ import {
   isEffectivelyLocked,
   recordBracketOffset,
   repositionBrackets,
+  rescaleArrowPoints,
   resizeFrame,
   resizePanel,
+  resyncScaleBars,
+  setArrowPoint,
+  setImageCrop,
   snapFrame,
   snapResize,
   type AlignmentGuide,
   type FigureDocument,
+  type FigureNode,
   type NodeId,
   type RectMm,
   type ResizeHandle,
@@ -38,6 +43,11 @@ export interface CanvasProps {
   zoom: number;
   showGrid: boolean;
   assetUrls: Record<string, string>;
+  /** Image being cropped on canvas, or null. Owned by the Inspector's toggle. */
+  cropNodeId: NodeId | null;
+  /** Scale bar being calibrated by measuring a feature, or null. */
+  measureNodeId: NodeId | null;
+  onMeasured: (imagePixels: number) => void;
 }
 
 interface DragState {
@@ -47,6 +57,31 @@ interface DragState {
   originalFrames: Map<NodeId, RectMm>;
   /** Set when the drag started on a resize grip rather than the node body. */
   handle?: ResizeHandle;
+  /** Set when the drag started on an arrow endpoint grip. */
+  pointIndex?: number;
+  /** The dragged point's start position, in page space. */
+  pointOrigin?: { x: number; y: number };
+}
+
+/** Arrow endpoint grips carry `data-handle="point-0"`, `"point-1"`, … */
+const POINT_HANDLE = /^point-(\d+)$/;
+
+/**
+ * Ratio a resize must preserve, or null for free resize.
+ *
+ * Images join panels here. An image without it does not distort — the renderer
+ * emits `preserveAspectRatio` — but it letterboxes inside its frame, leaving
+ * white space the author cannot account for while the dpi readout, which
+ * divides by the *frame* width, quietly overstates the resolution.
+ */
+function aspectLockFor(node: FigureDocument['nodes'][string]): number | null {
+  if (node.type === 'panel') return node.aspectLock;
+  if (node.type === 'image' && node.preserveAspect && node.naturalPx.height > 0) {
+    return node.naturalPx.width / node.naturalPx.height;
+  }
+  // Vector assets carry {0, 0} and fall through to free resize, which is
+  // correct: they have no intrinsic proportions to preserve.
+  return null;
 }
 
 /** A text node being edited in place. */
@@ -65,11 +100,26 @@ export function Canvas({
   zoom,
   showGrid,
   assetUrls,
+  cropNodeId,
+  measureNodeId,
+  onMeasured,
 }: CanvasProps) {
   const { document: doc } = api;
   const [guides, setGuides] = useState<AlignmentGuide[]>([]);
   const [textEdit, setTextEdit] = useState<TextEdit | null>(null);
   const dragRef = useRef<DragState | null>(null);
+
+  const cropCandidate = cropNodeId ? doc.nodes[cropNodeId] : undefined;
+  const cropTarget = cropCandidate?.type === 'image' ? cropCandidate : null;
+
+  // The measuring ruler is drawn over the bar's parent image, since what is
+  // being measured is a feature of the micrograph, not of the bar.
+  const measureBar = measureNodeId ? doc.nodes[measureNodeId] : undefined;
+  const measureImage =
+    measureBar?.type === 'scale-bar' && measureBar.parentId
+      ? doc.nodes[measureBar.parentId]
+      : undefined;
+  const measureTarget = measureImage?.type === 'image' ? measureImage : null;
 
   const resolveAsset = useCallback((assetId: string) => assetUrls[assetId], [assetUrls]);
 
@@ -118,6 +168,25 @@ export function Canvas({
       const node = doc.nodes[nodeId];
       if (!node || isEffectivelyLocked(doc.nodes, nodeId)) return;
 
+      const point = POINT_HANDLE.exec(handle);
+      if (point && node.type === 'arrow') {
+        const index = Number(point[1]);
+        const origin = node.points[index];
+        if (!origin) return;
+        dragRef.current = {
+          nodeId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          originalFrames: new Map([[nodeId, node.frame]]),
+          pointIndex: index,
+          // Page space, so the drag maths does not have to track the frame
+          // being rebased under it as the point crosses the origin.
+          pointOrigin: { x: node.frame.x + origin.x, y: node.frame.y + origin.y },
+        };
+        (event.target as Element).setPointerCapture?.(event.pointerId);
+        return;
+      }
+
       dragRef.current = {
         nodeId,
         startClientX: event.clientX,
@@ -145,10 +214,27 @@ export function Canvas({
       const primaryOriginal = drag.originalFrames.get(drag.nodeId);
       if (!primary || !primaryOriginal) return;
 
+      // --- arrow endpoint ---------------------------------------------------
+      if (drag.pointIndex !== undefined && drag.pointOrigin) {
+        const { pointIndex, pointOrigin } = drag;
+        api.commit('Aim arrow', (draft) => {
+          const node = draft.nodes[drag.nodeId];
+          if (node?.type !== 'arrow' || isEffectivelyLocked(draft.nodes, drag.nodeId)) return;
+          // The point is held in page space through the drag and converted
+          // back at the end, because normaliseArrowFrame moves the frame
+          // origin underneath a frame-relative delta.
+          setArrowPoint(draft, drag.nodeId, pointIndex, {
+            x: pointOrigin.x + dxMm - node.frame.x,
+            y: pointOrigin.y + dyMm - node.frame.y,
+          });
+        });
+        return;
+      }
+
       // --- resizing ---------------------------------------------------------
       if (drag.handle) {
         const resized = resizeFrame(primaryOriginal, drag.handle, dxMm, dyMm, {
-          aspectLock: primary.type === 'panel' ? primary.aspectLock : null,
+          aspectLock: aspectLockFor(primary),
           minMm: 5,
         });
 
@@ -175,8 +261,13 @@ export function Canvas({
           // Panels carry a plot and a page-space label that must follow, or the
           // panel letter is left behind and the plot keeps its old size.
           if (node.type === 'panel') resizePanel(draft, drag.nodeId, snapped.frame);
+          // An arrow's points are frame-relative, so stretching the box has to
+          // stretch the line inside it or the grips drift off the arrow.
+          else if (node.type === 'arrow') rescaleArrowPoints(draft, drag.nodeId, snapped.frame);
           else node.frame = snapped.frame;
 
+          // A resized image changes what a millimetre on it represents.
+          resyncScaleBars(draft);
           // The direct fix for stranded significance brackets: their geometry
           // is absolute, so nothing else would move them with the bars.
           repositionBrackets(draft, measureAllPlots(draft, theme));
@@ -375,6 +466,16 @@ export function Canvas({
         })}
         <GuideOverlay guides={guides} doc={doc} zoom={zoom} />
 
+        {/* Crop chrome, like the text editor, is HTML above the SVG and never
+            a scene node. Resize handles are proven not to leak into an export
+            by the parity test; crop chrome would have no such guard, and it is
+            editor state rather than part of the drawing. */}
+        {cropTarget && <CropOverlay api={api} node={cropTarget} zoom={zoom} theme={theme} />}
+
+        {measureTarget && (
+          <MeasureOverlay doc={doc} node={measureTarget} zoom={zoom} onMeasured={onMeasured} />
+        )}
+
         {/* Editing overlay: an HTML input above the SVG, never in the scene. */}
         {textEdit && (
           <input
@@ -402,6 +503,265 @@ export function Canvas({
           />
         )}
       </div>
+    </div>
+  );
+}
+
+/** The eight grips on the crop window, as fractions of its box. */
+const CROP_GRIPS: readonly { id: string; fx: number; fy: number }[] = [
+  { id: 'nw', fx: 0, fy: 0 },
+  { id: 'n', fx: 0.5, fy: 0 },
+  { id: 'ne', fx: 1, fy: 0 },
+  { id: 'e', fx: 1, fy: 0.5 },
+  { id: 'se', fx: 1, fy: 1 },
+  { id: 's', fx: 0.5, fy: 1 },
+  { id: 'sw', fx: 0, fy: 1 },
+  { id: 'w', fx: 0, fy: 0.5 },
+];
+
+/**
+ * Direct-manipulation crop.
+ *
+ * The numeric fields in the Inspector are precise and reproducible; they are
+ * useless for the actual job, which is "cut the burned-in scale bar off the
+ * bottom of this micrograph". That needs to be done by eye, against the image.
+ *
+ * Positioned over the image's `absoluteFrame`, exactly as the text editor is —
+ * HTML above the SVG, so none of this can reach an export.
+ */
+function CropOverlay({
+  api,
+  node,
+  zoom,
+  theme,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'image' }>;
+  zoom: number;
+  theme: Theme;
+}) {
+  const { document: doc } = api;
+  const dragRef = useRef<{
+    grip: string | null;
+    startX: number;
+    startY: number;
+    crop: { x: number; y: number; width: number; height: number };
+  } | null>(null);
+
+  const frame = absoluteFrame(doc.nodes, node.id);
+  if (!frame) return null;
+
+  const pxPerMm = PX_PER_MM * zoom;
+  const box = {
+    left: frame.x * pxPerMm,
+    top: frame.y * pxPerMm,
+    width: frame.width * pxPerMm,
+    height: frame.height * pxPerMm,
+  };
+
+  const crop = node.crop;
+  // The window is drawn in the image's own normalised space, which is what the
+  // model stores — no conversion, so what is dragged is what is saved.
+  const window = {
+    left: crop.x * box.width,
+    top: crop.y * box.height,
+    width: crop.width * box.width,
+    height: crop.height * box.height,
+  };
+
+  const onGripDown = (grip: string | null) => (event: React.PointerEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    dragRef.current = { grip, startX: event.clientX, startY: event.clientY, crop: { ...crop } };
+    (event.target as Element).setPointerCapture?.(event.pointerId);
+  };
+
+  const onMove = (event: React.PointerEvent): void => {
+    const drag = dragRef.current;
+    if (!drag) return;
+
+    const dx = (event.clientX - drag.startX) / box.width;
+    const dy = (event.clientY - drag.startY) / box.height;
+    const start = drag.crop;
+
+    let next = { ...start };
+    if (drag.grip === null) {
+      // Moving the window, not resizing it: the extent is fixed and only the
+      // origin travels, so the framing changes without the magnification.
+      next = { ...start, x: start.x + dx, y: start.y + dy };
+    } else {
+      if (drag.grip.includes('w')) {
+        next.x = start.x + dx;
+        next.width = start.width - dx;
+      }
+      if (drag.grip.includes('e')) next.width = start.width + dx;
+      if (drag.grip.includes('n')) {
+        next.y = start.y + dy;
+        next.height = start.height - dy;
+      }
+      if (drag.grip.includes('s')) next.height = start.height + dy;
+    }
+
+    // setImageCrop clamps into the unit square and re-derives the scale bars,
+    // so a drag cannot produce a state the numeric fields could not.
+    api.commit('Crop image', (draft) => {
+      setImageCrop(draft, node.id, next);
+      repositionBrackets(draft, measureAllPlots(draft, theme));
+    });
+  };
+
+  const endDrag = (): void => {
+    dragRef.current = null;
+  };
+
+  return (
+    <div
+      className="crop-overlay"
+      style={box}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={onMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+    >
+      {/* Four dimmed bands rather than one box with a hole: a single element
+          cannot both darken the discarded region and leave the kept region
+          untinted, and tinting what is kept misrepresents the result. */}
+      <div className="crop-shade" style={{ left: 0, top: 0, width: '100%', height: window.top }} />
+      <div
+        className="crop-shade"
+        style={{
+          left: 0,
+          top: window.top + window.height,
+          width: '100%',
+          height: box.height - window.top - window.height,
+        }}
+      />
+      <div
+        className="crop-shade"
+        style={{ left: 0, top: window.top, width: window.left, height: window.height }}
+      />
+      <div
+        className="crop-shade"
+        style={{
+          left: window.left + window.width,
+          top: window.top,
+          width: box.width - window.left - window.width,
+          height: window.height,
+        }}
+      />
+
+      <div className="crop-window" style={window} onPointerDown={onGripDown(null)}>
+        {CROP_GRIPS.map((grip) => (
+          <div
+            key={grip.id}
+            className="crop-grip"
+            data-grip={grip.id}
+            style={{ left: `${grip.fx * 100}%`, top: `${grip.fy * 100}%` }}
+            onPointerDown={onGripDown(grip.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Drag a ruler across a feature of known length to calibrate the image.
+ *
+ * The workflow for every legacy micrograph: no metadata, but a scale bar
+ * burned into the pixels by whatever software exported it. Measuring that bar
+ * is the only way to recover the pixel size, and it is why an uncalibrated bar
+ * does not have to stay uncalibrated.
+ *
+ * Reports the distance in *source image pixels*, so the answer is a property
+ * of the micrograph and survives the panel being resized afterwards.
+ */
+function MeasureOverlay({
+  doc,
+  node,
+  zoom,
+  onMeasured,
+}: {
+  doc: FigureDocument;
+  node: Extract<FigureNode, { type: 'image' }>;
+  zoom: number;
+  onMeasured: (imagePixels: number) => void;
+}) {
+  const [line, setLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const dragRef = useRef(false);
+
+  const frame = absoluteFrame(doc.nodes, node.id);
+  if (!frame) return null;
+
+  const pxPerMm = PX_PER_MM * zoom;
+  const box = {
+    left: frame.x * pxPerMm,
+    top: frame.y * pxPerMm,
+    width: frame.width * pxPerMm,
+    height: frame.height * pxPerMm,
+  };
+
+  // Screen pixels → source pixels. The visible span is what the crop retained,
+  // so a measurement on a cropped image still refers to the original grid.
+  const visiblePx = node.naturalPx.width * (node.crop.width || 1);
+  const sourcePxPerScreenPx = box.width > 0 ? visiblePx / box.width : 0;
+
+  const local = (event: React.PointerEvent): { x: number; y: number } => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  const lengthPx = line
+    ? Math.hypot(line.x2 - line.x1, line.y2 - line.y1) * sourcePxPerScreenPx
+    : 0;
+
+  return (
+    <div
+      className="measure-overlay"
+      style={box}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const point = local(e);
+        dragRef.current = true;
+        setLine({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+        (e.target as Element).setPointerCapture?.(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!dragRef.current || !line) return;
+        const point = local(e);
+        setLine({ ...line, x2: point.x, y2: point.y });
+      }}
+      onPointerUp={() => {
+        dragRef.current = false;
+        if (lengthPx > 0) onMeasured(lengthPx);
+      }}
+    >
+      <svg width={box.width} height={box.height}>
+        {line && (
+          <>
+            <line
+              x1={line.x1}
+              y1={line.y1}
+              x2={line.x2}
+              y2={line.y2}
+              stroke="#ff2d55"
+              strokeWidth={2}
+            />
+            {/* End caps, so the exact endpoints are visible against a busy
+                micrograph rather than lost in it. */}
+            {[
+              [line.x1, line.y1],
+              [line.x2, line.y2],
+            ].map(([x, y], i) => (
+              <circle key={i} cx={x} cy={y} r={4} fill="#fff" stroke="#ff2d55" strokeWidth={2} />
+            ))}
+          </>
+        )}
+      </svg>
+      <span className="measure-readout">
+        {line ? `${Math.round(lengthPx)} px` : 'Drag across a feature of known length'}
+      </span>
     </div>
   );
 }

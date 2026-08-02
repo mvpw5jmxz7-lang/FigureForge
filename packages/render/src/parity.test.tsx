@@ -9,7 +9,12 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  addArrow,
+  addAsset,
+  addPanelWithImage,
   addPanelWithPlot,
+  addScaleBar,
+  addShape,
   applyAutoLayout,
   createDocument,
   createIdFactory,
@@ -17,6 +22,7 @@ import {
   inferFormat,
   parseDelimited,
   relabelPanels,
+  setImageCrop,
   type Dataset,
   type FigureDocument,
 } from '@figureforge/doc-model';
@@ -280,6 +286,190 @@ describe('adapter parity', () => {
 
     expect(chromeCount).toBeGreaterThan(cleanCount);
     expect(toSvgString(clean)).not.toContain('#0a84ff');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image panels, scale bars and annotations
+// ---------------------------------------------------------------------------
+
+/** A real 1×1 PNG, so the `<image href>` path is genuinely exercised rather
+ *  than falling through to the missing-asset placeholder. */
+const PNG_DATA_URI =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ' +
+  'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+const ASSET_ID = 'asset-1';
+const NATURAL_PX = { width: 1000, height: 800 };
+
+/**
+ * A figure with one of every node type this phase added, so the adapters are
+ * held to the same drawing for all of them at once.
+ */
+function makeImageDocument(): FigureDocument {
+  const newId = createIdFactory('img');
+  const base = createDocument({
+    title: 'Micrograph figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    addAsset(draft, {
+      id: ASSET_ID,
+      filename: 'cells.png',
+      mimeType: 'image/png',
+      byteLength: 128,
+      naturalPx: NATURAL_PX,
+    });
+
+    const { image } = addPanelWithImage(draft, newId, {
+      frame: { x: 4, y: 4, width: 50, height: 40 },
+      name: 'Cells',
+      assetId: ASSET_ID,
+      naturalPx: NATURAL_PX,
+    });
+
+    // 1000 px shown 50 mm wide → 0.05 mm/px; at 2 px/µm a 10 µm bar is 1.0 mm.
+    addScaleBar(draft, newId, {
+      imageId: image.id,
+      length: 10,
+      pixelsPerUnit: 2,
+      unitLabel: 'µm',
+      calibrationSource: 'metadata',
+    });
+
+    addArrow(draft, newId, { frame: { x: 60, y: 10, width: 15, height: 8 } });
+    addShape(draft, newId, {
+      shape: 'rect',
+      frame: { x: 60, y: 30, width: 20, height: 12 },
+    });
+    addShape(draft, newId, {
+      shape: 'ellipse',
+      frame: { x: 90, y: 30, width: 20, height: 12 },
+    });
+  });
+}
+
+const resolveAsset = (): string => PNG_DATA_URI;
+
+describe('image and annotation nodes', () => {
+  const doc = makeImageDocument();
+  const scene = renderDocument(doc, { theme: NATURE_THEME, resolveAsset });
+
+  it('renders every new node type', () => {
+    for (const role of ['image', 'shape', 'arrow', 'scale-bar', 'scale-bar-label'] as const) {
+      expect(collectByRole(scene, role).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('produces the same markup from both adapters', () => {
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('survives the React adapter', () => {
+    // The highest-value assertion in this group. `renderImage` emits `href`,
+    // `preserveAspectRatio`, `image-rendering` and `clip-path` — four
+    // attributes React had never seen from this renderer. Parity compares two
+    // strings and so cannot catch one React rejects outright, which is exactly
+    // how a `style` string once blanked the canvas while every test stayed green.
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('embeds the asset as a self-contained data URI', () => {
+    // An exported SVG must not depend on anything outside itself; a blob URL
+    // here would render on screen and be blank on the journal's machine.
+    const svg = toSvgString(scene);
+    expect(svg).toContain('<image');
+    expect(svg).toContain('data:image/png;base64,');
+  });
+
+  it('degrades to a visible placeholder when the asset is missing', () => {
+    // No resolveAsset: a lost micrograph must read as a gap, not as a blank
+    // area the author might not notice before submitting.
+    const orphaned = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(orphaned, 'image').length).toBeGreaterThan(0);
+    expect(toSvgString(orphaned)).not.toContain('href');
+  });
+
+  it('crops by clipping rather than by scaling', () => {
+    // Scaling the image to the crop would resample it; the oversized-image plus
+    // clipPath technique keeps every retained pixel at its original resolution.
+    const cropped = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      setImageCrop(draft, image.id, { x: 0.25, y: 0, width: 0.5, height: 1 });
+    });
+    const image = Object.values(cropped.nodes).find((n) => n.type === 'image')!;
+    const svg = toSvgString(renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }));
+
+    expect(svg).toContain('clipPath');
+    // Half the source spans the frame, so the image is drawn at twice its width.
+    expect(svg).toContain(`width="${image.frame.width / 0.5}"`);
+  });
+
+  it('draws the scale bar at its calibrated length', () => {
+    // Read from the scene, not from the helper, so this proves what is actually
+    // drawn rather than re-checking the arithmetic against itself.
+    const bar = collectByRole(scene, 'scale-bar')[0]!;
+    expect(Number(bar.attrs?.width)).toBeCloseTo(1.0, 6);
+  });
+
+  it('rescales the drawn bar when its image is resized', () => {
+    const halved = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      // Halving the image halves what a millimetre on it represents. A bar that
+      // held its length here would silently misstate the scale.
+      image.frame = { ...image.frame, width: image.frame.width / 2 };
+    });
+    const bar = collectByRole(
+      renderDocument(halved, { theme: NATURE_THEME, resolveAsset }),
+      'scale-bar',
+    )[0]!;
+    expect(Number(bar.attrs?.width)).toBeCloseTo(0.5, 6);
+  });
+
+  it('omits the label when labelPosition is none, whatever showLabel says', () => {
+    const silent = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type !== 'scale-bar') continue;
+        node.labelPosition = 'none';
+        // Deliberately contradictory: labelPosition is the sole authority.
+        node.showLabel = true;
+      }
+    });
+    const scene = renderDocument(silent, { theme: NATURE_THEME, resolveAsset });
+    expect(collectByRole(scene, 'scale-bar-label')).toEqual([]);
+  });
+
+  it('draws arrowheads as explicit geometry, never as markers', () => {
+    // Markers scale with stroke-width and are flattened on import into vector
+    // editors — the whole reason the head is a path.
+    const svg = toSvgString(scene);
+    expect(svg).not.toContain('<marker');
+    expect(svg).not.toContain('marker-end');
+  });
+
+  it('gives a selected arrow one grip per point, separate from the resize grips', () => {
+    const arrow = Object.values(doc.nodes).find((n) => n.type === 'arrow')!;
+    const withChrome = renderDocument(doc, {
+      theme: NATURE_THEME,
+      resolveAsset,
+      chrome: { selectedIds: [arrow.id] },
+    });
+
+    expect(collectByRole(withChrome, 'resize-handle').length).toBe(8);
+    expect(collectByRole(withChrome, 'point-handle').length).toBe(
+      arrow.type === 'arrow' ? arrow.points.length : 0,
+    );
+    // Chrome, so it must never reach an export.
+    expect(collectByRole(scene, 'point-handle')).toEqual([]);
+    expect(() => renderToStaticMarkup(toReact(withChrome))).not.toThrow();
   });
 });
 

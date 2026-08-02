@@ -11,13 +11,16 @@ import {
   absoluteFrame,
   analysisInputHash,
   effectiveDpi,
+  findAsset,
   findDataset,
   isStale,
   mmToPt,
   measureGutters,
+  scaleBarWidthMm,
   toSeries,
   type FigureDocument,
   type ImageNode,
+  type ScaleBarNode,
 } from '@figureforge/doc-model';
 import { findColorConflicts, findPreset, type Theme } from '@figureforge/theme';
 import { collectByRole, walkScene, type SceneNode } from './scene.js';
@@ -59,6 +62,10 @@ type Rule = (context: CheckContext) => Finding[];
 const CATEGORY_WEIGHTS: Record<string, number> = {
   'Text size': 25,
   'Image resolution': 25,
+  // A scale bar drawn from a guessed calibration is a false measurement, not a
+  // presentation defect — strictly worse than an under-resolution image, and
+  // undetectable by eye, so it carries the same weight.
+  'Scale bar calibration': 25,
   // A figure annotated with p-values its data no longer supports is worse than
   // any typographic defect, and it is invisible without this check.
   'Statistics currency': 25,
@@ -179,6 +186,9 @@ const checkPanelLabels: Rule = ({ document, scene }) => {
   return findings;
 };
 
+/** MIME types with no intrinsic pixel grid, so no resolution to be short of. */
+const VECTOR_MIME_TYPES = new Set(['image/svg+xml', 'application/pdf', 'application/postscript']);
+
 const checkImageResolution: Rule = ({ document, exportDpi = 300 }) => {
   const findings: Finding[] = [];
   const images = Object.values(document.nodes).filter(
@@ -189,7 +199,15 @@ const checkImageResolution: Rule = ({ document, exportDpi = 300 }) => {
     const frame = absoluteFrame(document.nodes, image.id);
     if (!frame || frame.width <= 0) continue;
 
+    // A vector asset resolves at whatever the output device offers, so the
+    // question this rule asks does not apply. The answer comes from the asset's
+    // MIME type rather than a sentinel on the node: a magic pixel count would
+    // be an implicit contract, and this is the kind that rots quietly.
+    const asset = findAsset(document, image.assetId);
+    if (asset && VECTOR_MIME_TYPES.has(asset.mimeType)) continue;
+
     const visiblePx = image.naturalPx.width * (image.crop.width || 1);
+    if (visiblePx <= 0) continue;
     const dpi = effectiveDpi(visiblePx, frame.width);
 
     if (dpi < exportDpi) {
@@ -202,6 +220,76 @@ const checkImageResolution: Rule = ({ document, exportDpi = 300 }) => {
           `${(visiblePx / (exportDpi / 25.4)).toFixed(1)} mm wide, or supply a higher-resolution ` +
           `original. Upscaling cannot recover detail that was never captured.`,
         nodeIds: [image.id],
+        autoFixable: false,
+      });
+    }
+  }
+
+  return findings;
+};
+
+/**
+ * Scale bars that assert a measurement nobody supplied.
+ *
+ * An error rather than a warning, and weighted alongside image resolution: a
+ * low-resolution micrograph looks bad, whereas a bar drawn from a guessed
+ * calibration is a false quantitative claim in a published figure. Nothing else
+ * in the figure can reveal it — the bar looks identical either way.
+ *
+ * Deliberately *not* marked in the scene. The renderer is shared with the
+ * exporter, so a warning stripe drawn here would be submitted to the journal.
+ */
+const checkScaleBarCalibration: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+  const bars = Object.values(document.nodes).filter(
+    (n): n is ScaleBarNode => n.type === 'scale-bar',
+  );
+
+  for (const bar of bars) {
+    const parent = bar.parentId ? document.nodes[bar.parentId] : undefined;
+
+    if (parent?.type !== 'image') {
+      findings.push({
+        id: `scale-bar-unparented-${bar.id}`,
+        severity: 'error',
+        title: `"${bar.name}" is not attached to an image`,
+        detail:
+          'A scale bar takes its length from the image it sits on. Detached, it ' +
+          'is drawn at whatever width it happens to have, which states a ' +
+          'measurement no image supports. Drag it onto the micrograph.',
+        nodeIds: [bar.id],
+        autoFixable: false,
+      });
+      continue;
+    }
+
+    if ((bar.calibrationSource ?? 'unknown') === 'unknown') {
+      findings.push({
+        id: `scale-bar-uncalibrated-${bar.id}`,
+        severity: 'error',
+        title: `"${bar.name}" has no calibration`,
+        detail:
+          'The bar is drawn from a placeholder, not from a known pixel size. ' +
+          'Set the image scale in the Inspector — from the microscope metadata, ' +
+          'or by measuring a feature of known length.',
+        nodeIds: [bar.id],
+        autoFixable: false,
+      });
+    }
+
+    // Off by a factor of a thousand — nm typed where µm was meant — is the
+    // classic calibration error, and it shows up as a bar wider than the image.
+    const width = scaleBarWidthMm(document.nodes, bar.id);
+    if (width !== null && width > parent.frame.width) {
+      findings.push({
+        id: `scale-bar-oversized-${bar.id}`,
+        severity: 'error',
+        title: `"${bar.name}" is wider than the image it measures`,
+        detail:
+          `The bar works out at ${width.toFixed(1)} mm across a ` +
+          `${parent.frame.width.toFixed(1)} mm image. Check the units — a factor of ` +
+          '1000 here usually means nm was entered where µm was meant.',
+        nodeIds: [bar.id, parent.id],
         autoFixable: false,
       });
     }
@@ -452,6 +540,7 @@ const checkDistributionSampleSize: Rule = ({ document }) => {
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
+  { category: 'Scale bar calibration', rule: checkScaleBarCalibration },
   { category: 'Statistics currency', rule: checkStaleAnalyses },
   { category: 'Panel labelling', rule: checkPanelLabels },
   { category: 'Colour accessibility', rule: checkColorAccessibility },

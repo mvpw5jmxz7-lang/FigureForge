@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–3 are done; phases 4–9 are not.**
+could be proven before breadth was added. **Phases 1–4 are done; phases 5–9 are not.**
 
 ---
 
@@ -22,8 +22,8 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 150 TypeScript + 38 Python tests
-make acceptance  # 31-check end-to-end run (needs `make up` first)
+make test        # 215 TypeScript + 59 Python tests
+make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
 
@@ -87,7 +87,7 @@ packages/theme/       journal presets, palettes, colour-vision validation
 packages/plots/       scales, summary statistics, mark geometry   ← maths only
 packages/render/      scene tree → {React | SVG string}, quality checker  ← drawing only
 apps/web/             Vite + React canvas, inspectors, import/export UI
-services/api/         FastAPI: SciPy statistics, Chromium/Ghostscript export
+services/api/         FastAPI: SciPy statistics, Chromium/Ghostscript export, TIFF decoding
 scripts/acceptance.ts end-to-end flow, no UI involved
 ```
 
@@ -171,25 +171,27 @@ Each guards against a specific, common reporting error:
 
 ## Current state
 
-Phases 1–2 committed as `fb401cb`: ~9,570 lines of source across 80 tracked files.
+Phases 1–4 are on `master` plus the `feature/phase-4-images-annotations`
+branch. Run `git status` before assuming the tree is clean.
 
-Uncommitted on top of that commit: this file, and a fix in `analysis.ts` replacing
-a raw NUL byte with the escape `'\u0000'` — the same character, so every hash is
-byte-identical and nothing behavioural changed (see the trap below). Run
-`git status` before assuming the tree is clean.
-
-**Verified:** 150 TypeScript tests, 38 Python tests, typecheck and lint clean,
-31-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
-text selectable, exactly 183.0000 × 75.0000 mm; PNG exactly 300 dpi.
+**Verified:** 215 TypeScript tests, 59 Python tests, typecheck and lint clean,
+43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
+text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
+PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
+Chromium against the running app — import, scale bars, annotations, crop and
+measure — because green tests do not mean the app runs.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
-user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram marks with error bars → Welch's
-t-test and friends with corrections and effect sizes → significance bracket
-placed on measured geometry, which follows the plot when it moves →
-auto-layout with smart guides and snapping, weighted templates, and drag-resize
-handles → panel lettering in reading order → an Inspector for the selected node
-(colours, text, axis titles, frame) with double-click-to-edit on canvas →
-PDF/EPS/SVG/PNG/TIFF export → Publication Readiness Score → project save/load.
+user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
+marks with error bars → Welch's t-test and friends with corrections and effect
+sizes → significance bracket placed on measured geometry, which follows the plot
+when it moves → PNG/JPEG/SVG/TIFF image panels with drag-crop, calibrated scale
+bars and arrow/shape/text annotations → auto-layout with smart guides and
+snapping, weighted templates, and drag-resize handles → panel lettering in
+reading order → an Inspector for the selected node (colours, text, axis titles,
+frame, crop, calibration) with double-click-to-edit on canvas →
+PDF/EPS/SVG/PNG/TIFF export → Publication Readiness Score → project save/load
+with data and images preserved byte for byte.
 
 ### Phase 3 — the remaining plot types
 
@@ -201,6 +203,63 @@ New: `kernelDensity`/`silvermanBandwidth` in `summary.ts`, `xyMarks`/
 `continuousGeometry` in `render-document.ts`, `checkDistributionSampleSize` in
 `quality.ts`, and `CONTINUOUS_X_PLOT_TYPES` in `nodes.ts` as the one place that
 says which types are which.
+
+### Phase 4 — image panels, crop, scale bars, annotations
+
+The node types, their schemas and their renderers already existed; nothing
+constructed them and two paths had never been executed. What phase 4 added is
+the app layer, plus the fixes that running the scaffolding for the first time
+exposed.
+
+- **`renderImage` never rendered its children.** A scale bar is parented to its
+  image — that is how `renderScaleBar` finds the calibration — so it drew
+  nothing. Found by asserting roles in the parity fixture, not by reading.
+- **`scaleBarWidthMm` in `operations.ts` is the single implementation** of the
+  calibration arithmetic; `renderScaleBar` calls it. `resyncScaleBars` keeps
+  `frame.width` in step, so the selection outline and the eight grips sit on the
+  bar rather than beside it — the direct parallel to `repositionBrackets`, called
+  from the same places.
+- **`normaliseCrop` clamps to a non-zero extent.** The schema allowed `0`, which
+  divides by zero in `renderImage` while reading as a *full* frame in
+  `checkImageResolution` (`crop.width || 1`) — one document, two answers.
+- **`fillPanelChildren`** is shared by `applyAutoLayout` and `resizePanel`, which
+  had drifted: auto-layout resized only plots, so a micrograph kept its old size.
+- **Asset bytes live outside the document**, in `apps/web/src/assets.ts`.
+  `store.ts` records every edit as a patch *and* its inverse, so a micrograph in
+  the document would be cloned into the undo history on every unrelated edit.
+  Bytes are append-only for the session and never freed on node deletion —
+  `deleteNode` does not touch `draft.assets`, so undo can resurrect the node, and
+  a revoke on delete is exactly what would strand it. Orphans are surfaced in the
+  Data tab as removable rather than collected.
+- **Two representations per asset.** `original` is the imported file byte for
+  byte and is what the archive writes; `display` is what a browser can draw —
+  the same object except for TIFF, where it is a PNG proxy from the API. The
+  proxy is regenerated on open rather than archived: caching it would double the
+  file and create a second artefact that can disagree with the first.
+- **`checkImageResolution` skips vector assets by MIME type**, resolved through
+  `findAsset` rather than a sentinel on the node. Telling an author their logo is
+  63 dpi is confidently wrong advice, which is worse than no check.
+- **`checkScaleBarCalibration` (weight 25) is an error, not a warning.** A bar
+  drawn from a guessed calibration is a false measurement in a published figure,
+  and it looks identical to a correct one. It is deliberately **not** marked in
+  the scene: the renderer is shared with the exporter, so a warning stripe would
+  be submitted to the journal.
+- **Calibration is read from TIFF metadata, and withheld when absent.** ImageJ
+  writes `ResolutionUnit = 1` ("none") and the real unit in `ImageDescription` as
+  `unit=um`, with `XResolution` in pixels per *that* unit — reading only the
+  baseline TIFF convention reports such a file as "2.5 dpi". Both paths are read;
+  when neither says, both headers are omitted rather than defaulted.
+- **`calibrationSource`** (`metadata`/`manual`/`measured`/`unknown`) is the one
+  optional field added. It is what lets the Inspector say where the number came
+  from and the checker tell a measurement from a placeholder.
+- **Crop and measure chrome is HTML above the SVG**, never scene nodes. Resize
+  handles are *proven* not to leak by the parity test; this chrome would have no
+  such guard, and it is editor state rather than part of the drawing.
+- **Arrows are insert-then-drag**, not click-to-place: a modal tool state would
+  need a cursor preview, an Escape path, multi-point termination and
+  interception of the background handler that clears selection. Endpoint grips
+  carry a distinct `point-handle` role so the parity test's "exactly 8 resize
+  handles" keeps its meaning.
 
 ### The editing iteration (after phases 1–2)
 
@@ -236,12 +295,12 @@ the parity test could catch — both are now covered:
 
 ## What's next
 
-Phases 3–9, with the actual entry points:
+Phases 5–9, with the actual entry points:
 
 | Phase | Scope | Where to start |
 |---|---|---|
-| 3 | **done** — all 9 plot types render | `PlotGeometry` is now a discriminated union on `kind: 'categorical' \| 'continuous'`; `renderNumericXTicks` is the numeric x axis |
-| 4 | image panels, crop, scale bars, annotations | node types and renderers **already exist** — needs UI and asset plumbing |
+| 3 | **done** — all 9 plot types render | `PlotGeometry` is a discriminated union on `kind: 'categorical' \| 'continuous'`; `renderNumericXTicks` is the numeric x axis |
+| 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | remaining stats surface | `services/api/figureforge/stats/tests.py` |
 | 6 | export/QC hardening, autofixes | `packages/render/src/quality.ts` |
 | 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; needs the DOM-volume answer below first |
@@ -250,18 +309,17 @@ Phases 3–9, with the actual entry points:
 
 ### Already scaffolded but unused
 
-- **Node types** `image`, `scale-bar`, `arrow`, `shape`, `group` are fully
-  implemented in the model, schema and renderer, but nothing in the UI creates
-  them. Scale bars already derive their length from the parent image's
-  calibration and on-page size, which is the hard part.
 - **Statistical tests** `chi-square`, `linear-regression`, `wilcoxon` are
   implemented in the API but absent from the UI dropdown in `SidePanel.tsx`.
 - **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
   templates and honoured by `autoLayout`, but nothing lets a user author a slot
   directly — templates are the only way to set one.
-- **Asset pipeline**: `resolveAsset` is wired through the renderer and
-  `App.tsx` passes `assetUrls={{}}`. Image panels need blob URLs in the browser
-  and data URIs on export — the seam exists, nothing fills it.
+- **Group semantics are half-shipped, deliberately.** `addGroup`/`ungroup`
+  preserve every member's page position, and the Toolbar and Inspector expose
+  them — but clicking the canvas still selects the leaf, so a group is only
+  reachable from the Layers list. Real semantics (click selects the outermost
+  group, double-click enters it) is a substantial change to canvas selection,
+  the one path everything else depends on. The UI says so rather than pretending.
 
 ### Declared-but-missing things — check before trusting the types
 
@@ -293,9 +351,14 @@ Phases 3–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added in the editing iteration (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`) is **optional**, so old files still load and this was not forced. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. |
 | **Autofixes are advertised, not implemented** | Quality checker findings carry `autoFixable: true`, but no fixer is wired up and the UI offers no button. Either build them or stop claiming it. |
+| **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
+| **Cropped images ship at full size** | `renderImage` embeds the whole asset and discards the out-of-crop pixels with a `clipPath`, so a 100 MP image cropped to 10% still uploads 100 MP. Shipping *only* the cropped region at full resolution is pixel-identical to the screen, so unlike downsampling it is value-preserving — it needs an `OffscreenCanvas` re-encode, which is phase 6 work. The export size guard (128 MiB, client pre-check plus a `Content-Length` middleware) is the interim answer. |
+| **Opening a TIFF project needs the API** | The archive stores only the original bytes, so the PNG display proxy is regenerated on open. If the service is down the images render as placeholders and a message says why; everything else in the figure still works. Reversible with one optional field (`Asset.proxyPath?`) if the trade proves wrong. |
+| **16-bit micrographs export at 8 bits** | The archive keeps the 16-bit original verbatim, so reproducibility holds, but the figure ships the 8-bit proxy with the observed range mapped linearly. Correct for print, and reported in the UI rather than left to be discovered. |
+| **JPEG EXIF orientation is ignored** | A rotated JPEG displays in its stored orientation. Detecting *whether* a JPEG needs transposing requires client-side EXIF parsing, and routing every JPEG through the server for the 1% that need it is a bad trade. Not half-done on purpose. |
 | **Font licensing** | Arial is not redistributable. The image ships Liberation Sans, which is metrically identical so layout is unaffected, and the theme stack falls back to it. A user wanting genuine Arial must supply it. |
 
 ---
@@ -331,9 +394,28 @@ Each of these cost time once and will again:
   like "that symbol does not exist". Fixed, but if a symbol you can see with
   `sed`/`tail` won't `grep`, check `file` and scan for `\x00` before concluding
   anything.
+- **`python-multipart` is a separate dependency.** FastAPI needs it for any
+  `UploadFile`, and without it `/decode-image` fails at import. Adding it forces
+  an API image rebuild — `make build`, not just a restart.
+- **CORS `expose_headers` is needed to read a custom response header.**
+  `/decode-image` returns its metadata in `X-Image-*` headers, which a
+  cross-origin fetch cannot see unless they are exposed. The dev pod's Vite proxy
+  makes the call same-origin, so this is invisible there and would silently
+  return a PNG with no dimensions under `compose.yaml`.
+- **Pillow's `point()` rejects an `int()` cast inside the callable.** It probes
+  the function with a sentinel to derive a scale and offset, so the lambda has to
+  stay a plain affine expression or it raises rather than falling back.
+- **`Image.MAX_IMAGE_PIXELS` must be raised, never set to `None`.** A whole-slide
+  scan legitimately exceeds the ~178 Mpx default, but disabling the guard turns a
+  hostile upload into an OOM kill of the service.
 - **React wants camelCase SVG attributes.** The scene stores canonical hyphenated
   names (what the exporter writes verbatim); `react.tsx` converts. Both adapters
   must still emit identical markup — the parity test enforces it.
+- **`vitest.config.ts` did not include `apps/**`.** A test written under
+  `apps/web` ran silently never. Fixed, with `environment: 'node'` kept
+  deliberately: a jsdom default would let an accidental DOM import into
+  `packages/render` pass, which is the one thing that breaks export fidelity
+  invisibly.
 - **Green tests do not mean the app runs.** The suites render through the string
   serialiser and `renderToStaticMarkup`; neither mounts the real UI. A `style`
   string on a scene node passed every one of them and threw in the browser,
@@ -360,6 +442,11 @@ if you touch that file, keep them:
    would shrink every font below the minimum the theme guarantees.
 3. **Fonts and the Chromium build are pinned in the image**, which is what makes
    exports reproducible across machines.
+4. **`eps2write` gets `-r` matching the export dpi.** It is a vector device that
+   re-emits any embedded raster at the device resolution, which defaults to
+   720 dpi. Measured in this image: on a figure with an embedded raster `-r300`
+   produced an EPS 14% smaller than the default; on vector-only output the
+   difference was 0.1% and the `%%BoundingBox` was byte-identical.
 
 ---
 
