@@ -25,6 +25,7 @@ import {
   replaceAnalysisForPlot,
   repositionBrackets,
   toSeries,
+  xForHash,
   type Analysis,
   type Correction,
   type FigureDocument,
@@ -455,15 +456,21 @@ function DataTab({
 // Statistics
 // ---------------------------------------------------------------------------
 
+const CORRELATION_TESTS = new Set<StatTest>(['pearson', 'spearman', 'linear-regression']);
+
 const TESTS: { id: StatTest; label: string }[] = [
   { id: 'ttest-welch', label: "Welch's t-test" },
   { id: 'ttest-independent', label: "Student's t-test" },
   { id: 'ttest-paired', label: 'Paired t-test' },
   { id: 'mann-whitney', label: 'Mann-Whitney U' },
+  { id: 'wilcoxon', label: 'Wilcoxon signed-rank' },
   { id: 'anova-one-way', label: 'One-way ANOVA' },
+  { id: 'anova-rm', label: 'Repeated-measures ANOVA' },
   { id: 'kruskal-wallis', label: 'Kruskal-Wallis' },
+  { id: 'chi-square', label: 'Chi-square test' },
   { id: 'pearson', label: 'Pearson correlation' },
   { id: 'spearman', label: 'Spearman correlation' },
+  { id: 'linear-regression', label: 'Linear regression' },
 ];
 
 const CORRECTIONS: { id: Correction; label: string }[] = [
@@ -489,15 +496,25 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
    * A scatter, line or histogram has no categories to span — `measurePlot`
    * returns empty measurements for them — so the test is refused rather than
    * run and left with nowhere to draw its result.
+   *
+   * Correlation/regression is the one family that doesn't need categories at
+   * all: it consumes a single series against its own paired x-values, which
+   * is exactly what a numeric-x plot's dataset provides. So the numeric-x
+   * gate is relaxed specifically for that case rather than for the plot type
+   * as a whole.
    */
   const continuousPlot = activePlot ? CONTINUOUS_X_PLOT_TYPES.has(activePlot.plotType) : false;
+  const xyCorrelation =
+    CORRELATION_TESTS.has(test) && series.length === 1 && series[0]?.x !== undefined;
+  const blockedByContinuousAxis = continuousPlot && !xyCorrelation;
+  const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
 
   const run = async (): Promise<void> => {
-    if (continuousPlot) {
+    if (blockedByContinuousAxis) {
       onError('Group comparisons need a categorical plot; this one has a numeric x axis.');
       return;
     }
-    if (!activePlot || !dataset || series.length < 2) {
+    if (!activePlot || !dataset || !minGroupsMet) {
       onError('Select a plot with at least two groups.');
       return;
     }
@@ -508,9 +525,17 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
     const options = { ...defaultAnalysisOptions(), correction };
 
     try {
+      const groupsPayload = xyCorrelation
+        ? [{ name: series[0]!.name, values: series[0]!.values }]
+        : series.map((s) => ({ name: s.name, values: s.values }));
+      const xPayload = xyCorrelation
+        ? { name: dataset.columns[0]?.name ?? 'x', values: series[0]!.x! }
+        : undefined;
+
       const result = await analyze({
         test,
-        groups: series.map((s) => ({ name: s.name, values: s.values })),
+        groups: groupsPayload,
+        x: xPayload,
         alternative: options.alternative,
         correction,
         alpha: options.alpha,
@@ -528,6 +553,7 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         inputHash: analysisInputHash(
           { test, correction },
           series.map((s) => s.values),
+          xForHash(series),
         ),
         result,
         computedAt: new Date().toISOString(),
@@ -621,17 +647,18 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         Groups: {series.map((s) => `${s.name} (n=${s.values.length})`).join(', ') || '—'}
       </p>
 
-      {continuousPlot && (
+      {blockedByContinuousAxis && (
         <p className="hint">
           This plot has a numeric x axis, so there are no groups to compare and nowhere to
-          anchor a significance bracket. Select a categorical plot to run a test.
+          anchor a significance bracket. Select a categorical plot, or a correlation/regression
+          test, to run.
         </p>
       )}
 
       <button
         className="primary"
         onClick={() => void run()}
-        disabled={series.length < 2 || continuousPlot}
+        disabled={!minGroupsMet || blockedByContinuousAxis}
       >
         Run and annotate
       </button>
@@ -640,10 +667,12 @@ function StatsTab({ api, theme, onError, setBusy }: SidePanelProps) {
         // The document stores the input hash precisely so drift is detectable;
         // rehash the current values and say so when they no longer match.
         const analysisDataset = findDataset(doc, analysis.spec.datasetId);
+        const analysisSeries = analysisDataset ? toSeries(analysisDataset) : [];
         const currentHash = analysisDataset
           ? analysisInputHash(
               { test: analysis.test, correction: analysis.options.correction },
-              toSeries(analysisDataset).map((s) => s.values),
+              analysisSeries.map((s) => s.values),
+              xForHash(analysisSeries),
             )
           : analysis.inputHash;
         const stale = isStale(analysis, currentHash);

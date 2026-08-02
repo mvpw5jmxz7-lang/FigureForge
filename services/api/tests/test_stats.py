@@ -9,6 +9,13 @@ Reference values:
   sleep       Student (1908); R `t.test(extra ~ group, data = sleep)`
   PlantGrowth R `summary(aov(weight ~ group, data = PlantGrowth))`
   anscombe    Anscombe (1973); R `cor.test(anscombe$x1, anscombe$y1)`
+  gender/party Agresti (2007) p.39, via R's `?chisq.test` example
+  Hamilton depression scale  Hollander & Wolfe (1973) 29f, via R's
+              `?wilcox.test` paired example
+  tuna quality  Hollander & Wolfe (1973) p.187f, via R's `?cor.test` example
+  drug response  Maxwell & Delaney (1990), via statsmodels' own `AnovaRM`
+              documented example — cited from statsmodels since that library,
+              not R, computes this test here
 """
 
 from __future__ import annotations
@@ -32,6 +39,25 @@ TRT2 = [6.31, 5.12, 5.54, 5.50, 5.37, 5.29, 4.92, 6.15, 5.80, 5.26]
 # --- Anscombe's first set ---------------------------------------------------
 ANS_X = [10, 8, 13, 9, 11, 14, 6, 4, 12, 7, 5]
 ANS_Y = [8.04, 6.95, 7.58, 8.81, 8.33, 9.96, 7.24, 4.26, 10.84, 4.82, 5.68]
+
+# --- Agresti (2007) p.39 gender x party affiliation contingency table -------
+GENDER_PARTY = {"F": [762, 327, 468], "M": [484, 239, 477]}
+
+# --- Hollander & Wolfe (1973) 29f, Hamilton depression scale, paired visits -
+HAMILTON_VISIT_1 = [1.83, 0.50, 1.62, 2.48, 1.68, 1.88, 1.55, 3.06, 1.30]
+HAMILTON_VISIT_2 = [0.878, 0.647, 0.598, 2.05, 1.06, 1.29, 1.06, 3.14, 1.29]
+
+# --- Hollander & Wolfe (1973) p.187f, tuna quality: lightness vs panel score
+TUNA_LIGHTNESS = [44.4, 45.9, 41.9, 53.3, 44.7, 44.1, 50.7, 45.2, 60.1]
+TUNA_PANEL_SCORE = [2.6, 3.1, 2.5, 5.0, 3.6, 4.0, 5.2, 2.8, 3.8]
+
+# --- statsmodels' own AnovaRM documented example (Maxwell & Delaney 1990) --
+DRUG_RESPONSE = {
+    "drug1": [30, 14, 24, 38, 26],
+    "drug2": [28, 18, 20, 34, 28],
+    "drug3": [16, 10, 18, 20, 14],
+    "drug4": [34, 22, 30, 44, 30],
+}
 
 
 def only(outcome):
@@ -105,6 +131,33 @@ class TestAnova:
             assert adj.pAdjusted >= raw.p - 1e-12
 
 
+class TestRepeatedMeasuresAnova:
+    """statsmodels AnovaRM's own documented example (Maxwell & Delaney 1990):
+    F Value = 24.7589, Num DF = 3, Den DF = 12, Pr > F ≈ 0.00002
+    """
+
+    def test_omnibus_matches_statsmodels_docs(self):
+        outcome = run_test("anova-rm", DRUG_RESPONSE)
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.statistic == pytest.approx(24.7589, abs=1e-3)
+        assert outcome.omnibus.df == [3.0, 12.0]
+        assert outcome.omnibus.p < 0.001
+
+    def test_produces_all_pairwise_comparisons(self):
+        outcome = run_test("anova-rm", DRUG_RESPONSE)
+        assert len(outcome.comparisons) == 6  # C(4, 2)
+
+    def test_rejects_unbalanced_design(self):
+        with pytest.raises(ValueError, match="same number of subjects"):
+            run_test("anova-rm", {"a": [1.0, 2.0, 3.0], "b": [1.0, 2.0]})
+
+    def test_rejects_single_condition(self):
+        # Caught generically by run_test's "at least two groups" check, before
+        # anova-rm's own dispatch branch is even reached.
+        with pytest.raises(ValueError, match="At least two groups"):
+            run_test("anova-rm", {"a": [1.0, 2.0, 3.0]})
+
+
 class TestCorrelation:
     """R: cor.test(anscombe$x1, anscombe$y1)
     r = 0.8164, df = 9, p-value = 0.00217
@@ -124,6 +177,53 @@ class TestCorrelation:
         assert c.statistic == pytest.approx(0.5001, abs=1e-3)
         assert c.effectSize == pytest.approx(0.6665, abs=1e-3)
 
+    def test_spearman_rho_matches_r(self):
+        """R: cor.test(x, y, method = "spearman") on the tuna quality example
+        -> rho = 0.6, S = 48.
+
+        rho is deterministic and matches R exactly. The p-value is not
+        asserted against R's documented figure: R's `cor.test` computes an
+        exact permutation p-value (AS 89) for this sample size, while SciPy's
+        `spearmanr` uses a t-distribution approximation, and the two
+        genuinely disagree at this n. The asymptotic value below is SciPy's
+        own reproducible output, not an externally published number.
+        """
+        outcome = run_test("spearman", {"x": TUNA_LIGHTNESS, "y": TUNA_PANEL_SCORE})
+        c = only(outcome)
+        assert c.statistic == pytest.approx(0.6, abs=1e-9)
+        assert c.p == pytest.approx(0.08762, abs=1e-4)
+
+    def test_correlating_a_series_against_its_own_x_matches_two_group_form(self):
+        """The x=/x_name= path is a pre-transform into the same two-key shape
+        the dispatch branches already use — it must reproduce the two-group
+        Anscombe result exactly, not approximately.
+        """
+        two_group = run_test("pearson", {"x": ANS_X, "y": ANS_Y})
+        via_x = run_test("pearson", {"y": ANS_Y}, x=ANS_X, x_name="x")
+        assert only(via_x).statistic == pytest.approx(only(two_group).statistic, abs=1e-12)
+        assert only(via_x).p == pytest.approx(only(two_group).p, abs=1e-12)
+
+        two_group_lr = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y})
+        via_x_lr = run_test("linear-regression", {"y": ANS_Y}, x=ANS_X, x_name="x")
+        assert only(via_x_lr).statistic == pytest.approx(only(two_group_lr).statistic, abs=1e-12)
+
+    def test_x_rejected_for_non_correlation_test(self):
+        with pytest.raises(ValueError, match="does not accept a separate x series"):
+            run_test("ttest-welch", {"y": ANS_Y}, x=ANS_X)
+
+
+class TestChiSquare:
+    """R: chisq.test(M) on Agresti (2007) p.39's gender x party table
+    X-squared = 30.07, df = 2, p-value = 2.954e-07
+    """
+
+    def test_matches_r(self):
+        outcome = run_test("chi-square", GENDER_PARTY)
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.statistic == pytest.approx(30.07, abs=1e-2)
+        assert outcome.omnibus.df == [2.0]
+        assert outcome.omnibus.p == pytest.approx(2.954e-07, rel=1e-3)
+
 
 class TestNonparametric:
     def test_mann_whitney_matches_r(self):
@@ -141,6 +241,19 @@ class TestNonparametric:
         assert outcome.omnibus is not None
         assert outcome.omnibus.statistic == pytest.approx(7.9882, abs=1e-3)
         assert outcome.omnibus.p == pytest.approx(0.01842, abs=1e-5)
+
+    def test_wilcoxon_matches_r(self):
+        """R: wilcox.test(x, y, paired = TRUE, alternative = "greater") on the
+        Hamilton depression scale example -> V = 40, p-value = 0.01953
+        """
+        outcome = run_test(
+            "wilcoxon",
+            {"visit1": HAMILTON_VISIT_1, "visit2": HAMILTON_VISIT_2},
+            alternative="greater",
+        )
+        c = only(outcome)
+        assert c.statistic == pytest.approx(40.0, abs=1e-9)
+        assert c.p == pytest.approx(0.01953, abs=1e-4)
 
 
 class TestEffectSizes:

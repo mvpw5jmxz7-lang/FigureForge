@@ -7,6 +7,8 @@ const BASE = '/api';
 export interface AnalyzeRequest {
   test: StatTest;
   groups: { name: string; values: number[] }[];
+  /** Paired x-values, for correlating a single series against its own x axis. */
+  x?: { name: string; values: number[] };
   alternative?: Alternative;
   correction?: Correction;
   alpha?: number;

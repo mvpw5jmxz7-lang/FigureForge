@@ -18,6 +18,7 @@ import {
   measureGutters,
   scaleBarWidthMm,
   toSeries,
+  xForHash,
   type FigureDocument,
   type ImageNode,
   type ScaleBarNode,
@@ -434,6 +435,7 @@ const checkStaleAnalyses: Rule = ({ document }) => {
     const current = analysisInputHash(
       { test: analysis.test, correction: analysis.options.correction },
       series.map((s) => s.values),
+      xForHash(series),
     );
     if (!isStale(analysis, current)) continue;
 
