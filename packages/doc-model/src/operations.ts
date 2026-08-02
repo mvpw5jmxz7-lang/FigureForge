@@ -9,6 +9,7 @@
  * `store.commit`, which turns them into undoable patches.
  */
 
+import { current, isDraft } from 'immer';
 import type { Analysis } from './analysis.js';
 import { significanceStars } from './analysis.js';
 import type { Dataset } from './data.js';
@@ -1354,6 +1355,130 @@ export function deleteNode(draft: FigureDocument, id: NodeId): void {
   }
 
   for (const doomedId of doomed) delete draft.nodes[doomedId];
+}
+
+/**
+ * Node types that describe another node rather than standing on their own.
+ *
+ * A bracket is a statement about a plot's data and a panel letter is a
+ * statement about a panel. Copied on their own they would carry a reference to
+ * a node the copy is not about — a second "P < 0.001" over a plot whose test
+ * never produced it — so they are copied only as part of the thing they
+ * annotate, with their references remapped.
+ */
+const DERIVED_NODE_TYPES = new Set(['bracket', 'panel-label', 'scale-bar']);
+
+export const isDerivedNode = (node: FigureNode): boolean => DERIVED_NODE_TYPES.has(node.type);
+
+/**
+ * Copy a node and everything under it, with fresh ids.
+ *
+ * The inverse of `deleteNode`'s descendant sweep, including its panel-label
+ * special case: a label is not a child of its panel but belongs to it. Every
+ * reference *within* the copied set is remapped to the copy, so duplicating a
+ * panel gives a panel whose brackets annotate the new plot rather than the old
+ * one. References *out* of the set (an `assetId`, a `datasetId`, the
+ * `analysisId` a bracket reads its p-value from) are shared, which is correct:
+ * those are inputs, and copying a figure element must not fork its data.
+ *
+ * Returns the new id of `id` itself, or null if there was nothing to copy.
+ */
+export function duplicateNode(
+  draft: FigureDocument,
+  newId: () => string,
+  id: NodeId,
+  offsetMm: PointMm = { x: 0, y: 0 },
+): NodeId | null {
+  const root = draft.nodes[id];
+  if (!root) return null;
+
+  const members = new Set<NodeId>([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const node of Object.values(draft.nodes)) {
+      if (members.has(node.id)) continue;
+      const belongs =
+        (node.parentId !== null && members.has(node.parentId)) ||
+        (node.type === 'panel-label' && members.has(node.panelId)) ||
+        (node.type === 'bracket' && node.plotId != null && members.has(node.plotId));
+      if (belongs) {
+        members.add(node.id);
+        grew = true;
+      }
+    }
+  }
+
+  const remap = new Map<NodeId, NodeId>();
+  for (const memberId of members) remap.set(memberId, newId());
+
+  for (const memberId of members) {
+    const source = draft.nodes[memberId]!;
+    // `current` first: `structuredClone` cannot clone an Immer proxy, and every
+    // node reached through a draft is one.
+    const plain = isDraft(source) ? (current(source) as FigureNode) : source;
+    const copy = structuredClone(plain) as FigureNode;
+    copy.id = remap.get(memberId)!;
+    copy.parentId = source.parentId !== null ? (remap.get(source.parentId) ?? null) : null;
+
+    // Only the top of the copied subtree moves; everything below it is
+    // positioned relative to a parent that has already been offset.
+    if (memberId === id || copy.parentId === null) {
+      copy.frame = { ...copy.frame, x: copy.frame.x + offsetMm.x, y: copy.frame.y + offsetMm.y };
+    }
+    copy.z = nextZ(draft.nodes, copy.parentId);
+
+    if (copy.type === 'panel-label') copy.panelId = remap.get(copy.panelId) ?? copy.panelId;
+    if (copy.type === 'bracket' && copy.plotId != null) {
+      copy.plotId = remap.get(copy.plotId) ?? copy.plotId;
+    }
+
+    draft.nodes[copy.id] = copy;
+  }
+
+  return remap.get(id) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Draw order
+// ---------------------------------------------------------------------------
+
+/**
+ * Move a node within its siblings' draw order.
+ *
+ * Draw order is `layer.z` then node `z` among siblings sharing a `parentId`.
+ * `nextZ` only ever appends, so until now the only way to change what covered
+ * what was to delete a node and add it again. Every sibling is renumbered
+ * `0..n-1` on each call, which keeps the values readable and means repeated
+ * "forward" steps cannot drift apart.
+ */
+export function reorderNode(
+  draft: FigureDocument,
+  id: NodeId,
+  where: 'front' | 'back' | 'forward' | 'backward',
+): void {
+  const node = draft.nodes[id];
+  if (!node) return;
+
+  const siblings = Object.values(draft.nodes)
+    .filter((n) => n.parentId === node.parentId)
+    .sort((a, b) => a.z - b.z);
+  if (siblings.length < 2) return;
+
+  const from = siblings.findIndex((n) => n.id === id);
+  const to =
+    where === 'front'
+      ? siblings.length - 1
+      : where === 'back'
+        ? 0
+        : Math.min(siblings.length - 1, Math.max(0, from + (where === 'forward' ? 1 : -1)));
+  if (to === from) return;
+
+  const ordered = [...siblings];
+  ordered.splice(to, 0, ...ordered.splice(from, 1));
+  ordered.forEach((sibling, index) => {
+    draft.nodes[sibling.id]!.z = index;
+  });
 }
 
 /** Move a node to a new parent, preserving its position on the page. */

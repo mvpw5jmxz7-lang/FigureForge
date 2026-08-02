@@ -171,6 +171,52 @@ describe('axis label collision', () => {
     }
   });
 
+  it('grows the left gutter so long tick labels and the title stay in the panel', () => {
+    // Five-figure counts plus a y title need far more than the theme's 12 mm.
+    // Before the gutter was derived they simply ran out of the panel, and
+    // panels do not clip — so the overflow landed on the neighbouring panel.
+    const doc = makeDocument(80);
+    const big = editDocument(doc, (draft) => {
+      const ds = draft.datasets[0]!;
+      draft.datasets = [
+        {
+          ...ds,
+          rows: ds.rows.map((row) =>
+            row.map((cell) => (typeof cell === 'number' ? cell * 1000 : cell)),
+          ),
+        },
+      ];
+    });
+
+    const scene = renderDocument(big, { theme: NATURE_THEME });
+    const area = collectByRole(scene, 'plot-area')[0]!;
+    const marginLeft = Number(/translate\((-?[\d.]+)/.exec(String(area.attrs?.['transform']))?.[1]);
+
+    expect(marginLeft).toBeGreaterThan(NATURE_THEME.spacing.plotMarginMm.left);
+
+    // Everything the axis draws sits at a negative x relative to the plot area,
+    // so `marginLeft + x` is its position within the panel and must not go
+    // negative.
+    const title = collectByRole(scene, 'axis-title').find((n) => n.text?.includes('viability'))!;
+    const titleX = Number(/translate\((-?[\d.]+)/.exec(String(title.attrs?.['transform']))?.[1]);
+    expect(marginLeft + titleX).toBeGreaterThanOrEqual(0);
+
+    for (const label of collectByRole(scene, 'tick-label').filter(isYTickLabel)) {
+      const right = Number(label.attrs?.['x']);
+      const left = right - estimateTextWidthMm(label.text ?? '', NATURE_THEME.type.tickLabelPt);
+      expect(marginLeft + left).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('leaves the gutter alone when the theme default already fits', () => {
+    // Regression guard: growing the margin must not shift a figure that never
+    // needed it, or every existing document re-lays itself out on open.
+    const scene = renderDocument(makeDocument(80), { theme: NATURE_THEME });
+    const area = collectByRole(scene, 'plot-area')[0]!;
+    const marginLeft = Number(/translate\((-?[\d.]+)/.exec(String(area.attrs?.['transform']))?.[1]);
+    expect(marginLeft).toBeCloseTo(NATURE_THEME.spacing.plotMarginMm.left, 6);
+  });
+
   it('clears the y axis title past the widest tick label', () => {
     const scene = renderDocument(makeDocument(80), { theme: NATURE_THEME });
     const title = collectByRole(scene, 'axis-title').find((n) => n.text?.includes('viability'));

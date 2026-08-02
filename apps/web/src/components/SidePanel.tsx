@@ -23,6 +23,7 @@ import {
   removeAsset,
   removeBracketsForPlot,
   renameDataset,
+  reorderNode,
   replaceAnalysisForPlot,
   repositionBrackets,
   toSeries,
@@ -907,10 +908,12 @@ function QualityTab({ api, theme, onSelectionChange, assets }: SidePanelProps) {
 function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
   const { document: doc, commit } = api;
 
+  // Highest z first, so the top of the list is the top of the stack — the
+  // convention everywhere else, and the one the ▲/▼ buttons have to match.
   const nodesByLayer = (layerId: string) =>
     Object.values(doc.nodes)
       .filter((n) => n.layerId === layerId)
-      .sort((a, b) => a.z - b.z);
+      .sort((a, b) => b.z - a.z);
 
   /**
    * What a row belongs to — the dataset behind a plot, the panel a label or
@@ -1008,6 +1011,29 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
                     {node.name}
                     {provenance(node) && <em className="provenance">{provenance(node)}</em>}
                   </span>
+                  {/* Draw order among siblings. `nextZ` only ever appends, so
+                      before this the only way to change what covered what was
+                      to delete a node and add it back. */}
+                  <button
+                    className="icon"
+                    title="Bring forward"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commit('Bring forward', (draft) => reorderNode(draft, node.id, 'forward'));
+                    }}
+                  >
+                    ▲
+                  </button>
+                  <button
+                    className="icon"
+                    title="Send backward"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commit('Send backward', (draft) => reorderNode(draft, node.id, 'backward'));
+                    }}
+                  >
+                    ▼
+                  </button>
                   {/* Hiding is the reversible answer; deleting is not. Without
                       this the only way to take something out of the figure from
                       here was to remove it, and nothing put it back. */}

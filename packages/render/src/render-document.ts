@@ -666,18 +666,15 @@ function continuousGeometry(
   };
 }
 
-function computePlotGeometry(
+/**
+ * Geometry for one candidate margin. Split out so the margin can be measured
+ * and the geometry rebuilt once against the answer — see `computePlotGeometry`.
+ */
+function geometryForMargin(
   node: PlotNode,
-  doc: FigureDocument,
-  theme: Theme,
+  series: ReturnType<typeof toSeries>,
+  margin: PlotGeometryBase['margin'],
 ): PlotGeometry | null {
-  const dataset = findDataset(doc, node.datasetId);
-  if (!dataset) return null;
-
-  const series = toSeries(dataset);
-  if (series.length === 0) return null;
-
-  const margin = theme.spacing.plotMarginMm;
   const plotWidth = Math.max(0, node.frame.width - margin.left - margin.right);
   const plotHeight = Math.max(0, node.frame.height - margin.top - margin.bottom);
   if (plotWidth <= 0 || plotHeight <= 0) return null;
@@ -733,6 +730,79 @@ function computePlotGeometry(
     marks,
     categories: series.map((s) => s.name),
   };
+}
+
+/**
+ * How much gutter this plot's axis furniture actually needs, in millimetres.
+ *
+ * The theme's `plotMarginMm` was applied as a constant, so a five-digit tick
+ * label plus a y title simply ran out of the panel — panels do not clip, so it
+ * overprinted the neighbouring panel and then the page. Both numbers are
+ * measured through `text-width.ts`'s static tables, never the DOM, so the
+ * canvas and the headless exporter reach the same answer.
+ */
+function requiredMargin(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+): { left: number; bottom: number } {
+  const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
+
+  const yLabels = node.y.showLabels ? yTickLayout(node, theme, geometry).maxLabelWidth : 0;
+  const left =
+    (node.y.showTicks ? theme.spacing.tickLengthMm : 0) +
+    (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
+    (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+
+  const bottom =
+    (node.x.showTicks ? theme.spacing.tickLengthMm : 0) +
+    theme.spacing.tickLabelGapMm +
+    xLabelLayout(node, theme, geometry).depth +
+    (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+
+  // Never take so much that nothing is left to plot in: on a panel too small
+  // for its own labels, a crowded axis still reads where a zero-height plot
+  // does not.
+  return {
+    left: Math.min(left, node.frame.width * 0.6),
+    bottom: Math.min(bottom, node.frame.height * 0.6),
+  };
+}
+
+function computePlotGeometry(
+  node: PlotNode,
+  doc: FigureDocument,
+  theme: Theme,
+): PlotGeometry | null {
+  const dataset = findDataset(doc, node.datasetId);
+  if (!dataset) return null;
+
+  const series = toSeries(dataset);
+  if (series.length === 0) return null;
+
+  const themeMargin = theme.spacing.plotMarginMm;
+  const first = geometryForMargin(node, series, themeMargin);
+  if (!first) return null;
+
+  /*
+   * Exactly two passes, never a loop to convergence. Tick *values* are chosen
+   * from the axis length, which depends on the margin, which depends on how
+   * wide those values print — so the dependency is circular and a loop could
+   * oscillate between two label sets. Measuring once against the theme's margin
+   * and rebuilding once against the answer terminates by construction, which is
+   * what keeps the canvas and the exporter agreeing.
+   */
+  const needed = requiredMargin(node, theme, first);
+  if (needed.left <= themeMargin.left + 0.01 && needed.bottom <= themeMargin.bottom + 0.01) {
+    return first;
+  }
+
+  const grown = {
+    ...themeMargin,
+    left: Math.max(themeMargin.left, needed.left),
+    bottom: Math.max(themeMargin.bottom, needed.bottom),
+  };
+  return geometryForMargin(node, series, grown) ?? first;
 }
 
 export interface PlotMeasurements {
@@ -1108,6 +1178,109 @@ function renderNumericXTicks(
   return out;
 }
 
+/**
+ * Which y ticks get a label, and how wide the widest one prints.
+ *
+ * Shared by `renderAxes`, which draws them, and `requiredMargin`, which sizes
+ * the gutter to hold them. Two copies of this arithmetic would drift, and the
+ * symptom would be labels that fit the gutter the renderer reserved but not the
+ * one the geometry was built with.
+ */
+function yTickLayout(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+): { visibleTicks: number[]; stride: number; maxLabelWidth: number } {
+  const { yScale, plotHeight } = geometry;
+  const tickLabelPt = theme.type.tickLabelPt;
+
+  // Thin the ticks until their labels stop colliding vertically. The tick count
+  // is chosen from the axis length alone (`tickCountForLength`), so a short axis
+  // still asks for more ticks than its labels can occupy.
+  const visibleTicks = yScale.ticks.filter(
+    (tick) => yScale.scale(tick) >= -0.01 && yScale.scale(tick) <= plotHeight + 0.01,
+  );
+  const labelHeight = estimateTextHeightMm(tickLabelPt);
+  const maxLabels =
+    labelHeight > 0 ? Math.max(2, Math.floor(plotHeight / (labelHeight * 1.25))) : visibleTicks.length;
+  const stride = visibleTicks.length > maxLabels ? Math.ceil(visibleTicks.length / maxLabels) : 1;
+
+  let maxLabelWidth = 0;
+  visibleTicks.forEach((tick, index) => {
+    if (index % stride !== 0) return;
+    maxLabelWidth = Math.max(maxLabelWidth, estimateTextWidthMm(yScale.format(tick), tickLabelPt));
+  });
+
+  return { visibleTicks, stride, maxLabelWidth };
+}
+
+/**
+ * How the x labels sit and how far below the axis they reach.
+ *
+ * Categorical labels tilt when they outgrow their band; numeric ones are always
+ * horizontal, so their depth is one line. Shared with `requiredMargin` for the
+ * same reason as `yTickLayout`.
+ */
+function xLabelLayout(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+): { angle: 0 | 45 | 90; budget: number; depth: number } {
+  const tickLabelPt = theme.type.tickLabelPt;
+  const oneLine = estimateTextHeightMm(tickLabelPt);
+
+  if (geometry.kind !== 'categorical' || !node.x.showLabels) {
+    return { angle: 0, budget: Infinity, depth: node.x.showLabels ? oneLine : 0 };
+  }
+
+  const { band, categories } = geometry;
+  // Adding a dataset re-runs auto-layout and narrows every panel, so the slot
+  // a category label has to fit in shrinks. Measure before drawing.
+  const slot = band.step;
+  const widest = categories.reduce(
+    (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
+    0,
+  );
+  /*
+   * Angle the whole axis or none of it — an axis mixing horizontal and angled
+   * labels reads as a mistake even when each label individually fits.
+   *
+   * Two angles, because one is not enough. At 45° neighbouring baselines are
+   * only slot × √2 apart, so on a really narrow panel every name would have to
+   * be truncated to two or three characters — worse than the overlap it set
+   * out to fix, since a cut-off category name can be genuinely ambiguous.
+   * At 90° the labels are stacked side by side and the clearance stops
+   * depending on the label length at all, so any name fits.
+   */
+  const angle: 0 | 45 | 90 = widest > slot * Math.SQRT2 ? 90 : widest > slot ? 45 : 0;
+
+  /*
+   * Upright labels are bounded by the room below the axis, not by their
+   * neighbours. The theme's bottom margin is sized for horizontal labels and
+   * is far too tight for these, so allow them a share of the panel instead — a
+   * deep label gutter is the accepted cost of long category names, and
+   * truncating the names would defeat the point.
+   *
+   * A share of the *panel*, not of the plot area: the plot area now shrinks to
+   * make room for exactly these labels, so measuring against it would feed the
+   * depth back into the budget and cut the names the second pass was meant to
+   * fit.
+   */
+  const budget =
+    angle === 90 ? Math.max(slot, node.frame.height * 0.45) : angle === 45 ? slot * Math.SQRT2 : slot;
+
+  if (angle === 0) return { angle, budget, depth: oneLine };
+
+  const longest = categories.reduce(
+    (max, name) =>
+      Math.max(max, estimateTextWidthMm(truncateToWidth(name, tickLabelPt, budget), tickLabelPt)),
+    0,
+  );
+  // Angled text descends by its own length × sin(angle), plus a line.
+  const sin = angle === 90 ? 1 : Math.SQRT1_2;
+  return { angle, budget, depth: longest * sin + oneLine };
+}
+
 function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
   const { yScale, plotWidth, plotHeight } = geometry;
   const out: SceneNode[] = [];
@@ -1127,18 +1300,11 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
 
   const tickLabelPt = theme.type.tickLabelPt;
 
-  // Thin the ticks until their labels stop colliding vertically. The tick count
-  // is chosen from the axis length alone (`tickCountForLength`), so a short axis
-  // still asks for more ticks than its labels can occupy.
-  const visibleTicks = yScale.ticks.filter(
-    (tick) => yScale.scale(tick) >= -0.01 && yScale.scale(tick) <= plotHeight + 0.01,
+  const { visibleTicks, stride, maxLabelWidth: maxTickLabelWidth } = yTickLayout(
+    node,
+    theme,
+    geometry,
   );
-  const labelHeight = estimateTextHeightMm(tickLabelPt);
-  const maxLabels = labelHeight > 0 ? Math.max(2, Math.floor(plotHeight / (labelHeight * 1.25))) : visibleTicks.length;
-  const stride = visibleTicks.length > maxLabels ? Math.ceil(visibleTicks.length / maxLabels) : 1;
-
-  // Widest label actually drawn, so the axis title can clear it.
-  let maxTickLabelWidth = 0;
 
   if (node.y.showTicks || node.y.showLabels) {
     visibleTicks.forEach((tick, index) => {
@@ -1153,7 +1319,6 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
       }
       if (node.y.showLabels && labelled) {
         const label = yScale.format(tick);
-        maxTickLabelWidth = Math.max(maxTickLabelWidth, estimateTextWidthMm(label, tickLabelPt));
         out.push(
           text(label, {
             x: -(tickLen + theme.spacing.tickLabelGapMm),
@@ -1201,57 +1366,13 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
   }
 
   // How far below the axis the labels reach, so the title clears them.
-  let xLabelDepth = estimateTextHeightMm(tickLabelPt);
+  const { angle, budget, depth: xLabelDepth } = xLabelLayout(node, theme, geometry);
 
   if (geometry.kind === 'continuous') {
     out.push(...renderNumericXTicks(node, theme, geometry));
   } else if (node.x.showLabels) {
-    const { band, categories } = geometry;
+    const { categories, band } = geometry;
     const baseY = plotHeight + tickLen + theme.spacing.tickLabelGapMm;
-    // Adding a dataset re-runs auto-layout and narrows every panel, so the slot
-    // a category label has to fit in shrinks. Measure before drawing.
-    const slot = band.step;
-    const widest = categories.reduce(
-      (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
-      0,
-    );
-    /*
-     * Angle the whole axis or none of it — an axis mixing horizontal and angled
-     * labels reads as a mistake even when each label individually fits.
-     *
-     * Two angles, because one is not enough. At 45° neighbouring baselines are
-     * only slot × √2 apart, so on a really narrow panel every name would have to
-     * be truncated to two or three characters — worse than the overlap it set
-     * out to fix, since a cut-off category name can be genuinely ambiguous.
-     * At 90° the labels are stacked side by side and the clearance stops
-     * depending on the label length at all, so any name fits.
-     */
-    const angle = widest > slot * Math.SQRT2 ? 90 : widest > slot ? 45 : 0;
-
-    /*
-     * Upright labels are bounded by the room below the axis, not by their
-     * neighbours. The theme's bottom margin is sized for horizontal labels and
-     * is far too tight for these, so allow them a share of the plot height
-     * instead — a deep label gutter is the accepted cost of long category
-     * names, and truncating the names would defeat the point.
-     */
-    const budget =
-      angle === 90
-        ? Math.max(slot, plotHeight * 0.45)
-        : angle === 45
-          ? slot * Math.SQRT2
-          : slot;
-
-    if (angle !== 0) {
-      const longest = categories.reduce(
-        (max, name) =>
-          Math.max(max, estimateTextWidthMm(truncateToWidth(name, tickLabelPt, budget), tickLabelPt)),
-        0,
-      );
-      // Angled text descends by its own length × sin(angle), plus a line.
-      const sin = angle === 90 ? 1 : Math.SQRT1_2;
-      xLabelDepth = longest * sin + estimateTextHeightMm(tickLabelPt);
-    }
 
     for (const name of categories) {
       const x = band.center(name);
@@ -1289,10 +1410,12 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
     // otherwise be drawn straight through them.
     const belowLabels =
       plotHeight + tickLen + theme.spacing.tickLabelGapMm + xLabelDepth + theme.spacing.axisTitleGapMm;
-    const defaultY = plotHeight + theme.spacing.plotMarginMm.bottom - theme.spacing.axisTitleGapMm;
+    // The plot's *own* bottom margin, which now grows to hold its labels rather
+    // than staying at the theme's constant.
+    const defaultY = plotHeight + geometry.margin.bottom - theme.spacing.axisTitleGapMm;
     // Never past the panel's own bottom edge: on a panel too small for both,
     // a title crowding the labels is still better than one off the page.
-    const limit = plotHeight + theme.spacing.plotMarginMm.bottom;
+    const limit = plotHeight + geometry.margin.bottom;
 
     out.push(
       text(node.x.title, {

@@ -12,7 +12,14 @@ import { resolveTheme } from '@figureforge/theme';
 import { Canvas } from './components/Canvas.js';
 import { SidePanel } from './components/SidePanel.js';
 import { Toolbar } from './components/Toolbar.js';
-import { decodeImage, download, exportFigure, health, type ExportFormat } from './api.js';
+import {
+  decodeImage,
+  download,
+  exportFigure,
+  health,
+  safeFilename,
+  type ExportFormat,
+} from './api.js';
 import { useAssets, type AssetStore } from './assets.js';
 import { createSampleDocument } from './sample.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
@@ -124,6 +131,8 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [apiUp, setApiUp] = useState<boolean | null>(null);
   const [dpi, setDpi] = useState<150 | 300 | 450 | 600>(300);
+  /** Filename being confirmed before a save; null means the dialog is closed. */
+  const [saveName, setSaveName] = useState<string | null>(null);
 
   const theme = resolveTheme(api.document.themeId, api.document.themeOverrides);
 
@@ -181,10 +190,10 @@ export function App() {
           heightMm: api.document.page.heightMm,
           format,
           dpi,
-          filename: api.document.title.replace(/[^\w-]+/g, '_').slice(0, 60) || 'figure',
+          filename: safeFilename(api.document.title).replace(/[^\w-]+/g, '_'),
         });
 
-        download(blob, `${api.document.title.slice(0, 60) || 'figure'}.${format}`);
+        download(blob, `${safeFilename(api.document.title)}.${format}`);
       } catch (caught) {
         setError(`Export failed: ${String(caught)}`);
       } finally {
@@ -196,23 +205,39 @@ export function App() {
 
   // --- project file -------------------------------------------------------
 
-  const saveProject = useCallback(() => {
-    const bytes = saveArchive(
-      // Both side-stores go in, or the archive keeps the metadata and loses
-      // the thing it describes: a project whose micrographs are grey boxes and
-      // whose "verbatim" CSV was re-serialised on the way out.
-      buildArchiveContents(
-        api.document,
-        dataOriginals.current,
-        assets.store.archiveMap(api.document),
-      ),
-    );
-    // Copy into a fresh buffer: the zip may sit in a larger pooled ArrayBuffer.
-    download(
-      new Blob([new Uint8Array(bytes)], { type: 'application/zip' }),
-      `${api.document.title.slice(0, 60) || 'figure'}${ARCHIVE_EXTENSION}`,
-    );
-  }, [api.document, assets.store]);
+  /*
+   * Saving asks for a name rather than deriving one silently. The name also
+   * becomes the figure's title, so the next save offers it again and the
+   * document and the file on disk stop disagreeing about what this figure is.
+   */
+  const saveProject = useCallback(
+    (chosen: string) => {
+      const name = safeFilename(chosen);
+      if (name !== api.document.title) {
+        api.commit('Rename figure', (draft) => {
+          draft.title = name;
+        });
+      }
+
+      const bytes = saveArchive(
+        // Both side-stores go in, or the archive keeps the metadata and loses
+        // the thing it describes: a project whose micrographs are grey boxes and
+        // whose "verbatim" CSV was re-serialised on the way out.
+        buildArchiveContents(
+          api.document,
+          dataOriginals.current,
+          assets.store.archiveMap(api.document),
+        ),
+      );
+      // Copy into a fresh buffer: the zip may sit in a larger pooled ArrayBuffer.
+      download(
+        new Blob([new Uint8Array(bytes)], { type: 'application/zip' }),
+        `${name}${ARCHIVE_EXTENSION}`,
+      );
+      setSaveName(null);
+    },
+    [api, assets.store],
+  );
 
   const openProject = useCallback(
     async (file: File) => {
@@ -322,7 +347,9 @@ export function App() {
 
       <footer className="statusbar">
         <div className="group">
-          <button onClick={saveProject}>Save project</button>
+          <button onClick={() => setSaveName(safeFilename(api.document.title))}>
+            Save project…
+          </button>
           <label className="file-button">
             Open project
             <input
@@ -363,7 +390,59 @@ export function App() {
             </button>
           ))}
         </div>
+        {saveName !== null && (
+          <SaveDialog
+            name={saveName}
+            onNameChange={setSaveName}
+            onSave={() => saveProject(saveName)}
+            onCancel={() => setSaveName(null)}
+          />
+        )}
       </footer>
+    </div>
+  );
+}
+
+/**
+ * Name-before-save, rather than a filename derived silently from a title the
+ * user has never seen. Built in-app instead of `window.prompt` so it can be
+ * styled, themed and driven in a test like any other control.
+ */
+function SaveDialog({
+  name,
+  onNameChange,
+  onSave,
+  onCancel,
+}: {
+  name: string;
+  onNameChange: (value: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="save-dialog" role="dialog" aria-label="Save project">
+      <label className="field block">
+        File name
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onSave();
+            else if (e.key === 'Escape') onCancel();
+          }}
+        />
+      </label>
+      <span className="hint">
+        Saved as <code>{safeFilename(name)}{ARCHIVE_EXTENSION}</code>, and kept as the figure&apos;s
+        title.
+      </span>
+      <div className="group">
+        <button className="primary" onClick={onSave}>
+          Save
+        </button>
+        <button onClick={onCancel}>Cancel</button>
+      </div>
     </div>
   );
 }
