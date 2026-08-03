@@ -1,9 +1,14 @@
 /**
  * Datasets and tabular import.
  *
- * Imported data is stored verbatim and never mutated — reproducibility depends
- * on the original numbers surviving in the project file exactly as they arrived.
- * Plots read through the accessors below rather than transforming in place.
+ * The verbatim import survives in the project file exactly as it arrived —
+ * `buildArchiveContents` writes it at `sourcePath` — and that is what the
+ * reproducibility claim rests on. Plots read through the accessors below rather
+ * than transforming in place.
+ *
+ * A table may also be *edited*, in the data grid; the edited cells travel in
+ * `document.json` beside the untouched original, and `editedAt` says so. Both
+ * are kept, and they are distinguishable, which is the property that matters.
  */
 
 import type { DatasetId } from './nodes.js';
@@ -139,6 +144,17 @@ export interface Dataset {
   sourcePath: string | null;
   sourceFilename: string | null;
   importedAt: string;
+  /**
+   * When the table was last edited in the data grid, if it ever was.
+   *
+   * The reproducibility claim survives editing without weakening: the verbatim
+   * import stays at `sourcePath` in the archive and the edited table travels in
+   * `document.json`, so both are kept. What was missing was any way to *tell*,
+   * and a figure whose numbers no longer match the file beside them is exactly
+   * the thing that claim exists to prevent. Analyses go stale on their own —
+   * `analysisInputHash` reads the rows.
+   */
+  editedAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,13 +355,7 @@ export function parseDelimited(
   const columns: Column[] = [];
   for (let i = 0; i < width; i++) {
     const name = (headerNames[i] ?? '').trim() || defaultColumnName(i);
-    const values = bodyRows.map((r) => r[i]).filter((v) => v !== null);
-    // A column with nothing but blanks is a numeric column with missing data
-    // far more often than it is a text column. Typing it as text would change
-    // the inferred layout of the whole file and silently drop the other
-    // replicates along with it.
-    const numeric = values.length === 0 || values.every((v) => typeof v === 'number');
-    columns.push({ name, kind: numeric ? 'number' : 'text' });
+    columns.push({ name, kind: columnKindFor(bodyRows.map((r) => r[i] ?? null)) });
   }
 
   return { columns, rows: bodyRows, delimiter: delim, hasHeader: headerRows > 0, headerRows, columnGroups };
@@ -384,6 +394,23 @@ function clampHeaderRows(
     if (secondIsHeader && firstIsSparse) return 2;
   }
   return 1;
+}
+
+/**
+ * Whether a column of cells reads as numbers or as text.
+ *
+ * A column with nothing but blanks is a numeric column with missing data far
+ * more often than it is a text column. Typing it as text would change the
+ * inferred layout of the whole file and silently drop the other replicates
+ * along with it.
+ *
+ * The one implementation, shared by the parser and by every edit made in the
+ * data grid — a cell edited from `12` to `n/a` retypes its column, and two
+ * derivations of that rule would eventually disagree about the same table.
+ */
+export function columnKindFor(values: readonly CellValue[]): ColumnKind {
+  const present = values.filter((v) => v !== null);
+  return present.length === 0 || present.every((v) => typeof v === 'number') ? 'number' : 'text';
 }
 
 function defaultColumnName(index: number): string {
@@ -823,4 +850,153 @@ function numericPairsAt(
     values.push(yValue);
   }
   return { values, x };
+}
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure transforms over a dataset's cells, for the data grid.
+ *
+ * Imported data was previously immutable — the comment at the top of this file
+ * still says the numbers survive in the project file exactly as they arrived,
+ * and they do: `buildArchiveContents` writes the *verbatim* import at
+ * `sourcePath` and the edited table travels in `document.json`, so both are
+ * kept and they are distinguishable. `editedAt` is what says which is which.
+ *
+ * Every transform re-derives the affected column kinds, because a cell edited
+ * from `12` to `n/a` retypes its column and the layout is inferred from those
+ * types. Skipping it leaves a table whose declared shape no longer matches its
+ * contents, which is the same class of silent misreading as the import bugs.
+ */
+function retyped(ds: Dataset, rows: CellValue[][], columns: Column[]): Dataset {
+  return {
+    ...ds,
+    columns: columns.map((c, i) => ({ ...c, kind: columnKindFor(rows.map((r) => r[i] ?? null)) })),
+    rows,
+    editedAt: new Date().toISOString(),
+  };
+}
+
+const copyRows = (ds: Dataset): CellValue[][] => ds.rows.map((r) => [...r]);
+
+/** Set one cell from raw text, parsed exactly as an import would parse it. */
+export function setCell(ds: Dataset, row: number, col: number, raw: string): Dataset {
+  if (row < 0 || row >= ds.rows.length || col < 0 || col >= ds.columns.length) return ds;
+  const rows = copyRows(ds);
+  rows[row]![col] = parseCell(raw);
+  return retyped(ds, rows, [...ds.columns]);
+}
+
+/** Insert a blank row at `at`; `at === rows.length` appends. */
+export function insertRow(ds: Dataset, at: number): Dataset {
+  const index = Math.min(Math.max(at, 0), ds.rows.length);
+  const rows = copyRows(ds);
+  rows.splice(index, 0, ds.columns.map(() => null));
+  return retyped(ds, rows, [...ds.columns]);
+}
+
+export function removeRow(ds: Dataset, at: number): Dataset {
+  if (at < 0 || at >= ds.rows.length) return ds;
+  const rows = copyRows(ds);
+  rows.splice(at, 1);
+  return retyped(ds, rows, [...ds.columns]);
+}
+
+/**
+ * Insert a blank column at `at`, shifting the group blocks around it.
+ *
+ * The blocks are column *indices*, so leaving them alone would silently
+ * repoint every one after the insertion at its neighbour — a group would
+ * quietly acquire a column belonging to the next group, and its mean would
+ * change without anything on screen saying so.
+ */
+export function insertColumn(ds: Dataset, at: number, name?: string): Dataset {
+  const index = Math.min(Math.max(at, 0), ds.columns.length);
+  const rows = copyRows(ds).map((r) => {
+    const next = [...r];
+    next.splice(index, 0, null);
+    return next;
+  });
+  const columns = [...ds.columns];
+  columns.splice(index, 0, { name: name ?? defaultColumnName(index), kind: 'number' });
+
+  const groups = ds.columnGroups?.map((g) => ({
+    name: g.name,
+    from: g.from >= index ? g.from + 1 : g.from,
+    // A column inserted *inside* a block extends it; one inserted before it
+    // moves the whole block along.
+    to: g.to >= index ? g.to + 1 : g.to,
+  }));
+
+  return { ...retyped(ds, rows, columns), ...(groups ? { columnGroups: groups } : {}) };
+}
+
+export function removeColumn(ds: Dataset, at: number): Dataset {
+  if (at < 0 || at >= ds.columns.length) return ds;
+  const rows = copyRows(ds).map((r) => {
+    const next = [...r];
+    next.splice(at, 1);
+    return next;
+  });
+  const columns = [...ds.columns];
+  columns.splice(at, 1);
+
+  const groups = ds.columnGroups
+    ?.map((g) => ({
+      name: g.name,
+      from: g.from > at ? g.from - 1 : g.from,
+      to: g.to >= at ? g.to - 1 : g.to,
+    }))
+    // A block whose every column has gone is not an empty group, it is no group.
+    .filter((g) => g.to >= g.from);
+
+  return { ...retyped(ds, rows, columns), ...(groups ? { columnGroups: groups } : {}) };
+}
+
+export function renameColumn(ds: Dataset, at: number, name: string): Dataset {
+  if (at < 0 || at >= ds.columns.length) return ds;
+  const columns = ds.columns.map((c, i) => (i === at ? { ...c, name } : { ...c }));
+  return { ...ds, columns, editedAt: new Date().toISOString() };
+}
+
+/**
+ * Paste a block of delimited text with its top-left cell at (row, col).
+ *
+ * Runs through `parseDelimited` with the header row forced off, so an Excel
+ * paste — which is tab-delimited — lands exactly as it looks, and a block whose
+ * first row happens to be non-numeric is not silently eaten as a header.
+ *
+ * Grows the table to fit rather than clipping: a paste that lost its last two
+ * rows without saying so is the kind of quiet truncation that ends up in a
+ * figure.
+ */
+export function pasteBlock(ds: Dataset, row: number, col: number, text: string): Dataset {
+  const block = parseDelimited(text, { hasHeader: false });
+  if (block.rows.length === 0) return ds;
+
+  const neededRows = row + block.rows.length;
+  const neededCols = col + (block.columns.length || 1);
+
+  const columns = [...ds.columns];
+  while (columns.length < neededCols) {
+    columns.push({ name: defaultColumnName(columns.length), kind: 'number' });
+  }
+
+  const rows = copyRows(ds).map((r) => {
+    const next = [...r];
+    while (next.length < columns.length) next.push(null);
+    return next;
+  });
+  while (rows.length < neededRows) rows.push(columns.map(() => null));
+
+  block.rows.forEach((source, dy) => {
+    source.forEach((value, dx) => {
+      const target = rows[row + dy];
+      if (target) target[col + dx] = value;
+    });
+  });
+
+  return retyped(ds, rows, columns);
 }

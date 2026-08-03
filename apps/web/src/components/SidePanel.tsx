@@ -6,6 +6,7 @@ import {
   addAsset,
   addBracket,
   addPanelWithImage,
+  addPanelWithImages,
   addPanelWithPlot,
   analysisInputHash,
   applyAutoLayout,
@@ -55,6 +56,7 @@ import {
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
+import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
@@ -245,6 +247,14 @@ function DataTab({
 
   const defaultName = `Dataset ${doc.datasets.length + 1}`;
 
+  /*
+   * The dataset whose grid is open, or null. It takes over the tab rather than
+   * sitting inside it: a spreadsheet in a 340 px column is unusable, and there
+   * is nothing else in this tab worth reading while a table is being edited.
+   */
+  const [editingId, setEditingId] = useState<NodeId | null>(null);
+  const editing = editingId ? doc.datasets.find((d) => d.id === editingId) : undefined;
+
   const importDataset = (): void => {
     if (!preview) return;
     const id = newId();
@@ -308,39 +318,72 @@ function DataTab({
 
   // --- images -------------------------------------------------------------
 
-  const importImageFile = async (file: File): Promise<void> => {
-    setBusy(`Reading ${file.name}`);
+  /**
+   * Import one or more images.
+   *
+   * Several files land in *one* panel, tiled — the montage a multi-channel
+   * micrograph figure is made of. One file behaves exactly as it always did,
+   * including the aspect lock a single image gives its panel, which a montage
+   * cannot have because there is no one honest ratio for several pictures.
+   */
+  const importImageFiles = async (files: readonly File[]): Promise<void> => {
+    if (files.length === 0) return;
+    setBusy(files.length === 1 ? `Reading ${files[0]!.name}` : `Reading ${files.length} images`);
     onError(null);
+
     try {
-      const imported = await importImage(file);
-      const assetId = newId();
+      // Decoded first, all of them: a partial commit would leave a panel
+      // holding some of the montage with no way to say which files failed.
+      const decoded: { imported: Awaited<ReturnType<typeof importImage>>; assetId: string }[] =
+        [];
+      for (const file of files) {
+        const imported = await importImage(file);
+        const assetId = newId();
+        // Bytes before the commit: the commit registers the asset, and a
+        // document referencing one the store has never seen renders a
+        // placeholder.
+        assets.store.add(assetId, imported.bytes);
+        decoded.push({ imported, assetId });
+      }
 
-      // Bytes first: the commit below registers the asset, and a document
-      // referencing one the store has never seen would render a placeholder.
-      assets.store.add(assetId, imported.bytes);
+      const first = decoded[0]!.imported;
 
-      commit('Add image', (draft) => {
-        // Asset record and image node in ONE commit. Referential integrity
+      commit(files.length === 1 ? 'Add image' : `Add ${files.length} images`, (draft) => {
+        // Asset records and image nodes in ONE commit. Referential integrity
         // rejects an image whose asset is unregistered, so splitting them
         // would leave a figure that edits fine and cannot be saved.
-        addAsset(draft, {
-          id: assetId,
-          filename: imported.filename,
-          mimeType: imported.bytes.mimeType,
-          byteLength: imported.bytes.original.length,
-          naturalPx: imported.naturalPx,
-        });
-        addPanelWithImage(draft, newId, {
-          frame: nextPanelFrame(
-            draft,
-            initialImageSize(imported.aspect, draft.page.widthMm, draft.page.heightMm),
-          ),
+        for (const { imported, assetId } of decoded) {
+          addAsset(draft, {
+            id: assetId,
+            filename: imported.filename,
+            mimeType: imported.bytes.mimeType,
+            byteLength: imported.bytes.original.length,
+            naturalPx: imported.naturalPx,
+          });
+        }
+
+        const frame = nextPanelFrame(
+          draft,
+          initialImageSize(first.aspect, draft.page.widthMm, draft.page.heightMm),
+        );
+        const images = decoded.map(({ imported, assetId }) => ({
           name: imported.filename,
           assetId,
           // Vector sources carry {0,0}: there is no pixel grid to record, and
           // the resolution check skips them by MIME type rather than by this.
           naturalPx: imported.naturalPx ?? { width: 0, height: 0 },
-        });
+        }));
+
+        if (images.length === 1) {
+          addPanelWithImage(draft, newId, { frame, ...images[0]! });
+        } else {
+          addPanelWithImages(draft, newId, {
+            frame,
+            name: `${first.filename} +${images.length - 1}`,
+            images,
+          });
+        }
+
         applyAutoLayout(draft, {
           marginMm: theme.spacing.marginMm,
           gutterMm: theme.spacing.panelGutterMm,
@@ -354,9 +397,10 @@ function DataTab({
         reflowBrackets(draft, theme);
       });
 
-      if (imported.notes.length > 0) onError(imported.notes.join(' '));
+      const notes = decoded.flatMap((d) => d.imported.notes);
+      if (notes.length > 0) onError([...new Set(notes)].join(' '));
     } catch (error) {
-      onError(`Could not import ${file.name}: ${String(error)}`);
+      onError(`Could not import: ${String(error)}`);
     } finally {
       setBusy(null);
     }
@@ -390,6 +434,13 @@ function DataTab({
   };
 
   const totalAssetBytes = assets.store.totalBytes();
+
+  // The grid takes the whole tab while it is open. Nothing else here is worth
+  // reading mid-edit, and a spreadsheet squeezed into a 340 px column is not a
+  // spreadsheet.
+  if (editing) {
+    return <DataGrid api={api} dataset={editing} onClose={() => setEditingId(null)} />;
+  }
 
   return (
     <section>
@@ -612,6 +663,7 @@ function DataTab({
               </select>
               <span className="muted">{toSeries(dataset).length} series</span>
               <div className="field-row">
+                <button onClick={() => setEditingId(dataset.id)}>Edit data…</button>
                 <label className="check" title="Column 1 labels the rows rather than holding data">
                   <input
                     type="checkbox"
@@ -624,6 +676,11 @@ function DataTab({
                   />
                   Row names in column 1
                 </label>
+                {dataset.editedAt && (
+                  <span className="muted" title={`Last edited ${dataset.editedAt}`}>
+                    edited
+                  </span>
+                )}
                 {uses.length > 0 ? (
                   <span className="muted">
                     used by {uses.length} {uses.length === 1 ? 'panel' : 'panels'}
@@ -656,17 +713,19 @@ function DataTab({
       <h3>Images</h3>
       <p className="hint">
         Micrographs, blots, gels and schematics. PNG, JPEG, SVG or TIFF — TIFF is decoded by the
-        analysis service, and the original is kept in the project either way.
+        analysis service, and the original is kept in the project either way. Select several at
+        once and they are tiled into one panel; the grid is editable in the Inspector.
       </p>
 
       <label className="file-button">
-        Add image
+        Add image(s)
         <input
           type="file"
+          multiple
           accept={ACCEPTED_IMAGE_TYPES}
           onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) void importImageFile(file);
+            const files = [...(e.target.files ?? [])];
+            if (files.length > 0) void importImageFiles(files);
             // Clear the input, or picking the same file twice does nothing.
             e.target.value = '';
           }}

@@ -26,6 +26,7 @@ import {
   buildArchiveContents,
   createDocument,
   createIdFactory,
+  editDataset,
   editDocument,
   analysisInputHash,
   inferFormat,
@@ -34,6 +35,7 @@ import {
   relabelPanels,
   saveArchive,
   scaleBarWidthMm,
+  setCell,
   setImageCrop,
   stableStringify,
   toSeries,
@@ -429,6 +431,32 @@ async function main(): Promise<void> {
     [4, 5, 6],
   ]);
   check('edited data marks the analysis stale', tampered !== analysis.inputHash);
+
+  /*
+   * Editing a table in the data grid must not cost the reproducibility claim.
+   * The edited cells travel in `document.json`; the bytes that were imported
+   * stay at `sourcePath`. Both are kept, they are distinguishable, and a
+   * reviewer extracting the archive still gets the original numbers.
+   */
+  const editedDoc = editDocument(doc, (draft) =>
+    editDataset(draft, viability.id, (ds) => setCell(ds, 0, 1, '0.1')),
+  );
+  const editedArchive = saveArchive(
+    buildArchiveContents(
+      editedDoc,
+      new Map([[`data/${viability.id}.csv`, VIABILITY]]),
+      new Map([[assetPath, pngBytes]]),
+    ),
+  );
+  const reopenedEdit = loadArchive(editedArchive);
+  const editedDataset = reopenedEdit.document.datasets.find((d) => d.id === viability.id);
+
+  check('an edited cell survives the round-trip', editedDataset?.rows[0]?.[1] === 0.1);
+  check('the edit is recorded as one', editedDataset?.editedAt !== undefined);
+  check(
+    'the verbatim import survives the edit',
+    reopenedEdit.dataFiles.get(`data/${viability.id}.csv`) === VIABILITY,
+  );
 
   console.log(
     failures === 0

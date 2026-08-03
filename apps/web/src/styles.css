@@ -203,6 +203,10 @@ button.icon.danger:hover { color: var(--danger); }
 .side-panel {
   width: 340px;
   flex-shrink: 0;
+  /* The data grid needs room a 340 px column does not have, so the panel widens
+     while one is open. `:has` keeps that in CSS rather than threading an
+     "is the grid open" flag from the Data tab up through App. */
+  transition: width 120ms ease;
   background: var(--surface);
   border-left: 1px solid var(--border);
   display: flex;
@@ -436,3 +440,83 @@ h4 { margin: 0 0 6px; font-size: 13px; }
   cursor: pointer;
 }
 .file-button input { display: none; }
+
+/* --- Data grid -----------------------------------------------------------
+   An editable table over one dataset. Ordinary HTML above everything else, so
+   none of it can reach a scene node and therefore an export. */
+.side-panel:has(.data-grid) { width: min(760px, 55vw); }
+
+.data-grid { display: flex; flex-direction: column; gap: 8px; padding: 10px; min-height: 0; }
+.data-grid > .field-row { align-items: center; gap: 8px; }
+.data-grid > .field-row .muted { margin-left: auto; }
+.data-grid > .field-row:last-child .muted { margin-left: 0; font-size: 11px; }
+
+/* The table scrolls inside the panel; the panel itself never does. */
+.grid-scroll { overflow: auto; flex: 1; border: 1px solid var(--border); border-radius: 4px; }
+
+.grid { border-collapse: collapse; font-size: 12px; }
+.grid th, .grid td { border: 1px solid var(--border); padding: 0; }
+.grid thead th { background: var(--surface); position: sticky; top: 0; z-index: 1; }
+/* `color` stated, never inherited: `:root` declares `color-scheme: light dark`,
+   so an input the app does not colour takes its text colour from the OS scheme
+   — which is how the in-place text editor once rendered white on white. */
+.grid thead th input {
+  width: 100%;
+  min-width: 76px;
+  font: inherit;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 3px 4px;
+}
+.grid thead th .field-row { gap: 2px; padding: 0 2px 2px; align-items: center; }
+.grid thead th .kind { color: var(--muted); font-size: 10px; margin-right: auto; }
+.grid thead th button, .grid .row-head button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 3px;
+  line-height: 1;
+}
+.grid thead th button:hover { color: var(--fg); }
+.grid button.danger:hover { color: var(--danger); }
+
+.grid .row-head {
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+  padding: 0 4px;
+  white-space: nowrap;
+  position: sticky;
+  left: 0;
+}
+
+/* A cell is a button until it is opened, so the whole cell is a click target
+   and keyboard focus lands somewhere meaningful. */
+.grid td .cell {
+  display: block;
+  width: 100%;
+  min-width: 76px;
+  text-align: right;
+  font: inherit;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 3px 5px;
+  cursor: text;
+}
+.grid td.editing { outline: 2px solid var(--accent); outline-offset: -2px; }
+.grid td input {
+  width: 100%;
+  min-width: 76px;
+  font: inherit;
+  text-align: right;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  padding: 3px 5px;
+}
+.grid td input:focus { outline: none; }

@@ -195,14 +195,21 @@ export function InspectorTab({
         <>
           <PanelFields api={api} node={node} />
           {/* A click on the canvas selects the panel, so the plot or micrograph
-              inside it needs a way in that is not "double-click and hope". */}
-          {childrenOf(doc.nodes, node.id)
-            .filter((child) => child.type === 'plot' || child.type === 'image')
-            .map((child) => (
+              inside it needs a way in that is not "double-click and hope".
+              Named, because a montage has several and "Edit the image inside"
+              four times over says nothing about which one. */}
+          {(() => {
+            const tiles = childrenOf(doc.nodes, node.id).filter(
+              (child) => child.type === 'plot' || child.type === 'image',
+            );
+            return tiles.map((child, index) => (
               <button key={child.id} onClick={() => onSelectionChange([child.id])}>
-                Edit the {child.type} inside
+                {tiles.length > 1
+                  ? `Edit tile ${index + 1} — ${child.name}`
+                  : `Edit the ${child.type} inside`}
               </button>
-            ))}
+            ));
+          })()}
         </>
       )}
       {node.type === 'image' && (
@@ -1529,7 +1536,26 @@ function PanelFields({
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'panel' }>;
 }) {
-  const { commit } = api;
+  const { commit, document: doc } = api;
+
+  // Only plots and images take cells; a scale bar or an arrow is parented to
+  // the tile it annotates, not to the panel, so it is not one of them.
+  const tileCount = childrenOf(doc.nodes, node.id).filter(
+    (c) => c.type === 'plot' || c.type === 'image',
+  ).length;
+  const grid = node.contentGrid ?? { rows: 1, cols: Math.max(1, tileCount), gutterMm: 1 };
+
+  const setGrid = (patch: Partial<typeof grid>): void => {
+    commit('Change tile grid', (draft) => {
+      const target = draft.nodes[node.id];
+      if (target?.type !== 'panel') return;
+      target.contentGrid = { ...grid, ...patch };
+      // Re-tile immediately: the frames are stored on the children, so an
+      // unapplied grid is a setting that claims an arrangement the figure does
+      // not have.
+      resizePanel(draft, node.id, target.frame);
+    });
+  };
 
   return (
     <>
@@ -1575,6 +1601,53 @@ function PanelFields({
         >
           Clear background
         </button>
+      )}
+
+      {/* Only where there is something to tile. A one-child panel has no grid
+          to speak of, and offering rows and columns for it would suggest the
+          single image is being placed in a cell rather than filling the panel. */}
+      {tileCount > 1 && (
+        <>
+          <h4>Tiles</h4>
+          <div className="field-row">
+            <label className="field">
+              Rows
+              <input
+                type="number"
+                min={1}
+                max={tileCount}
+                value={grid.rows}
+                onChange={(e) => setGrid({ rows: Math.max(1, Number(e.target.value) || 1) })}
+              />
+            </label>
+            <label className="field">
+              Columns
+              <input
+                type="number"
+                min={1}
+                max={tileCount}
+                value={grid.cols}
+                onChange={(e) => setGrid({ cols: Math.max(1, Number(e.target.value) || 1) })}
+              />
+            </label>
+            <label className="field">
+              Gutter
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={grid.gutterMm}
+                onChange={(e) => setGrid({ gutterMm: Math.max(0, Number(e.target.value)) })}
+              />
+            </label>
+          </div>
+          <p className="hint">
+            {tileCount} tiles in {grid.rows} × {grid.cols}
+            {grid.rows * grid.cols < tileCount
+              ? ' — too few cells, so the extra tiles keep their current size rather than stacking invisibly at the origin.'
+              : '. Tiles fill cells in stacking order; use the Layers list to reorder them. Each keeps its own crop, scale bar and annotations.'}
+          </p>
+        </>
       )}
     </>
   );
