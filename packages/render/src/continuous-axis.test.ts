@@ -198,6 +198,57 @@ Drug,42.1,38.7,45.3`;
   });
 });
 
+/**
+ * `TestFiles/test graph.xlsx`, tab-delimited as an Excel copy puts it on the
+ * clipboard: three runs, each measured at its *own* x positions. Its own chart
+ * is three lineMarker series, which is what this must reproduce.
+ */
+const XY_PAIRS = [
+  'X1\tY1\tX2\tY2\tX3\tY3',
+  '1\t0\t1.4\t0.05\t0.9\t0.1',
+  '2\t0.1\t1.9\t0.2\t2.05\t0.24',
+  '3\t0.3\t3.1\t0.4\t2.9\t0.47',
+  '4\t0.5\t3.9\t0.7\t4.05\t0.8',
+  '5\t0.6\t5.1\t0.8\t5.05\t0.9',
+  '6\t0.7\t6.1\t0.9\t6.1\t1.1',
+].join('\n');
+
+describe('independent xy pairs', () => {
+  it('draws one line per run, each against its own x', () => {
+    const s = scene(makeDocument(XY_PAIRS, 'line'));
+    const lines = collectByRole(s, 'line');
+    expect(lines).toHaveLength(3);
+    expect(collectByRole(s, 'bar')).toEqual([]);
+
+    const firstX = lines.map((l) => Number(String(l.attrs?.['d'] ?? '').match(/M([\d.]+)/)?.[1]));
+    // Six points each, and three distinct starting positions: read against one
+    // shared x, all three would begin at the same place and the misreading
+    // would be invisible on the page.
+    for (const line of lines) {
+      expect([...String(line.attrs?.['d'] ?? '').matchAll(/[ML]/g)]).toHaveLength(6);
+    }
+    expect(new Set(firstX).size).toBe(3);
+    // Run 3 starts at x = 0.9, left of run 1's x = 1, which is left of run 2's 1.4.
+    expect(firstX[2]).toBeLessThan(firstX[0]!);
+    expect(firstX[0]).toBeLessThan(firstX[1]!);
+  });
+
+  it('shows the markers as well as the line', () => {
+    // Excel's lineMarker, and what `showPoints` already defaults to: 18 points
+    // over three lines. A bare line hides how many observations there were.
+    expect(collectByRole(scene(makeDocument(XY_PAIRS, 'line')), 'point')).toHaveLength(18);
+  });
+
+  it('names the three runs in a legend', () => {
+    // Nothing else on a continuous plot says which line is which — the band
+    // labels a categorical plot leans on do not exist here.
+    const labels = collectByRole(scene(makeDocument(XY_PAIRS, 'line')), 'legend')
+      .filter((n) => n.tag === 'text')
+      .map((n) => n.text);
+    expect(labels).toEqual(['Y1', 'Y2', 'Y3']);
+  });
+});
+
 describe('bracket anchoring on a continuous plot', () => {
   it('measures no categories, so no bracket can be misplaced', () => {
     const doc = makeDocument(XY, 'scatter');

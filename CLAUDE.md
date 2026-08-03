@@ -187,8 +187,14 @@ Each guards against a specific, common reporting error:
 
 Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests.
 Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
-panels) is done — see "Round 4" below. Run `git status` and `git branch` before
-assuming the tree is clean or which branch you're on.
+panels) is done — see "Round 4" below. **Round 5 is in progress on
+`feat/round-5-xy-import`**: the import surface, one reported item at a time,
+starting with xy pairs. Run `git status` and `git branch` before assuming the
+tree is clean or which branch you're on.
+
+**Verified after round 5 stage 1:** 325 TypeScript tests, 105 Python tests,
+typecheck and lint clean, 46-check acceptance run (unchanged — the acceptance
+script passes its plot types explicitly).
 
 **Verified after round 4:** 313 TypeScript tests, 105 Python tests, typecheck
 and lint clean, 46-check acceptance run.
@@ -809,6 +815,61 @@ one bar at the mean of a count of cases and a count of controls — 50 for an
   shaped micrographs have no one honest ratio. More tiles than cells leaves the
   extras at their current size rather than stacked at the origin, where they
   would be invisible under a tile — the exact failure this replaces.
+
+### Round 5 (in progress) — the import surface
+
+Reported from real use: categorical graphs import well, line graphs do not, and
+"none of the other import options work properly". Being taken one item at a
+time, each verified in a real browser before the next is started. Reference
+material is in `TestFiles/` — `test graph.xlsx` (independent xy pairs, with the
+author's intended chart embedded), `test2 data table.xlsx` (a shared-x,
+two-group × three-replicate table) and `test graphs.prism`.
+
+#### Stage 1 — x,y pairs draw as an xy graph
+
+Nothing about the *parsing* was broken. `inferFormat` reads `X1,Y1,X2,Y2,X3,Y3`
+as `sigmaplot` correctly, `toSeries` pairs by row index, and the Inspector
+already offered scatter and line. The table came in right and then drew wrong.
+
+- **`defaultPlotTypeFor` now covers every layout that carries an x per y** —
+  `simple-xy`, `prism` and `sigmaplot`, not just `xy-replicates`. Read as
+  `bar-dot`, an xy table's x columns are discarded outright and each series
+  collapses to the mean of its y column: a number that is nowhere in the table,
+  drawn over a category axis the data never had. Round 4 fixed exactly this for
+  the one format it was reported against and left the other three; the class of
+  defect, not the instance, is what the switch now answers. The blast radius is
+  one call site — every other `addPlot` caller passes a type explicitly, which
+  is why the acceptance count did not move.
+- **A column name titles an axis only when every column feeding that axis
+  carries it.** `axisTitlesFor` was putting `X1` and `Y1` on the axes while
+  `Y1` sat in the legend beside `Y2` and `Y3` — an axis labelled after one of
+  the three things plotted against it. The same rule reads the honest case
+  correctly: `Radius,C(s)_run1,Radius,C(s)_run2` really is measured against a
+  radius, so `Radius` becomes the x title. Where nothing agrees, `DataTab`'s
+  existing `?? 'Value'` fills the y axis and the author renames it — a generic
+  title is recoverable, a confidently wrong one is not.
+- **The layout is no longer labelled "(paired)".** That reads as *matched*
+  pairs, which is the opposite of what it means and exactly what it was
+  reported for: the pairing is a column with the column beside it, and no row
+  of one run corresponds to the same row of another. It is now "own x per
+  series", and the shared-x layout above it says "matched row by row" — the two
+  readings of the same rectangle now name themselves. The preview line also
+  shows that label rather than the raw enum member; `sigmaplot` on screen tells
+  an author nothing about how their columns are being read.
+
+Driven in a real browser, light and **dark**: the pasted sheet previewed as
+`X1, Y1, X2, Y2, … (own x per series) · 6 columns · 6 rows`, imported to **3**
+lines and **18** markers with **no** new bars, three *distinct* starting x
+(run 3 at 0.9 left of run 1 at 1.0 left of run 2 at 1.4 — the guard against a
+shared-x misreading, which is invisible on the page), a `Y1`/`Y2`/`Y3` legend,
+and no axis titled after a single series. The exported PDF is single-page at
+exactly 183.0000 × 75.0000 mm, fonts embedded, legend text selectable, **zero**
+image XObjects.
+
+**Not done, deliberately:** `.xlsx` and `.prism` are still not readable
+directly — the file input takes `.csv,.tsv,.txt` and reads bytes as text. The
+author's route is an Excel paste, which is tab-delimited and already works, so
+a spreadsheet reader was not built on speculation.
 
 ---
 

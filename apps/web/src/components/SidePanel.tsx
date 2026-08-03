@@ -98,12 +98,18 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
   {
     id: 'prism',
     label: 'X, Y1, Y2, … (shared x)',
-    hint: 'Column 1 is the x for every series — right only if the series were sampled together.',
+    hint: 'Column 1 is the x for every series, matched row by row — right only if the series were sampled together.',
   },
   {
     id: 'sigmaplot',
-    label: 'X1, Y1, X2, Y2, … (paired)',
-    hint: 'Each series carries its own x, so runs sampled at different points stay independent.',
+    /*
+     * Not "(paired)". That reads as *matched* pairs, which is the opposite of
+     * what this layout means and exactly the confusion it was reported for: the
+     * pairing here is a column with the column beside it, and no row of one
+     * series is claimed to correspond to the same row of another.
+     */
+    label: 'X1, Y1, X2, Y2, … (own x per series)',
+    hint: 'Each series carries its own x column, so runs sampled at different points stay independent. Nothing is matched row by row — use the shared-x layout above for that.',
   },
   {
     id: 'contingency',
@@ -475,8 +481,13 @@ function DataTab({
           {/* Live preview before import, so a mis-detected layout is visible
               before it becomes a plot. */}
           <div className="preview-meta">
-            {format === '' ? 'Detected' : 'Reading as'} <strong>{preview.format}</strong> ·{' '}
-            {preview.columns.length} columns · {preview.rows.length} rows
+            {/* The label, not the enum member: "sigmaplot" on screen says
+                nothing about how the columns are being read. */}
+            {format === '' ? 'Detected' : 'Reading as'}{' '}
+            <strong>
+              {DATA_FORMATS.find((f) => f.id === preview.format)?.label ?? preview.format}
+            </strong>{' '}
+            · {preview.columns.length} columns · {preview.rows.length} rows
           </div>
 
           {/* Everything below used to be decided silently. Detection is a

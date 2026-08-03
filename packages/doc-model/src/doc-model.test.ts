@@ -47,6 +47,7 @@ import {
   addShape,
   addText,
   applyAutoLayout,
+  defaultPlotTypeFor,
   deleteNode,
   duplicateNode,
   imagesUsingAsset,
@@ -223,7 +224,42 @@ describe('delimited parsing', () => {
     expect(inferFormat(parseDelimited('X,Y1,Y2,Y3\n1,2,3,4').columns)).toBe('prism');
     expect(inferFormat(parseDelimited('X1,Y1,X2,Y2\n1,2,3,4').columns)).toBe('sigmaplot');
   });
+
+  it('reads an Excel paste of three independent xy runs', () => {
+    /*
+     * `TestFiles/test graph.xlsx`, verbatim, tab-delimited as a paste from
+     * Excel arrives. Its own chart is three lineMarker series, each against its
+     * own x column, and the whole point of the layout is that no row of one run
+     * corresponds to the same row of another.
+     */
+    const ds = dataset(XY_PAIRS_PASTE);
+    expect(ds.format).toBe('sigmaplot');
+
+    const series = toSeries(ds);
+    expect(series.map((s) => s.name)).toEqual(['Y1', 'Y2', 'Y3']);
+    expect(series.every((s) => s.values.length === 6 && s.x?.length === 6)).toBe(true);
+
+    // The regression guard: read as a shared x, run 2 would be plotted against
+    // run 1's positions and the misreading is invisible on the page.
+    expect(series[1]?.x).toEqual([1.4, 1.9, 3.1, 3.9, 5.1, 6.1]);
+    expect(series[2]?.x).toEqual([0.9, 2.05, 2.9, 4.05, 5.05, 6.1]);
+    expect(series[0]?.values).toEqual([0, 0.1, 0.3, 0.5, 0.6, 0.7]);
+  });
 });
+
+/**
+ * The columns of `TestFiles/test graph.xlsx`, tab-delimited — the bytes an
+ * Excel copy actually puts on the clipboard.
+ */
+const XY_PAIRS_PASTE = [
+  'X1\tY1\tX2\tY2\tX3\tY3',
+  '1\t0\t1.4\t0.05\t0.9\t0.1',
+  '2\t0.1\t1.9\t0.2\t2.05\t0.24',
+  '3\t0.3\t3.1\t0.4\t2.9\t0.47',
+  '4\t0.5\t3.9\t0.7\t4.05\t0.8',
+  '5\t0.6\t5.1\t0.8\t5.05\t0.9',
+  '6\t0.7\t6.1\t0.9\t6.1\t1.1',
+].join('\n');
 
 function dataset(text: string, id = 'd1'): Dataset {
   const parsed = parseDelimited(text);
@@ -699,6 +735,49 @@ function sampleDocument() {
 }
 
 describe('operations', () => {
+  it('opens every layout carrying an x per y as an xy graph', () => {
+    /*
+     * Read as bars, an xy table's x columns are discarded outright and each
+     * series collapses to the mean of its y column — a number that is nowhere
+     * in the table, drawn over a category axis the data never had.
+     */
+    expect(defaultPlotTypeFor('simple-xy')).toBe('line');
+    expect(defaultPlotTypeFor('prism')).toBe('line');
+    expect(defaultPlotTypeFor('sigmaplot')).toBe('line');
+    expect(defaultPlotTypeFor('xy-replicates')).toBe('line');
+
+    // Unchanged: these have no x to plot against.
+    expect(defaultPlotTypeFor('replicate')).toBe('bar-dot');
+    expect(defaultPlotTypeFor('grouped')).toBe('bar-dot');
+    expect(defaultPlotTypeFor('grouped-replicates')).toBe('bar-dot');
+    expect(defaultPlotTypeFor(undefined)).toBe('bar-dot');
+    expect(defaultPlotTypeFor('contingency')).toBe('bar');
+    expect(defaultPlotTypeFor('nested')).toBe('dot');
+  });
+
+  it('gives an imported xy panel a numeric x axis with ticks', () => {
+    // The import path passes no plot type on purpose, so this is the only
+    // place the default above actually reaches a document.
+    const newId = createIdFactory();
+    const doc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        const ds = dataset('X1,Y1,X2,Y2\n1,2,1.5,3\n2,4,2.5,5', newId());
+        draft.datasets = [ds];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 80, height: 60 },
+          datasetId: ds.id,
+          name: 'Runs',
+        });
+      },
+    );
+
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot');
+    expect(plot && 'plotType' in plot ? plot.plotType : null).toBe('line');
+    // Without ticks a numeric axis has nothing to read a position against.
+    expect(plot && 'x' in plot ? plot.x.showTicks : null).toBe(true);
+  });
+
   it('letters panels in reading order', () => {
     const { doc } = sampleDocument();
     const labels = Object.values(doc.nodes).filter((n) => n.type === 'panel-label');
