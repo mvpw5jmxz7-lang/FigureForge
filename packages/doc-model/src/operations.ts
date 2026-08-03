@@ -20,6 +20,7 @@ import type { PointMm, RectMm } from './geometry.js';
 import { union } from './geometry.js';
 import {
   autoLayout,
+  gridCells,
   readingOrder,
   suggestGrid,
   type GridSpec,
@@ -451,18 +452,57 @@ export function applyAutoLayout(
 }
 
 /**
- * Stretch a panel's content children to fill it.
+ * Size a panel's content children to it — filling it, or tiled into its grid.
  *
  * One implementation shared by `applyAutoLayout` and `resizePanel`. They had
  * drifted — auto-layout resized only plots while resize handled images too, so
  * a micrograph kept its old size the moment the layout was re-run.
+ *
+ * Without a `contentGrid` this is exactly what it always was, byte for byte,
+ * which a regression test pins: every existing figure has one child per panel
+ * and must not move.
  */
 function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm): void {
-  for (const child of Object.values(draft.nodes)) {
-    if (child.parentId === panelId && (child.type === 'plot' || child.type === 'image')) {
+  const panel = draft.nodes[panelId];
+  const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
+
+  const children = Object.values(draft.nodes)
+    .filter((c) => c.parentId === panelId && (c.type === 'plot' || c.type === 'image'))
+    // Cells in z order — what the Layers list shows, and what `reorderNode`
+    // already lets an author rearrange. `Object.values` order is not a
+    // guarantee, and a montage that reshuffled itself on every layout would be
+    // unusable.
+    .sort((a, b) => a.z - b.z);
+
+  if (!grid || grid.rows < 1 || grid.cols < 1 || children.length <= 1) {
+    for (const child of children) {
       child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
     }
+    return;
   }
+
+  /*
+   * `gridCells` tiles a page into panels; here it tiles a panel into tiles.
+   * Its only page-specific inputs are the extent and the margin, so passing the
+   * panel's own frame and padding reuses it unchanged rather than growing a
+   * second implementation of the same arithmetic.
+   */
+  const cells = gridCells(
+    { rows: grid.rows, columns: grid.cols },
+    {
+      pageWidthMm: frame.width,
+      pageHeightMm: frame.height,
+      marginMm: panel?.type === 'panel' ? panel.paddingMm : 0,
+      gutterMm: grid.gutterMm,
+    },
+  );
+
+  children.forEach((child, index) => {
+    const cell = cells[index];
+    // More children than cells: the extras keep their size rather than being
+    // stacked at the origin, where they would be invisible under a tile.
+    if (cell) child.frame = { ...cell };
+  });
 }
 
 /**
@@ -671,6 +711,48 @@ export function addPanelWithImage(
     frame: { x: 0, y: 0, width: panel.frame.width, height: panel.frame.height },
   });
   return { panel, image };
+}
+
+/**
+ * One panel holding several images, tiled into a grid — a montage.
+ *
+ * Each tile stays its own `ImageNode`, so it keeps its own crop, scale bar and
+ * annotations, and `selectionTarget`'s double-click-to-enter already reaches
+ * one. Pooling them into a single image would throw all of that away.
+ *
+ * `aspectLock` is deliberately null: it is derived from a single image's ratio,
+ * and a montage of differently shaped micrographs has no one honest ratio. The
+ * tiles letterbox inside their own cells instead, which is where the
+ * `preserveAspect` rule already puts them.
+ */
+export function addPanelWithImages(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddPanelOptions & {
+    images: readonly Omit<AddImageOptions, 'parentId' | 'frame'>[];
+    gutterMm?: number;
+  },
+): { panel: PanelNode; images: ImageNode[] } {
+  const count = options.images.length;
+  const grid = suggestGrid(Math.max(1, count));
+
+  const panel = addPanel(draft, newId, { ...options, aspectLock: null });
+  if (count > 1) {
+    panel.contentGrid = { rows: grid.rows, cols: grid.columns, gutterMm: options.gutterMm ?? 1 };
+  }
+
+  const images = options.images.map((image) =>
+    addImage(draft, newId, {
+      ...image,
+      parentId: panel.id,
+      // Provisional: `fillPanelChildren` assigns the real cells immediately
+      // after, and every caller runs a layout before anything is drawn.
+      frame: { x: 0, y: 0, width: panel.frame.width, height: panel.frame.height },
+    }),
+  );
+
+  fillPanelChildren(draft, panel.id, panel.frame);
+  return { panel, images };
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,6 +1680,26 @@ export function setDatasetReading(
         }
       : d,
   );
+}
+
+/**
+ * Apply a cell-level edit to one dataset.
+ *
+ * The transforms themselves are pure and live in `data.ts`; this is the one
+ * place they are written back, so every grid edit is an ordinary commit and
+ * undo, redo, version history and the staleness warning all come free.
+ */
+export function editDataset(
+  draft: FigureDocument,
+  datasetId: DatasetId,
+  edit: (dataset: Dataset) => Dataset,
+): void {
+  const index = draft.datasets.findIndex((d) => d.id === datasetId);
+  if (index < 0) return;
+  const next = edit(draft.datasets[index]!);
+  const datasets = [...draft.datasets];
+  datasets[index] = next;
+  draft.datasets = datasets;
 }
 
 /**

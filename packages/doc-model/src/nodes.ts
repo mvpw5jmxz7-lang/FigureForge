@@ -85,6 +85,18 @@ export interface PanelNode extends NodeBase {
    * an equal grid. Optional: it post-dates SCHEMA_VERSION 1.
    */
   slot?: { row: number; col: number; rowSpan?: number; colSpan?: number } | null;
+  /**
+   * Tile this panel's content children into a grid instead of stacking them.
+   *
+   * Absent means the single-child rule every panel has always had: each plot or
+   * image fills the whole frame. That was not a rule so much as an assumption —
+   * two images in one panel came out perfectly coincident, with only the
+   * highest z visible — and it is what a montage needs replaced.
+   *
+   * Children take cells in `z` order, which is the order the Layers list shows
+   * and the order `reorderNode` already lets an author change.
+   */
+  contentGrid?: { rows: number; cols: number; gutterMm: number };
 }
 
 export type PlotType =

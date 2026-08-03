@@ -93,6 +93,13 @@ const panelSchema = z.object({
     })
     .nullable()
     .optional(),
+  contentGrid: z
+    .object({
+      rows: z.number().int().positive(),
+      cols: z.number().int().positive(),
+      gutterMm: finite.min(0),
+    })
+    .optional(),
 });
 
 const plotSchema = z.object({
@@ -271,6 +278,7 @@ const datasetSchema = z.object({
   columnGroups: z
     .array(z.object({ name: z.string(), from: z.number().int().min(0), to: z.number().int().min(0) }))
     .optional(),
+  editedAt: z.string().optional(),
   sourcePath: z.string().nullable(),
   sourceFilename: z.string().nullable(),
   importedAt: z.string(),

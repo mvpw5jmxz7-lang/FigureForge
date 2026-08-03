@@ -9,6 +9,12 @@ import {
   blocksOfSize,
   couldHaveRowNames,
   dataBlocks,
+  insertColumn,
+  insertRow,
+  pasteBlock,
+  removeColumn,
+  removeRow,
+  setCell,
   DocumentStore,
   editDocument,
   formatMm,
@@ -35,6 +41,7 @@ import {
   addGroup,
   addImage,
   addPanelWithImage,
+  addPanelWithImages,
   addPanelWithPlot,
   addScaleBar,
   addShape,
@@ -48,6 +55,7 @@ import {
   normaliseArrowFrame,
   normaliseCrop,
   nextPanelFrame,
+  editDataset,
   plotsUsingDataset,
   recordBracketOffset,
   relabelPanels,
@@ -1988,6 +1996,245 @@ describe('dataset removal', () => {
 
     expect(after.analyses.map((a) => a.id)).toEqual([kept.id]);
     expect(after.datasets.some((d) => d.id === 'spare')).toBe(false);
+  });
+});
+
+describe('panel tile grid', () => {
+  /** A panel holding `count` images, tiled if there is more than one. */
+  function montage(count: number) {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: count }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, {
+          id: assetId,
+          filename: `tile-${i}.png`,
+          mimeType: 'image/png',
+          byteLength: 10,
+          naturalPx: { width: 100, height: 100 },
+        });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+
+      addPanelWithImages(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 40 },
+        name: 'Montage',
+        images,
+        gutterMm: 2,
+      });
+    });
+
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tiles = Object.values(doc.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    return { doc, panel, tiles, newId };
+  }
+
+  it('tiles four images into a 2×2 grid that fills the panel', () => {
+    const { panel, tiles } = montage(4);
+    expect(panel.type === 'panel' && panel.contentGrid).toEqual({
+      rows: 2,
+      cols: 2,
+      gutterMm: 2,
+    });
+
+    // Four distinct cells — stacked at the origin is what happened before, and
+    // only the highest z was ever visible.
+    const boxes = tiles.map((t) => `${t.frame.x},${t.frame.y}`);
+    expect(new Set(boxes).size).toBe(4);
+
+    // Two columns of equal width, sharing the frame minus one gutter.
+    const [a, b] = tiles;
+    expect(a!.frame.width).toBeCloseTo(b!.frame.width, 6);
+    expect(a!.frame.width * 2 + 2).toBeCloseTo(60, 6);
+    expect(a!.frame.y).toBeCloseTo(b!.frame.y, 6);
+  });
+
+  it('re-tiles when the grid is changed, without touching the panel', () => {
+    const { doc, panel } = montage(4);
+
+    const relaid = editDocument(doc, (draft) => {
+      const target = draft.nodes[panel.id]!;
+      if (target.type === 'panel') target.contentGrid = { rows: 1, cols: 4, gutterMm: 2 };
+      resizePanel(draft, panel.id, target.frame);
+    });
+
+    const tiles = Object.values(relaid.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    // One row: every tile shares a y, and the widths sum with three gutters.
+    expect(new Set(tiles.map((t) => t.frame.y)).size).toBe(1);
+    expect(tiles[0]!.frame.width * 4 + 3 * 2).toBeCloseTo(60, 6);
+  });
+
+  it('leaves a single-child panel exactly as it was', () => {
+    /*
+     * The guarantee that makes the grid safe to add: every existing figure has
+     * one child per panel, and none of them may move. `contentGrid` is not even
+     * written for a single image, so an old document cannot acquire one.
+     */
+    const { panel, tiles } = montage(1);
+    expect(panel.type === 'panel' && panel.contentGrid).toBeUndefined();
+    expect(tiles[0]!.frame).toEqual({ x: 0, y: 0, width: 60, height: 40 });
+
+    // And a re-layout keeps it filling the panel rather than tiling it.
+    const { doc } = montage(1);
+    const target = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const relaid = editDocument(doc, (draft) =>
+      resizePanel(draft, target.id, { x: 0, y: 0, width: 80, height: 50 }),
+    );
+    const image = Object.values(relaid.nodes).find((n) => n.type === 'image')!;
+    expect(image.frame).toEqual({ x: 0, y: 0, width: 80, height: 50 });
+  });
+
+  it('keeps every tile its own node, so each carries its own crop', () => {
+    const { doc, tiles } = montage(3);
+    // Three image nodes, three assets — pooling them into one would throw away
+    // the per-tile crop, scale bar and annotations.
+    expect(tiles).toHaveLength(3);
+    expect(new Set(tiles.map((t) => t.type === 'image' && t.assetId)).size).toBe(3);
+    expect(checkReferentialIntegrity(doc)).toEqual([]);
+  });
+
+  it('leaves extra tiles alone rather than stacking them invisibly', () => {
+    const { doc, panel } = montage(4);
+    // A 1×2 grid has two cells for four tiles. The extras keep their size:
+    // moving them to the origin would hide them under a tile, which is the
+    // failure this whole feature exists to remove.
+    const relaid = editDocument(doc, (draft) => {
+      const target = draft.nodes[panel.id]!;
+      if (target.type === 'panel') target.contentGrid = { rows: 1, cols: 2, gutterMm: 2 };
+      resizePanel(draft, panel.id, target.frame);
+    });
+
+    const tiles = Object.values(relaid.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    expect(tiles[2]!.frame).not.toEqual(tiles[3]!.frame);
+  });
+});
+
+describe('dataset editing', () => {
+  const table = (): Dataset => dataset('Treatment,R1,R2,R3\nVehicle,10,11,12\nDrug,4,5,6');
+
+  it('re-types a column when an edit changes what it holds', () => {
+    // The layout is inferred from the column kinds, so an edit that retypes a
+    // column and leaves the kind behind produces a table whose declared shape
+    // no longer matches its contents.
+    const before = table();
+    expect(before.columns[1]!.kind).toBe('number');
+
+    const after = setCell(before, 0, 1, 'not measured');
+    expect(after.columns[1]!.kind).toBe('text');
+    expect(after.rows[0]![1]).toBe('not measured');
+    // …and back again when the mistake is corrected.
+    expect(setCell(after, 0, 1, '10').columns[1]!.kind).toBe('number');
+  });
+
+  it('parses an edited cell exactly as an import would', () => {
+    const edited = setCell(table(), 0, 1, ' 12.5 ');
+    expect(edited.rows[0]![1]).toBe(12.5);
+    // The importer's blanks, so a cleared cell is missing data and not "NA".
+    expect(setCell(table(), 0, 1, 'NA').rows[0]![1]).toBeNull();
+  });
+
+  it('adds and removes rows without disturbing the rest', () => {
+    const grown = insertRow(table(), 1);
+    expect(grown.rows).toHaveLength(3);
+    expect(grown.rows[1]).toEqual([null, null, null, null]);
+    expect(grown.rows[2]![0]).toBe('Drug');
+
+    const shrunk = removeRow(grown, 1);
+    expect(shrunk.rows.map((r) => r[0])).toEqual(['Vehicle', 'Drug']);
+  });
+
+  it('shifts the group blocks when a column is inserted or removed', () => {
+    /*
+     * The blocks are column *indices*. Left alone, every one after an insertion
+     * repoints at its neighbour — a group quietly acquires a column belonging
+     * to the next group and its mean changes with nothing on screen saying so.
+     */
+    const ds: Dataset = {
+      ...dataset('Variant,A1,A2,B1,B2\nWT,1,2,3,4'),
+      format: 'grouped-replicates',
+      columnGroups: [
+        { name: 'Group A', from: 1, to: 2 },
+        { name: 'Group B', from: 3, to: 4 },
+      ],
+    };
+
+    const inserted = insertColumn(ds, 3);
+    expect(inserted.columnGroups).toEqual([
+      { name: 'Group A', from: 1, to: 2 },
+      { name: 'Group B', from: 4, to: 5 },
+    ]);
+
+    const removed = removeColumn(ds, 1);
+    expect(removed.columnGroups).toEqual([
+      // Group A lost one of its two columns…
+      { name: 'Group A', from: 1, to: 1 },
+      { name: 'Group B', from: 2, to: 3 },
+    ]);
+    expect(removed.columns.map((c) => c.name)).toEqual(['Variant', 'A2', 'B1', 'B2']);
+  });
+
+  it('drops a block whose every column has gone', () => {
+    const ds: Dataset = {
+      ...dataset('Variant,A1,B1\nWT,1,2'),
+      format: 'grouped-replicates',
+      columnGroups: [
+        { name: 'Group A', from: 1, to: 1 },
+        { name: 'Group B', from: 2, to: 2 },
+      ],
+    };
+    // An empty group is not a group.
+    expect(removeColumn(ds, 1).columnGroups).toEqual([{ name: 'Group B', from: 1, to: 1 }]);
+  });
+
+  it('pastes a block from Excel, growing the table to fit', () => {
+    // An Excel paste is tab-delimited, and its first row must not be eaten as a
+    // header — a paste that silently lost a row ends up in a figure.
+    const pasted = pasteBlock(table(), 1, 1, '100\t200\t300\n400\t500\t600');
+    expect(pasted.rows).toHaveLength(3);
+    expect(pasted.rows[1]).toEqual(['Drug', 100, 200, 300]);
+    expect(pasted.rows[2]).toEqual([null, 400, 500, 600]);
+    // The untouched row is exactly as it was.
+    expect(pasted.rows[0]).toEqual(['Vehicle', 10, 11, 12]);
+  });
+
+  it('marks the dataset edited, which is what makes an analysis go stale', () => {
+    const before = table();
+    expect(before.editedAt).toBeUndefined();
+
+    const after = setCell(before, 0, 1, '99');
+    expect(after.editedAt).toBeDefined();
+    // The hash reads the rows, so the staleness warning fires without any
+    // further plumbing.
+    const options = { test: 'ttest-welch' as const, correction: 'none' as const };
+    expect(analysisInputHash(options, toSeries(after).map((s) => s.values))).not.toBe(
+      analysisInputHash(options, toSeries(before).map((s) => s.values)),
+    );
+  });
+
+  it('writes edits back through one commit, so undo covers them', () => {
+    const { doc } = sampleDocument();
+    const datasetId = doc.datasets[0]!.id;
+
+    const after = editDocument(doc, (draft) =>
+      editDataset(draft, datasetId, (ds) => setCell(ds, 0, 1, '99')),
+    );
+
+    expect(after.datasets[0]!.rows[0]![1]).toBe(99);
+    // The original is untouched — the transforms are pure.
+    expect(doc.datasets[0]!.rows[0]![1]).not.toBe(99);
   });
 });
 
