@@ -209,6 +209,20 @@ export interface PlotNode extends NodeBase {
   errorBarDirection?: 'both' | 'up';
   /** Replicate marker shape. Circles unless asked otherwise. */
   pointShape?: PointShape;
+  /**
+   * Marker shape per series, overriding `pointShape` for the ones it names.
+   *
+   * Indexed by series *order*, the same key `seriesAxis` and the palette array
+   * use — so it needs no names and cannot go stale when a series is renamed. A
+   * missing or empty entry falls back to `pointShape`, which keeps a plot that
+   * sets only the plot-wide shape rendering exactly as it did.
+   *
+   * Distinct symbols are what carries the series identity when colour cannot:
+   * in greyscale print, and for a reader with a colour-vision deficiency. That
+   * makes this redundant encoding rather than decoration, which is why the
+   * legend draws the shape rather than a plain swatch once it is set.
+   */
+  pointShapes?: readonly (PointShape | null)[];
   /** Marker interior. Unset keeps the series/foreground rule in the renderer. */
   pointFill?: string;
   /** Marker outline. Unset draws no outline, as before. */

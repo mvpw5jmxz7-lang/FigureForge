@@ -24,6 +24,7 @@ import { NATURE_THEME } from '@figureforge/theme';
 import { renderDocument } from './render-document.js';
 import { measurePlot } from './render-document.js';
 import { collectByRole } from './scene.js';
+import { toSvgString } from './svg-string.js';
 
 /** Two numeric columns → `simple-xy`, the format that carries paired x values. */
 const XY = `Dose,Response
@@ -237,6 +238,76 @@ describe('independent xy pairs', () => {
     // Excel's lineMarker, and what `showPoints` already defaults to: 18 points
     // over three lines. A bare line hides how many observations there were.
     expect(collectByRole(scene(makeDocument(XY_PAIRS, 'line')), 'point')).toHaveLength(18);
+  });
+
+  it('gives each series its own marker shape when asked', () => {
+    /*
+     * Redundant encoding: colour alone is lost in greyscale print and to a
+     * reader with a colour-vision deficiency, so the symbol has to carry the
+     * series identity too.
+     */
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShapes: ['circle', 'square', 'triangle'],
+    });
+    const points = collectByRole(scene(doc), 'point');
+    expect(points).toHaveLength(18);
+
+    // Six of each: a circle, a rect, and a triangle path with three vertices.
+    expect(points.filter((n) => n.tag === 'circle')).toHaveLength(6);
+    expect(points.filter((n) => n.tag === 'rect')).toHaveLength(6);
+    const triangles = points.filter(
+      (n) => n.tag === 'path' && String(n.attrs?.['d']).match(/[ML]/g)?.length === 3,
+    );
+    expect(triangles).toHaveLength(6);
+  });
+
+  it('falls back to the plot-wide shape for a series that names none', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShape: 'diamond',
+      pointShapes: ['square', null, null],
+    });
+    const points = collectByRole(scene(doc), 'point');
+    expect(points.filter((n) => n.tag === 'rect')).toHaveLength(6);
+    // The other two series take the diamond: four vertices, not three.
+    const diamonds = points.filter(
+      (n) => n.tag === 'path' && String(n.attrs?.['d']).match(/[ML]/g)?.length === 4,
+    );
+    expect(diamonds).toHaveLength(12);
+  });
+
+  it('draws the legend key as the symbol it stands for', () => {
+    // Four identical blocks beside three different symbols withholds exactly
+    // the mapping a reader needs.
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShapes: ['circle', 'square', 'triangle'],
+    });
+    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
+    expect(swatches.map((n) => n.tag)).toEqual(['circle', 'rect', 'path']);
+  });
+
+  it('draws a marker key for a series that named no shape of its own', () => {
+    /*
+     * The common case, and the one a real browser caught: an author sets shapes
+     * on the series they want to distinguish and leaves the first alone. A key
+     * of one block beside two symbols is worse than no key — so once *any*
+     * series carries a shape, every entry draws the marker it stands for.
+     */
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShapes: [null, 'square', 'triangle'],
+    });
+    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
+    expect(swatches.map((n) => n.tag)).toEqual(['circle', 'rect', 'path']);
+  });
+
+  it('leaves the legend key a plain block when no series names a shape', () => {
+    // The property every optional field holds: a figure drawn before it existed
+    // renders exactly as it did.
+    const plain = toSvgString(scene(makeDocument(XY_PAIRS, 'line')));
+    const empty = toSvgString(
+      scene(makeDocument(XY_PAIRS, 'line', 80, { pointShapes: [null, null, null] })),
+    );
+    expect(empty).toBe(plain);
+    expect(plain).toContain('<rect');
   });
 
   it('names the three runs in a legend', () => {

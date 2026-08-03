@@ -373,6 +373,30 @@ function PlotFields({
     setPlot('Change series colour', { palette: next });
   };
 
+  /*
+   * Per-series marker shapes, indexed by series order — the same key the
+   * palette above uses. Written as a full-length array with `null` for the
+   * series that follow the plot-wide shape, so an index is never a hole and
+   * setting series 3 cannot leave 1 and 2 undefined.
+   */
+  const setSeriesShape = (index: number, shape: PointShape | null): void => {
+    const next: (PointShape | null)[] = series.map((_, i) => node.pointShapes?.[i] ?? null);
+    next[index] = shape;
+    // All following the plot-wide shape is the same as not saying anything, and
+    // storing that would leave the field set on every figure that touched it.
+    setPlot('Change series marker', {
+      pointShapes: next.every((s) => s === null) ? undefined : next,
+    });
+  };
+
+  /*
+   * Distinct symbols carry the series identity where colour cannot, so they are
+   * offered wherever several series share one plot area and are told apart by a
+   * legend. On a categorical plot each series has its own band and the axis
+   * already names it.
+   */
+  const perSeriesShapes = CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && series.length > 1;
+
   return (
     <>
       <h4>Data</h4>
@@ -418,7 +442,7 @@ function PlotFields({
 
       {/* Keyed by index, not name: a paired-xy dataset legitimately repeats a
           column name, and a duplicate React key drops one of the swatches. */}
-      <div className="swatches">
+      <div className={perSeriesShapes ? 'swatches with-shapes' : 'swatches'}>
         {series.map((s, index) => (
           <label className="swatch" key={index} title={s.name}>
             <input
@@ -427,9 +451,32 @@ function PlotFields({
               onChange={(e) => setSeriesColor(index, e.target.value)}
             />
             <span>{s.name}</span>
+            {perSeriesShapes && (
+              <select
+                value={node.pointShapes?.[index] ?? ''}
+                title={`Marker for ${s.name}`}
+                onChange={(e) =>
+                  setSeriesShape(index, e.target.value === '' ? null : (e.target.value as PointShape))
+                }
+              >
+                <option value="">Default</option>
+                {POINT_SHAPES.map((shape) => (
+                  <option key={shape} value={shape}>
+                    {shape[0]!.toUpperCase() + shape.slice(1)}
+                  </option>
+                ))}
+              </select>
+            )}
           </label>
         ))}
       </div>
+      {perSeriesShapes && (
+        <p className="hint">
+          A different symbol per series is what tells them apart in greyscale, and for a
+          reader who cannot separate the colours. Once any series is given one, the legend
+          draws every series' own symbol. “Default” follows the Marker setting below.
+        </p>
+      )}
 
       {typeof node.palette !== 'string' && (
         <button onClick={() => setPlot('Reset palette', { palette: theme.paletteId })}>
