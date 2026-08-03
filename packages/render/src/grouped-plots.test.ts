@@ -306,6 +306,134 @@ describe('error bands', () => {
   });
 });
 
+describe('error bars at each point', () => {
+  /*
+   * The Inspector offered "Bars at each point" for a release and nothing drew
+   * one: only `errorDisplay: 'band'` engaged the summary, so choosing bars gave
+   * a line zig-zagging through every replicate with no interval anywhere.
+   */
+  it('draws a capped bar per timepoint instead of a filled polygon', () => {
+    const doc = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorDisplay: 'bars',
+      errorBars: 'sd',
+    });
+    const bars = collectByRole(scene(doc), 'error-bar');
+
+    // Three timepoints x two groups, each its own node — not one polygon each.
+    expect(bars).toHaveLength(6);
+    for (const bar of bars) {
+      expect(bar.attrs?.['fill']).toBe('none');
+      // Two caps and a stem: three subpaths, and no polygon close.
+      const d = String(bar.attrs?.['d']);
+      expect(d.match(/M/g)).toHaveLength(3);
+      expect(d).not.toContain('Z');
+    }
+  });
+
+  it('keys the bars to their series rather than drawing them all black', () => {
+    // No bar sits underneath to say which group a whisker belongs to, which is
+    // what lets the categorical path use the foreground colour.
+    const doc = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorDisplay: 'bars',
+      errorBars: 'sd',
+    });
+    const colors = new Set(
+      collectByRole(scene(doc), 'error-bar').map((n) => String(n.attrs?.['stroke'])),
+    );
+    expect(colors.size).toBe(2);
+    expect(colors.has(NATURE_THEME.foreground)).toBe(false);
+  });
+
+  it('still summarises when no display was ever chosen', () => {
+    /*
+     * `addPlot` sets `'band'` when it builds this plot, so the field is cleared
+     * here to model a document that predates it. `node.errorDisplay ?? 'bars'`
+     * is what the Inspector shows for such a plot, so bars are what it must draw
+     * — before this it drew nothing and ran the line through every replicate.
+     */
+    const doc = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorBars: 'sd',
+      errorDisplay: undefined,
+    });
+    const s = scene(doc);
+
+    expect(collectByRole(s, 'error-bar')).toHaveLength(6);
+    // The means, not the replicates: three vertices, not nine.
+    const vertices = String(collectByRole(s, 'line')[0]?.attrs?.['d']).split(/[ML]/).filter(Boolean);
+    expect(vertices).toHaveLength(3);
+  });
+
+  it('moves nothing on a table with one y per x', () => {
+    /*
+     * The safety argument for summarising an unset plot: `summariseAtX` returns
+     * the series untouched unless some x carries more than one value, so an
+     * ordinary shared-x table renders identically however the field is set.
+     */
+    const table = 'Time,WT,KO\n0,10,1\n1,20,2\n2,30,3';
+    const unset = toSvgString(scene(makeDocument(table, { plotType: 'line', errorBars: 'sd' })));
+    const bars = toSvgString(
+      scene(makeDocument(table, { plotType: 'line', errorBars: 'sd', errorDisplay: 'bars' })),
+    );
+    const band = toSvgString(
+      scene(makeDocument(table, { plotType: 'line', errorBars: 'sd', errorDisplay: 'band' })),
+    );
+
+    expect(bars).toBe(unset);
+    expect(band).toBe(unset);
+    expect(unset).not.toContain('role="error-bar"');
+  });
+});
+
+describe('showing every replicate', () => {
+  it('draws the individual measurements behind the means', () => {
+    const means = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorDisplay: 'band',
+      errorBars: 'sd',
+    });
+    const all = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorDisplay: 'band',
+      errorBars: 'sd',
+      showReplicates: true,
+    });
+
+    // Three means per group; with the replicates, those plus all eighteen.
+    expect(collectByRole(scene(means), 'point')).toHaveLength(6);
+    expect(collectByRole(scene(all), 'point')).toHaveLength(24);
+  });
+
+  it('draws them smaller and part-transparent, so the means still read', () => {
+    const doc = makeDocument(XY_REPLICATES, {
+      plotType: 'line',
+      errorDisplay: 'band',
+      errorBars: 'sd',
+      showReplicates: true,
+    });
+    const radii = collectByRole(scene(doc), 'point').map((n) => Number(n.attrs?.['r']));
+    const small = Math.min(...radii);
+    const full = Math.max(...radii);
+    expect(small).toBeLessThan(full);
+
+    const faded = collectByRole(scene(doc), 'point').filter(
+      (n) => n.attrs?.['fill-opacity'] === 0.45,
+    );
+    expect(faded).toHaveLength(18);
+  });
+
+  it('is byte-identical to before the field existed when it is absent', () => {
+    // The property every optional field has to hold, or a saved document
+    // re-draws itself the moment it is opened.
+    const patch = { plotType: 'line', errorDisplay: 'band', errorBars: 'sd' } as const;
+    expect(toSvgString(scene(makeDocument(XY_REPLICATES, { ...patch, showReplicates: false })))).toBe(
+      toSvgString(scene(makeDocument(XY_REPLICATES, patch))),
+    );
+  });
+});
+
 describe('single-factor output is unchanged', () => {
   it('renders a replicate table byte for byte as before', () => {
     /*

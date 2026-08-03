@@ -727,12 +727,23 @@ function continuousGeometry(
       pointSizeMm: node.pointSizeMm,
       colors,
       /*
-       * Replicates collapse to a centre and an interval only on a line plot
-       * asking for a band. A scatter is the raw observations by definition, so
-       * summarising one would hide the very thing it is drawn to show.
+       * Replicates collapse to a centre and an interval on any line plot that
+       * asks for an error interval — as bars or as a band. A scatter is the raw
+       * observations by definition, so summarising one would hide the very thing
+       * it is drawn to show.
+       *
+       * An *absent* `errorDisplay` summarises too, because "Bars at each point"
+       * is what the Inspector has been showing for such a plot all along
+       * (`node.errorDisplay ?? 'bars'`) while nothing drew one. That widening
+       * cannot disturb an existing figure: `summariseAtX` returns the series
+       * untouched unless some x actually carries more than one value, and only
+       * the replicate layouts do.
        */
-      ...(node.plotType === 'line' && node.errorDisplay === 'band' && node.errorBars !== 'none'
-        ? { summariseAtX: { center: node.center, errorBars: node.errorBars } }
+      ...(node.plotType === 'line' && node.errorBars !== 'none'
+        ? {
+            summariseAtX: { center: node.center, errorBars: node.errorBars },
+            ...(node.showReplicates ? { showReplicates: true } : {}),
+          }
         : {}),
     }),
     bins: [],
@@ -1392,9 +1403,19 @@ function markerNode(
   theme: Theme,
   cx: number,
   cy: number,
-  style: { fill: string; fillOpacity?: number; forceStroke?: { color: string; widthMm: number } },
+  style: {
+    fill: string;
+    fillOpacity?: number;
+    forceStroke?: { color: string; widthMm: number };
+    /**
+     * Override the plot's point size — for replicates drawn behind their own
+     * mean. Absent is `node.pointSizeMm`, so every existing call is unchanged,
+     * and the radius stays the one input every shape is area-matched from.
+     */
+    sizeMm?: number;
+  },
 ): SceneNode {
-  const r = node.pointSizeMm / 2;
+  const r = (style.sizeMm ?? node.pointSizeMm) / 2;
   const stroke = style.forceStroke ?? node.pointStroke;
   const strokeAttrs = stroke
     ? { stroke: stroke.color, 'stroke-width': stroke.widthMm }
@@ -1472,14 +1493,20 @@ function renderContinuousMarks(
     const markChildren: SceneNode[] = [];
 
     /*
-     * The error band, first, so the line and its points sit on top of it.
+     * The error interval, first, so the line and its points sit on top of it.
      *
-     * Drawn as one closed polygon — up the upper edge and back along the lower
-     * — rather than as a ribbon per segment: two adjacent translucent shapes
-     * would double their alpha where they meet and print as a seam at every
-     * timepoint.
+     * Band and bars are two drawings of the same numbers — `XySeriesMarks.band`
+     * holds the interval edges precisely so the renderer decides how to close
+     * them. Only `'band'` fills; anything else, including an absent setting,
+     * draws capped bars, which is what the Inspector has always said it would.
      */
-    if (s.band && s.band.length > 1) {
+    if (s.band && s.band.length > 1 && node.errorDisplay === 'band') {
+      /*
+       * One closed polygon — up the upper edge and back along the lower —
+       * rather than a ribbon per segment: two adjacent translucent shapes would
+       * double their alpha where they meet and print as a seam at every
+       * timepoint.
+       */
       const upper = s.band.map(
         (p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.highY)}`,
       );
@@ -1493,6 +1520,47 @@ function renderContinuousMarks(
           'fill-opacity': 0.25,
           stroke: 'none',
         }, undefined, { role: 'error-bar' }),
+      );
+    } else if (s.band && s.band.length > 0) {
+      const cap = s.capHalfWidthMm;
+      for (const p of s.band) {
+        markChildren.push(
+          el('path', {
+            d:
+              `M${round(p.x - cap)} ${round(p.highY)} L${round(p.x + cap)} ${round(p.highY)} ` +
+              `M${round(p.x)} ${round(p.highY)} L${round(p.x)} ${round(p.lowY)} ` +
+              `M${round(p.x - cap)} ${round(p.lowY)} L${round(p.x + cap)} ${round(p.lowY)}`,
+            fill: 'none',
+            /*
+             * The series colour, not `theme.foreground`. On a bar chart the bar
+             * underneath says which group a black whisker belongs to; here
+             * several series share the plot area with nothing behind them, so
+             * identical black bars would not say whose spread they are.
+             *
+             * `errorBarDirection: 'up'` is ignored for the reason already
+             * recorded on the field: with no bar to hide the lower half behind,
+             * half a whisker is just missing data.
+             */
+            stroke: s.color,
+            'stroke-width': theme.stroke.errorBarMm,
+            'stroke-linecap': 'butt',
+          }, undefined, { role: 'error-bar' }),
+        );
+      }
+    }
+
+    /*
+     * Every replicate, over the band rather than under it — at 0.25 alpha the
+     * fill washes out anything drawn beneath — and under the line and the means,
+     * which carry the reading. Smaller and part-transparent for the same reason.
+     */
+    for (const point of s.replicatePoints) {
+      markChildren.push(
+        markerNode(node, theme, point.x, point.y, {
+          fill: s.color,
+          fillOpacity: 0.45,
+          sizeMm: node.pointSizeMm * 0.6,
+        }),
       );
     }
 

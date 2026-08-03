@@ -291,6 +291,47 @@ export function columnGroupsFromHeader(header: readonly string[], width: number)
 }
 
 /**
+ * Column blocks from a *single* header row whose group titles were merged cells.
+ *
+ * A spreadsheet can declare its blocks in one row rather than two: Excel merges
+ * `B1:D1` into "Control" and `E1:G1` into "Treated", and a copy of that table
+ * arrives as `Hours\tControl\t\t\tTreated\t\t`. That is the same declaration
+ * `columnGroupsFromHeader` already reads from a two-row Prism header — the only
+ * difference being that here the x column's own title shares the row with the
+ * group titles, instead of sitting in a second row beneath them.
+ *
+ * Which is why this cannot simply call that function: `Hours` at index 0 would
+ * become a block of its own, and `inferFormat` reads a block starting at column
+ * 0 as Prism's Nested layout.
+ *
+ * So the reading is *offered only for the shape it describes* — a table of equal
+ * replicate blocks, which is the one thing Prism's `replicatesCount` can mean:
+ *
+ * - at most one leading single-column block, the x or row-label column;
+ * - every block after it the same width, of at least two columns;
+ * - at least one such block.
+ *
+ * Anything else returns nothing and the table parses exactly as it did before.
+ * The guards are load-bearing rather than defensive: without the equal-width
+ * test a stray trailing delimiter (`A,B,C,` parses four columns wide) declares
+ * `C` a two-column group, and without the leading-singleton limit any partly
+ * filled header row starts inventing blocks. A header that names every column is
+ * not sparse, produces nothing here, and so cannot change meaning.
+ */
+export function mergedHeaderGroups(header: readonly string[], width: number): ColumnGroup[] {
+  const all = columnGroupsFromHeader(header, width);
+
+  const leading = all.findIndex((g) => g.to > g.from);
+  if (leading < 0 || leading > 1) return [];
+
+  const blocks = all.slice(leading);
+  const size = blocks[0]!.to - blocks[0]!.from + 1;
+  if (blocks.some((g) => g.to - g.from + 1 !== size)) return [];
+
+  return blocks;
+}
+
+/**
  * Parse delimited text into a table. Used for CSV/TSV/TXT files and for
  * clipboard pastes out of Excel (which are tab-delimited).
  *
@@ -344,7 +385,17 @@ export function parseDelimited(
    */
   const groupRow = headerRows >= 2 ? cells[headerRows - 2]! : [];
   const headerNames = headerRows >= 1 ? cells[headerRows - 1]! : [];
-  const columnGroups = headerRows >= 2 ? columnGroupsFromHeader(groupRow, width) : [];
+  /*
+   * With one header row the blocks can still be declared, by merged cells — see
+   * `mergedHeaderGroups`, which refuses every shape but the replicate table this
+   * reading exists for.
+   */
+  const columnGroups =
+    headerRows >= 2
+      ? columnGroupsFromHeader(groupRow, width)
+      : headerRows === 1
+        ? mergedHeaderGroups(headerNames, width)
+        : [];
 
   const bodyRows = cells.slice(headerRows).map((row) => {
     const padded: CellValue[] = [];
@@ -755,6 +806,27 @@ export function toSeries(ds: Dataset): Series[] {
       return [{ name, ...numericPairsAt(ds, first, first + 1) }];
     }
   }
+}
+
+/**
+ * Whether any series measures the same x more than once.
+ *
+ * The question that decides whether a centre and an error interval mean
+ * anything on a continuous plot: with one y per x there is nothing to summarise
+ * and the interval would be a zero-width hairline asserting a precision the data
+ * never had. Asked of the *series* rather than of the format, so a table that
+ * carries repeats without declaring itself a replicate layout is read honestly.
+ *
+ * The renderer makes the same decision again, downstream and on scaled
+ * positions, because by then a broken axis may have removed points this cannot
+ * know about. This one exists to decide what the Inspector *offers*.
+ */
+export function hasReplicatesAtX(ds: Dataset): boolean {
+  return toSeries(ds).some((s) => {
+    if (!s.x) return false;
+    const seen = new Set<number>();
+    return s.x.some((v) => (seen.has(v) ? true : (seen.add(v), false)));
+  });
 }
 
 /**

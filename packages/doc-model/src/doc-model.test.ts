@@ -21,6 +21,7 @@ import {
   hashInputs,
   contingencyCategories,
   inferFormat,
+  mergedHeaderGroups,
   isContingency,
   loadArchive,
   mmToPt,
@@ -261,6 +262,22 @@ const XY_PAIRS_PASTE = [
   '6\t0.7\t6.1\t0.9\t6.1\t1.1',
 ].join('\n');
 
+/**
+ * The columns of `TestFiles/test2 data table.xlsx` — the same table
+ * `TestFiles/test graphs.prism` holds as `y_replicates` with
+ * `replicatesCount: 3`. Its group titles are *merged cells*, so a copy carries
+ * one header row with the names spread across their blocks.
+ */
+const XY_REPLICATES_PASTE = [
+  'Hours\tControl\t\t\tTreated\t\t',
+  '0\t45\t34\t20\t34\t31\t29',
+  '6\t56\t58\t61\t41\t43\t42',
+  '12\t76\t72\t77\t52\t55\t55',
+  '24\t81\t95\t83\t63\t63\t80',
+  '48\t99\t100\t104\t72\t67\t81',
+  '72\t97\t110\t115\t78\t87\t60',
+].join('\n');
+
 function dataset(text: string, id = 'd1'): Dataset {
   const parsed = parseDelimited(text);
   return {
@@ -406,6 +423,63 @@ describe('series extraction', () => {
     expect(plain.headerRows).toBe(1);
     expect(plain.columnGroups).toEqual([]);
     expect(inferFormat(plain.columns, { columnGroups: plain.columnGroups })).toBe('replicate');
+  });
+
+  it('reads a single merged header row as group blocks', () => {
+    /*
+     * `TestFiles/test2 data table.xlsx`, tab-delimited as an Excel copy puts it
+     * on the clipboard: `A1 = Hours`, `B1:D1` merged to "Control", `E1:G1` to
+     * "Treated". Read without the blocks it infers as `prism` — six lines, four
+     * of them named after placeholder column letters.
+     */
+    const table = parseDelimited(XY_REPLICATES_PASTE);
+
+    expect(table.headerRows).toBe(1);
+    expect(table.columnGroups).toEqual([
+      { name: 'Control', from: 1, to: 3 },
+      { name: 'Treated', from: 4, to: 6 },
+    ]);
+
+    const format = inferFormat(table.columns, { columnGroups: table.columnGroups });
+    expect(format).toBe('xy-replicates');
+
+    const series = toSeries({
+      ...dataset('placeholder,1\n'),
+      format,
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    });
+    expect(series.map((s) => s.name)).toEqual(['Control', 'Treated']);
+    // Six timepoints x three replicates, each replicate against its own x.
+    expect(series[0]!.values).toHaveLength(18);
+    expect(series[0]!.x?.slice(0, 6)).toEqual([0, 0, 0, 6, 6, 6]);
+  });
+
+  it('refuses every single-row shape that is not a replicate table', () => {
+    // Names every column: an ordinary header, declaring nothing.
+    expect(mergedHeaderGroups(['A', 'B', 'C', 'D'], 4)).toEqual([]);
+    /*
+     * A trailing delimiter parses the table one column wider than the header
+     * names it. Without the equal-width test that reads as "C spans two
+     * columns", and a stray comma would silently restructure the file.
+     */
+    expect(mergedHeaderGroups(['A', 'B', 'C', ''], 4)).toEqual([]);
+    // Unequal blocks are not a replicate count; Prism's is a single number.
+    expect(mergedHeaderGroups(['X', 'A', '', '', 'B', ''], 6)).toEqual([]);
+    // Two ungrouped leading columns: past the x column the row is partly
+    // filled rather than merged, which says nothing about blocking.
+    expect(mergedHeaderGroups(['X', 'Y', 'A', '', 'B', ''], 6)).toEqual([]);
+  });
+
+  it('reads a merged row with no leading column as nested blocks', () => {
+    // Prism's Nested has no x or row-label column, so the blocks start at 0 —
+    // the case the leading-singleton allowance must not require.
+    const groups = mergedHeaderGroups(['Control', '', '', 'Treated', '', ''], 6);
+    expect(groups).toEqual([
+      { name: 'Control', from: 0, to: 2 },
+      { name: 'Treated', from: 3, to: 5 },
+    ]);
   });
 
   it('reads Prism’s Grouped table as a value per row and group', () => {

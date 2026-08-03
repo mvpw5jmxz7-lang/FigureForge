@@ -133,6 +133,17 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
   },
 ];
 
+/**
+ * Layouts where a column block is a set of *replicates of one series*, rather
+ * than a group of separate measurements. Only the wording of the count control
+ * differs — "columns per group" says nothing to an author looking at a
+ * timecourse whose three columns are three repeats of the same condition.
+ */
+const XY_REPLICATE_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
+  'prism',
+  'xy-replicates',
+]);
+
 export interface SidePanelProps {
   api: DocumentApi;
   theme: Theme;
@@ -566,14 +577,20 @@ function DataTab({
             </div>
           )}
 
-          {/* Column blocks: read from a second header row when the file has
-              one, settable when it does not. Nothing infers a split — six
-              columns are as plausibly six groups of one as two of three, and a
-              wrong guess averages the wrong numbers into a plausible mean. */}
-          {GROUPED_FORMATS.has(preview.format) && (
+          {/* Column blocks: read from the header when the file declares them,
+              settable when it does not. Nothing infers a split — six columns
+              are as plausibly six groups of one as two of three, and a wrong
+              guess averages the wrong numbers into a plausible mean.
+
+              Offered on `prism` too, where it is the *only* way to say that the
+              y columns are replicates of one series rather than series of their
+              own; a count of 2 or more reads the table as XY + replicates. */}
+          {(GROUPED_FORMATS.has(preview.format) || preview.format === 'prism') && (
             <div className="field-row">
               <label className="field">
-                Columns per group
+                {XY_REPLICATE_FORMATS.has(preview.format)
+                  ? 'Replicate y columns per series'
+                  : 'Columns per group'}
                 <input
                   type="number"
                   min={0}
@@ -587,7 +604,9 @@ function DataTab({
                   ? `${dataBlocks(preview).length} groups`
                   : preview.columnGroups && preview.columnGroups.length > 0
                     ? `from the header: ${preview.columnGroups.map((g) => g.name).join(', ')}`
-                    : '0 = one group; set it if the file has no group header row'}
+                    : preview.format === 'prism'
+                      ? '0 = every y column is its own series'
+                      : '0 = one group; set it if the file has no group header row'}
               </span>
             </div>
           )}

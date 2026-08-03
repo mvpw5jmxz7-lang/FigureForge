@@ -18,6 +18,7 @@ import {
   findAsset,
   findDataset,
   formatMm,
+  hasReplicatesAtX,
   normaliseArrowFrame,
   resizePanel,
   resyncScaleBars,
@@ -346,6 +347,18 @@ function PlotFields({
   const colors = paletteColors(node.palette, Math.max(1, series.length));
   const { offered, reason } = typesFor(series);
 
+  /*
+   * Whether a continuous plot has anything to summarise.
+   *
+   * A line over replicates at each x is exactly that, and the controls for it
+   * used to sit behind a branch a continuous plot could never enter — so
+   * `errorDisplay` shipped in the Inspector with no way to reach it. A scatter
+   * is excluded on purpose: it is its raw observations by definition, which is
+   * the same stance the renderer takes.
+   */
+  const summarisable =
+    node.plotType === 'line' && dataset !== undefined && hasReplicatesAtX(dataset);
+
   // Warn as colours are picked rather than at export: a pair that collides
   // under colour-vision deficiency is far cheaper to fix now.
   const conflicts = findColorConflicts(colors);
@@ -470,10 +483,12 @@ function PlotFields({
           A {node.plotType} already shows the full distribution, so the centre and error
           bars are not drawn. Switch to a bar or dot plot to set them.
         </p>
-      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) ? (
+      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && !summarisable ? (
         <p className="hint">
-          A {node.plotType} plots every observation against a numeric x axis, so there is
-          no group to summarise with a centre or error bar.
+          A {node.plotType} plots every observation against a numeric x axis.{' '}
+          {node.plotType === 'line'
+            ? 'This table measures each x once, so there is no spread at a point to summarise.'
+            : 'It shows the raw observations, so there is no group to summarise with a centre or error bar.'}
         </p>
       ) : (
         <>
@@ -506,25 +521,31 @@ function PlotFields({
             </select>
           </label>
 
-          <label className="field block">
-            Error bar direction
-            <select
-              value={node.errorBarDirection ?? 'both'}
-              onChange={(e) =>
-                setPlot('Change error bar direction', {
-                  errorBarDirection: e.target.value as 'both' | 'up',
-                })
-              }
-            >
-              <option value="both">Both directions</option>
-              <option value="up">Upper half only (bar convention)</option>
-            </select>
-          </label>
-          {node.errorBarDirection === 'up' && (
-            <p className="hint">
-              Only the upper half is drawn, so the figure shows half the spread that was
-              measured. Conventional on bar charts, but state it in the legend.
-            </p>
+          {/* A bar convention, and ignored where there is no bar to hide the
+              lower half behind — half a whisker there is just missing data. */}
+          {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && (
+            <>
+              <label className="field block">
+                Error bar direction
+                <select
+                  value={node.errorBarDirection ?? 'both'}
+                  onChange={(e) =>
+                    setPlot('Change error bar direction', {
+                      errorBarDirection: e.target.value as 'both' | 'up',
+                    })
+                  }
+                >
+                  <option value="both">Both directions</option>
+                  <option value="up">Upper half only (bar convention)</option>
+                </select>
+              </label>
+              {node.errorBarDirection === 'up' && (
+                <p className="hint">
+                  Only the upper half is drawn, so the figure shows half the spread that was
+                  measured. Conventional on bar charts, but state it in the legend.
+                </p>
+              )}
+            </>
           )}
 
           {node.plotType === 'line' && (
@@ -543,10 +564,21 @@ function PlotFields({
                   <option value="band">Shaded band</option>
                 </select>
               </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={node.showReplicates ?? false}
+                  onChange={(e) =>
+                    setPlot('Toggle replicates', { showReplicates: e.target.checked })
+                  }
+                />
+                Show every replicate
+              </label>
               <p className="hint">
-                A band needs several y values at each x to compute an interval from — a table
-                with replicate columns per group. With one value per x there is no interval,
-                so the band is withheld rather than drawn as a hairline.
+                Either display needs several y values at each x to compute an interval from — a
+                table with replicate columns per series. With one value per x there is no
+                interval, so nothing is drawn rather than a hairline. Showing every replicate
+                draws the individual measurements behind the means.
               </p>
             </>
           )}
