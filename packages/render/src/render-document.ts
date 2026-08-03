@@ -41,6 +41,7 @@ import {
   histogramBins,
   histogramMarks,
   makeBandScale,
+  makeGroupedBandScale,
   makeScale,
   resolveDomain,
   tickCountForLength,
@@ -525,9 +526,28 @@ interface PlotGeometryBase {
 /** Band-scaled x: bar, dot, bar-dot, beeswarm, box, violin. */
 export interface CategoricalPlotGeometry extends PlotGeometryBase {
   kind: 'categorical';
+  /**
+   * One slot per *mark*, addressed by series name. On a two-factor table these
+   * are sub-bands inside a category; on a single-factor one they are the
+   * categories themselves. Either way every existing reader — `measurePlot`,
+   * and `bracketFrame` through it — is unchanged.
+   */
   band: ReturnType<typeof makeBandScale>;
   marks: ReturnType<typeof categoricalMarks>;
+  /** Series names, parallel to `marks`. */
   categories: string[];
+  /**
+   * The band the x axis is *labelled* against, and its labels.
+   *
+   * The same as `band`/`categories` for a single-factor plot, so nothing about
+   * an existing figure moves. For a two-factor one these are the outer bands —
+   * four variants, not sixteen variant×group combinations — and the groups are
+   * named by the legend instead.
+   */
+  axisBand: ReturnType<typeof makeBandScale>;
+  axisCategories: string[];
+  /** Distinct legend keys in draw order, with the colour each one carries. */
+  legend: { label: string; color: string }[];
 }
 
 /**
@@ -706,6 +726,14 @@ function continuousGeometry(
       showPoints: node.plotType === 'scatter' || node.showPoints,
       pointSizeMm: node.pointSizeMm,
       colors,
+      /*
+       * Replicates collapse to a centre and an interval only on a line plot
+       * asking for a band. A scatter is the raw observations by definition, so
+       * summarising one would hide the very thing it is drawn to show.
+       */
+      ...(node.plotType === 'line' && node.errorDisplay === 'band' && node.errorBars !== 'none'
+        ? { summariseAtX: { center: node.center, errorBars: node.errorBars } }
+        : {}),
     }),
     bins: [],
   };
@@ -746,7 +774,37 @@ function geometryForMargin(
     ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
   });
 
-  const band = makeBandScale(series.map((s) => s.name), [0, plotWidth]);
+  /*
+   * Two factors when the series say so. A single-factor table takes the exact
+   * path it always did — one band per series, one colour per series — so no
+   * existing figure moves by a micron; `parity.test.tsx` pins that.
+   */
+  const twoFactor = series.every((s) => s.category !== undefined && s.group !== undefined);
+
+  const grouped = twoFactor
+    ? makeGroupedBandScale(
+        series.map((s) => ({ name: s.name, category: s.category!, group: s.group! })),
+        [0, plotWidth],
+      )
+    : null;
+
+  const band = grouped ? grouped.band : makeBandScale(series.map((s) => s.name), [0, plotWidth]);
+
+  /*
+   * Colour keys on the legend factor, not on series order.
+   *
+   * On a two-factor plot that is what makes a group one colour across every
+   * category — the thing the legend then asserts. Indexing sixteen marks into
+   * the palette would give a variant's four bars four colours and repeat the
+   * cycle, so nothing in the picture would carry the grouping.
+   */
+  const legendKeys = twoFactor ? [...new Set(series.map((s) => s.legendKey ?? s.group!))] : [];
+  const legendColors = paletteColors(node.palette, Math.max(1, legendKeys.length));
+  const colors = twoFactor
+    ? series.map(
+        (s) => legendColors[legendKeys.indexOf(s.legendKey ?? s.group!) % legendColors.length]!,
+      )
+    : paletteColors(node.palette, series.length);
 
   const marks = categoricalMarks(series, {
     band,
@@ -764,7 +822,7 @@ function geometryForMargin(
     pointSizeMm: node.pointSizeMm,
     jitterMm: node.jitterMm,
     pointLayout: node.plotType === 'beeswarm' ? 'beeswarm' : 'jitter',
-    colors: paletteColors(node.palette, series.length),
+    colors,
     // Seeded from the node id so jitter is identical on screen and in export.
     seed: hashString(node.id),
   });
@@ -778,6 +836,12 @@ function geometryForMargin(
     yScale,
     marks,
     categories: series.map((s) => s.name),
+    axisBand: grouped ? grouped.outer : band,
+    axisCategories: grouped ? grouped.outer.domain : series.map((s) => s.name),
+    legend: legendKeys.map((label, i) => ({
+      label,
+      color: legendColors[i % legendColors.length]!,
+    })),
   };
 }
 
@@ -810,16 +874,29 @@ function requiredMargin(
     (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
     (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
 
+  const placement = legendPlacement(node, geometry);
+  const legendRow =
+    Math.max(LEGEND_SWATCH_MM, estimateTextHeightMm(theme.type.legendPt)) + LEGEND_ROW_GAP_MM;
+
   const bottom =
     xTickGutter +
     theme.spacing.tickLabelGapMm +
     xLabelLayout(node, theme, geometry).depth +
-    (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+    (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
+    // A legend below sits under the x title; without the reserve it would be
+    // drawn past the panel edge onto whatever is beneath.
+    (placement === 'bottom' ? legendRow : 0);
 
   // A secondary axis puts the same furniture on the right, where the theme
   // reserves 2 mm — enough for a label overhanging the last x tick and nothing
   // more.
   let right = theme.spacing.plotMarginMm.right;
+  if (placement === 'right') {
+    right = Math.max(
+      right,
+      theme.spacing.tickLabelGapMm + legendWidthMm(legendEntries(geometry), theme),
+    );
+  }
   if (geometry.kind === 'continuous' && geometry.y2Scale && node.y2) {
     const spec = node.y2;
     const labels = spec.showLabels
@@ -1032,15 +1109,122 @@ export function reflowBrackets(draft: FigureDocument, theme: Theme): void {
   repositionBrackets(draft, measureAllPlots(draft, theme), { stepMm: bracketStepMm(theme) });
 }
 
+/** Height of a legend swatch, and the gap between two entries. */
+const LEGEND_SWATCH_MM = 1.4;
+const LEGEND_ROW_GAP_MM = 0.8;
+
+/** What the legend would list, in draw order. Empty means there is none. */
+function legendEntries(geometry: PlotGeometry): { label: string; color: string }[] {
+  if (geometry.kind === 'categorical') return geometry.legend;
+  // A continuous plot keys on the series themselves: two lines, two names.
+  return geometry.series.length > 1
+    ? geometry.series.map((s) => ({ label: s.name, color: s.color }))
+    : [];
+}
+
+/**
+ * Whether a legend is drawn, and where.
+ *
+ * `'auto'` shows one exactly when there is something it alone can say. A
+ * single-factor bar chart already names every mark under its band, so a key
+ * repeating those names is furniture; a two-factor chart has no other way to
+ * tell a reader what the colours mean.
+ */
+function legendPlacement(node: PlotNode, geometry: PlotGeometry): 'right' | 'bottom' | 'none' {
+  const mode = node.legend ?? 'auto';
+  if (mode === 'none') return 'none';
+  if (mode !== 'auto') return legendEntries(geometry).length > 0 ? mode : 'none';
+  return legendEntries(geometry).length > 0 ? 'right' : 'none';
+}
+
+/** Width the legend needs when it sits beside the plot. */
+function legendWidthMm(
+  entries: readonly { label: string }[],
+  theme: Theme,
+): number {
+  if (entries.length === 0) return 0;
+  const widest = entries.reduce(
+    (max, e) => Math.max(max, estimateTextWidthMm(e.label, theme.type.legendPt)),
+    0,
+  );
+  return LEGEND_SWATCH_MM + theme.spacing.tickLabelGapMm + widest;
+}
+
+/**
+ * The series key.
+ *
+ * `'legend'` has been a declared `SceneRole` since phase 1 with nothing
+ * constructing one — every multi-series figure shipped with no way to tell the
+ * series apart except by asking the author. Drawn from the geometry rather than
+ * from the dataset so the swatch colour is the colour actually used, which is
+ * the one thing a legend must not get wrong.
+ */
+function renderLegend(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+  placement: 'right' | 'bottom',
+): SceneNode[] {
+  const entries = legendEntries(geometry);
+  if (entries.length === 0) return [];
+
+  const { margin, plotWidth, plotHeight } = geometry;
+  const rowHeight = Math.max(LEGEND_SWATCH_MM, estimateTextHeightMm(theme.type.legendPt));
+  const pitch = rowHeight + LEGEND_ROW_GAP_MM;
+  const gap = theme.spacing.tickLabelGapMm;
+
+  const children: SceneNode[] = [];
+  entries.forEach((entry, index) => {
+    const y = placement === 'right' ? index * pitch : 0;
+    const x =
+      placement === 'right'
+        ? 0
+        : index * (legendWidthMm([entry], theme) + theme.spacing.axisTitleGapMm);
+
+    children.push(
+      el('rect', {
+        x,
+        y: y + (rowHeight - LEGEND_SWATCH_MM) / 2,
+        width: LEGEND_SWATCH_MM,
+        height: LEGEND_SWATCH_MM,
+        fill: entry.color,
+        stroke: 'none',
+      }, undefined, { role: 'legend' }),
+      text(entry.label, {
+        x: x + LEGEND_SWATCH_MM + gap,
+        // Baseline within the row, matching how tick labels are placed.
+        y: y + rowHeight * 0.8,
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(theme.type.legendPt),
+        fill: theme.foreground,
+        'text-anchor': 'start',
+      }, { role: 'legend' }),
+    );
+  });
+
+  // Beside the plot area, vertically centred on it; or beneath the x labels.
+  const originX = placement === 'right' ? margin.left + plotWidth + gap : margin.left;
+  const originY =
+    placement === 'right'
+      ? margin.top + Math.max(0, (plotHeight - entries.length * pitch) / 2)
+      : margin.top + plotHeight + margin.bottom - pitch;
+
+  return [group({ transform: translate(originX, originY) }, children)];
+}
+
 function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions): SceneNode | null {
   const { theme } = options;
   const geometry = computePlotGeometry(node, doc, theme);
   if (!geometry) return null;
 
   const { margin } = geometry;
+  const placement = legendPlacement(node, geometry);
+  // Outside the plot-area transform: the legend sits in the panel's margins,
+  // not in the data rectangle, so it must not inherit that translation.
+  const legend = placement === 'none' ? [] : renderLegend(node, theme, geometry, placement);
 
   if (geometry.kind === 'continuous') {
-    return group(
+    const area = group(
       { transform: translate(margin.left, margin.top) },
       [
         ...renderAxes(node, theme, geometry),
@@ -1051,6 +1235,9 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       ],
       { role: 'plot-area' },
     );
+    // No wrapper without a legend: an extra <g> around every existing plot
+    // would change markup that is asserted byte for byte.
+    return legend.length === 0 ? area : group({}, [area, ...legend]);
   }
 
   const { marks } = geometry;
@@ -1183,11 +1370,12 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
   const axes = renderAxes(node, theme, geometry);
 
-  return group(
+  const area = group(
     { transform: translate(margin.left, margin.top) },
     [...axes, ...content, ...renderAxisBreaks(node, theme, geometry)],
     { role: 'plot-area' },
   );
+  return legend.length === 0 ? area : group({}, [area, ...legend]);
 }
 
 /**
@@ -1282,6 +1470,31 @@ function renderContinuousMarks(
 
   for (const s of geometry.series) {
     const markChildren: SceneNode[] = [];
+
+    /*
+     * The error band, first, so the line and its points sit on top of it.
+     *
+     * Drawn as one closed polygon — up the upper edge and back along the lower
+     * — rather than as a ribbon per segment: two adjacent translucent shapes
+     * would double their alpha where they meet and print as a seam at every
+     * timepoint.
+     */
+    if (s.band && s.band.length > 1) {
+      const upper = s.band.map(
+        (p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.highY)}`,
+      );
+      const lower = [...s.band].reverse().map((p) => `L${round(p.x)} ${round(p.lowY)}`);
+      markChildren.push(
+        el('path', {
+          d: `${upper.join(' ')} ${lower.join(' ')} Z`,
+          fill: s.color,
+          // The same alpha the violin and box marks use, and measured through
+          // EPS as pixel-identical, so the vector claim is unaffected.
+          'fill-opacity': 0.25,
+          stroke: 'none',
+        }, undefined, { role: 'error-bar' }),
+      );
+    }
 
     if (s.linePath && s.linePath.length > 1) {
       markChildren.push(
@@ -1616,11 +1829,14 @@ function xLabelLayout(
     return { angle: 0, budget: Infinity, depth: node.x.showLabels ? oneLine : 0 };
   }
 
-  const { band, categories } = geometry;
+  // The band the labels are *drawn* against: for a two-factor plot that is the
+  // outer one, whose slots are much wider than the sub-bands the marks sit in.
+  // Measuring the sub-band would angle labels that comfortably fit.
+  const { axisBand, axisCategories } = geometry;
   // Adding a dataset re-runs auto-layout and narrows every panel, so the slot
   // a category label has to fit in shrinks. Measure before drawing.
-  const slot = band.step;
-  const widest = categories.reduce(
+  const slot = axisBand.step;
+  const widest = axisCategories.reduce(
     (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
     0,
   );
@@ -1654,7 +1870,7 @@ function xLabelLayout(
 
   if (angle === 0) return { angle, budget, depth: oneLine };
 
-  const longest = categories.reduce(
+  const longest = axisCategories.reduce(
     (max, name) =>
       Math.max(max, estimateTextWidthMm(truncateToWidth(name, tickLabelPt, budget), tickLabelPt)),
     0,
@@ -1769,11 +1985,11 @@ function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): Scene
   if (geometry.kind === 'continuous') {
     out.push(...renderNumericXTicks(node, theme, geometry));
   } else if (node.x.showLabels) {
-    const { categories, band } = geometry;
+    const { axisCategories, axisBand } = geometry;
     const baseY = plotHeight + tickLen + theme.spacing.tickLabelGapMm;
 
-    for (const name of categories) {
-      const x = band.center(name);
+    for (const name of axisCategories) {
+      const x = axisBand.center(name);
       if (angle !== 0) {
         out.push(
           text(truncateToWidth(name, tickLabelPt, budget), {

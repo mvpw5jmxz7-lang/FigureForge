@@ -134,6 +134,8 @@ const plotSchema = z.object({
   pointStroke: strokeSchema.optional(),
   y2: axisSchema.optional(),
   seriesAxis: z.array(z.enum(['y', 'y2'])).optional(),
+  legend: z.enum(['auto', 'right', 'bottom', 'none']).optional(),
+  errorDisplay: z.enum(['bars', 'band']).optional(),
 });
 
 const imageSchema = z.object({
@@ -249,13 +251,26 @@ const datasetSchema = z.object({
   name: z.string(),
   // Loosening an enum is backward-compatible: an older build cannot read a
   // contingency dataset, but every file it *has* still validates here.
-  format: z.enum(['simple-xy', 'prism', 'sigmaplot', 'grouped', 'replicate', 'contingency']),
+  format: z.enum([
+    'simple-xy',
+    'prism',
+    'sigmaplot',
+    'grouped',
+    'replicate',
+    'contingency',
+    'grouped-replicates',
+    'xy-replicates',
+    'nested',
+  ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
   // Optional, so files written before it still load. zod strips unknown keys,
   // so a field present only on the TS type is dropped on save — this is the
   // half that makes it survive.
   hasRowNames: z.boolean().optional(),
+  columnGroups: z
+    .array(z.object({ name: z.string(), from: z.number().int().min(0), to: z.number().int().min(0) }))
+    .optional(),
   sourcePath: z.string().nullable(),
   sourceFilename: z.string().nullable(),
   importedAt: z.string(),

@@ -344,3 +344,65 @@ export function makeBandScale(
     bandwidth: d3s.bandwidth(),
   };
 }
+
+/** One mark's place in a two-factor table: which band, and where inside it. */
+export interface GroupedBandItem {
+  /** Unique key the returned scale is addressed by. */
+  name: string;
+  /** Outer band — what the category axis labels. */
+  category: string;
+  /** Sub-band inside the outer one. */
+  group: string;
+}
+
+export interface GroupedBandScale {
+  /**
+   * Addressed by the composite `name`, so it satisfies `BandScale` and every
+   * existing reader — `categoricalMarks`, `measurePlot`, `bracketFrame` — works
+   * against a two-factor plot without knowing there is a second factor.
+   */
+  band: BandScale;
+  /** The outer band, for the axis labels and for anything spanning a category. */
+  outer: BandScale;
+}
+
+/**
+ * Bands within bands: one slot per category, subdivided per group.
+ *
+ * This is the shape Prism's Grouped, Nested and contingency tables all need,
+ * and the reason the flat one-band-per-series model could not draw them — a
+ * table of four variants × four groups has sixteen marks over four labels, and
+ * a flat band gives sixteen labels.
+ *
+ * The inner band takes no outer padding: the gap between two categories is the
+ * outer band's business, and padding the inner one too would leave the groups
+ * of a category adrift in their slot rather than reading as one cluster.
+ */
+export function makeGroupedBandScale(
+  items: readonly GroupedBandItem[],
+  rangeMm: [number, number],
+  paddingInner = 0.35,
+): GroupedBandScale {
+  const categories = [...new Set(items.map((i) => i.category))];
+  const groups = [...new Set(items.map((i) => i.group))];
+
+  const outer = makeBandScale(categories, rangeMm, paddingInner, 0.25);
+  // Group slots inside one category, measured from that category's left edge.
+  const inner = makeBandScale(groups, [0, outer.bandwidth], 0.1, 0);
+
+  const offsets = new Map<string, number>();
+  for (const item of items) {
+    offsets.set(item.name, outer.center(item.category) - outer.bandwidth / 2 + inner.center(item.group));
+  }
+
+  return {
+    outer,
+    band: {
+      domain: items.map((i) => i.name),
+      range: rangeMm,
+      center: (name) => offsets.get(name) ?? 0,
+      step: inner.step,
+      bandwidth: inner.bandwidth,
+    },
+  };
+}

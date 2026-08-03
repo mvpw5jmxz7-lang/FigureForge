@@ -9,11 +9,13 @@
 import {
   addPanelWithPlot,
   applyAutoLayout,
+  blocksOfSize,
   createDocument,
   couldHaveRowNames,
   createIdFactory,
   dataColumnOffset,
   editDocument,
+  GROUPED_FORMATS,
   inferFormat,
   parseDelimited,
   relabelPanels,
@@ -53,6 +55,16 @@ export interface ImportOptions extends ParseOptions {
    * xy table and a replicate table, and only the author knows which.
    */
   hasRowNames?: boolean;
+  /**
+   * Split the data columns into equal blocks of this size, for a grouped
+   * layout whose file carries no group header row.
+   *
+   * The manual route: an author who knows their six columns are two groups of
+   * three can say so. Nothing infers it — six columns are as plausibly six
+   * groups of one, and a wrong split averages the wrong numbers together into
+   * a mean that looks entirely reasonable.
+   */
+  replicatesPerGroup?: number;
 }
 
 export function datasetFromText(
@@ -75,19 +87,37 @@ export function datasetFromText(
    * on screen to explain why.
    */
   const hasRowNames = (options.hasRowNames ?? false) && couldHaveRowNames(parsed.columns);
-  return {
+
+  const format =
+    options.format ??
+    inferFormat(parsed.columns, { hasRowNames, columnGroups: parsed.columnGroups });
+
+  const base: Dataset = {
     id,
     name,
-    format: options.format ?? inferFormat(parsed.columns, { hasRowNames }),
+    format,
     columns: parsed.columns,
     rows: parsed.rows,
     // Written only when true: absent is the shape every existing file has, and
     // an explicit `false` everywhere would be noise in every saved document.
     ...(hasRowNames ? { hasRowNames: true } : {}),
+    ...(parsed.columnGroups.length > 0 ? { columnGroups: parsed.columnGroups } : {}),
     sourcePath: `data/${id}.csv`,
     sourceFilename: filename,
     importedAt: new Date().toISOString(),
   };
+
+  /*
+   * An explicit block size wins over whatever the header declared: the author
+   * is looking at the preview and the file is not. Only for the layouts that
+   * read blocks at all — setting it on a replicate table would store a reading
+   * nothing consults, which is worse than storing nothing.
+   */
+  if (options.replicatesPerGroup && GROUPED_FORMATS.has(format)) {
+    const blocks = blocksOfSize(base, options.replicatesPerGroup);
+    if (blocks.length > 0) return { ...base, columnGroups: blocks };
+  }
+  return base;
 }
 
 /**
@@ -104,7 +134,13 @@ export function axisTitlesFor(dataset: Dataset): { x?: string; y?: string } {
 
   const first = dataColumnOffset(dataset);
   const x = dataset.columns[first]?.name.trim();
-  const y = dataset.columns[first + 1]?.name.trim();
+  /*
+   * Only where the second column really is the y axis. On a replicate-blocked
+   * table it is `A:Y1` — one replicate of one group — and putting that on the
+   * axis labels the whole quantity after a single column of it.
+   */
+  const y =
+    dataset.format === 'xy-replicates' ? undefined : dataset.columns[first + 1]?.name.trim();
 
   // `defaultColumnName` produces A, B, C… when there was no header row. Those
   // are placeholders, not labels, and putting one on an axis is worse than
@@ -123,6 +159,9 @@ const CONTINUOUS_X_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
   'simple-xy',
   'prism',
   'sigmaplot',
+  // Column 0 is the shared x here too; the y columns are named by their groups,
+  // so only the x title is worth taking.
+  'xy-replicates',
 ]);
 
 export function createSampleDocument(): FigureDocument {
