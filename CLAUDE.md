@@ -189,10 +189,13 @@ Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests
 Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
 panels) is done — see "Round 4" below. **Round 5 is in progress on
 `feat/round-5-*`**: the import surface, one reported item at a time — stage 1
-(xy pairs), stage 2 (a shared x with replicate y) and stage 3 (a symbol per
-series) are merged. Run
+(xy pairs), stage 2 (a shared x with replicate y), stage 3 (a symbol per
+series) and stage 4 (grouped data and its bar spacing) are merged. Run
 `git status` and `git branch` before assuming the tree is clean or which branch
 you're on.
+
+**Verified after round 5 stage 4:** 357 TypeScript tests, 105 Python tests,
+typecheck and lint clean, 46-check acceptance run.
 
 **Verified after round 5 stage 3:** 343 TypeScript tests, 105 Python tests,
 typecheck and lint clean, 46-check acceptance run.
@@ -832,7 +835,8 @@ Reported from real use: categorical graphs import well, line graphs do not, and
 time, each verified in a real browser before the next is started. Reference
 material is in `TestFiles/` — `test graph.xlsx` (independent xy pairs, with the
 author's intended chart embedded), `test2 data table.xlsx` (a shared-x,
-two-group × three-replicate table) and `test graphs.prism`.
+two-group × three-replicate table), `test graphs.prism` and
+`grouped data example.prism` (rows × columns × replicates, the two-factor shape).
 
 #### Stage 1 — x,y pairs draw as an xy graph
 
@@ -985,6 +989,91 @@ legend, one Ctrl+Z reverted one series, clearing every series back to *Default*
 restored the plain block key, and the exported PDF stayed single-page at
 183.0000 × 75.0000 mm with **zero** image XObjects — the symbols are vector.
 
+#### Stage 4 — grouped data, and the spacing of its bars
+
+Reported next: an import option for grouped data, with Inspector controls for the
+spacing *within* a group and *between* groups. Reference material is
+`TestFiles/grouped data example.prism` — three genotypes down the rows, three
+treatments across the columns, three replicates in each cell, which its own note
+describes as an interleaved bar graph with "error bars computed from the scatter
+among side-by-side replicates".
+
+**The import was checked before it was changed, and mostly did not need
+changing.** Pasted from a spreadsheet with its merged group titles, that table
+already read as `grouped-replicates` with the three blocks declared and nine
+series carrying the right `category`/`group` — round 4's two-factor work plus
+stage 2's `mergedHeaderGroups`, which tolerates the *blank* leading cell (the
+row-title column has no title of its own) because `columnGroupsFromHeader` emits
+no entry for a leading blank, so the leading-singleton guard sees index 0. There
+was no test for that shape, only for the two-row-header form; there is now.
+
+- **A count now promotes `replicate` → `grouped-replicates`**, the twin of stage
+  2's `prism` → `xy-replicates`. Pasted *without* its group-title row the same
+  table detects as one treatment measured nine times — a legitimate reading of
+  that rectangle and the wrong one here — and the control that takes the count
+  was gated on `GROUPED_FORMATS ∪ {prism}`, so it did not appear until the author
+  had already found *Grouped* in the layout dropdown. Saying "three columns per
+  group" *is* the statement that the columns block; a count of 1 still claims
+  nothing.
+- **`blocksOfSize` stopped naming blocks after invented column names.** It names
+  each block for its first column, which on a header-less paste is `B`, `E`, `H`
+  — so the promotion above would have shipped a legend reading "B, E, H" over
+  the author's data. The test is that *every* column carries its positional name,
+  which a real header cannot manage past the first column or two, so a sheet with
+  a column genuinely titled "B" keeps it.
+- **The two spacing knobs existed as a dead parameter and a literal.**
+  `makeGroupedBandScale` built its outer band from a `paddingInner` its only
+  caller never passed, and its inner band from a hardcoded `0.1`. Now
+  `barGapFraction` and `groupGapFraction` on `PlotNode`, both optional so
+  `SCHEMA_VERSION` stays 1, both mirrored into `schema.ts` or zod strips them on
+  save. The defaults are exported from `plots` as
+  `DEFAULT_GROUP_GAP_FRACTION`/`DEFAULT_BAR_GAP_FRACTION` and read by *both* the
+  renderer and the Inspector — a second spelling is how a control comes to
+  display 35% while the canvas draws something else. Absent equals the old
+  literals exactly, asserted at the maths layer and again through `toSvgString`.
+- **`barWidthFraction` surfaced with them, because otherwise the gap control
+  lies.** It has been a real field with a `0.8` default and no UI since phase 1,
+  and at 80% of the slot a sliver survives that no amount of closing the gap can
+  remove. Bar width plus zero gap is what gives Prism's touching interleaved
+  bars. It is labelled *Mark width* on a box or violin, where it sets their width
+  too — calling it "bar" there would be wrong.
+- **The gap controls reflow brackets in the same commit; bar width does not.**
+  A bracket's ends are `margin.left + band.center(name)`, so a gap change moves
+  the bars out from under an annotation that would otherwise stay put. Width
+  changes no centre and no mark top, so nothing a bracket reads has moved — the
+  asymmetry is asserted in `grouped-plots.test.ts` rather than left to be
+  rediscovered.
+- **`isTwoFactor` in `data.ts` is now the single spelling** of "these series are
+  positioned by two factors". The renderer had it inline and the Inspector needed
+  the same question to decide whether there is a within-group gap to offer;
+  two spellings would show up as a control that adjusts nothing.
+- The group gap is offered on **single-factor** plots too, where each mark owns a
+  category and it is simply the gap between the bars. Note it changes
+  `axisBand.step`, so widening it can stand a rotated category label back
+  upright — correct, and safe because the geometry is built in exactly two
+  passes rather than converged to.
+
+Driven in a real browser, light and **dark**: the merged-header paste previewed
+as `Grouped — rows × groups (Prism) · 10 columns · 3 rows` with *from the header:
+Control, Drug A, Drug B* and imported to **9** bars in **3** colours over **3**
+category labels with a three-entry legend and no composite name on the axis;
+*Gap within group* 0 with *Bar width* 100 made each cluster's three bars flush to
+0.01 mm while the clusters stayed 3.39 mm apart; *Gap between groups* 60 widened
+the cluster pitch 5.49 → 7.72 mm and one Ctrl+Z reverted it; a one-way ANOVA
+placed 24 brackets and changing the spacing **moved all 24** with the bars. The
+header-less paste detected as *Treatment + replicates*, and typing 3 reread it as
+Grouped with the legend naming **Group 1 / Group 2 / Group 3**. A single-factor
+table offered *Gap between bars* and no within-group gap; a line plot offered
+none of the three. Both spacings exported single-page at exactly
+183.0000 × 75.0000 mm, fonts embedded, legend text selectable, **zero** image
+XObjects.
+
+**Not done, deliberately:** the group blocks are still invisible in the import
+preview grid (only listed as muted text beside the count), and *First column:
+Row names* is still offered on a grouped table where it does nothing —
+`inferFormat` short-circuits on declared blocks and `toSeries` hardcodes column 0
+as the row label.
+
 ---
 
 ## What's next
@@ -1033,7 +1122,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates` and `pointShapes`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction` and `groupGapFraction`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

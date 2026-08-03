@@ -16,6 +16,7 @@ import {
   findAsset,
   findDataset,
   findLayer,
+  isTwoFactor,
   ptToMm,
   repositionBrackets,
   scaleBarWidthMm,
@@ -38,6 +39,8 @@ import {
 } from '@figureforge/doc-model';
 import { paletteColors, type Theme } from '@figureforge/theme';
 import {
+  DEFAULT_BAR_GAP_FRACTION,
+  DEFAULT_GROUP_GAP_FRACTION,
   categoricalMarks,
   histogramBins,
   histogramMarks,
@@ -791,16 +794,26 @@ function geometryForMargin(
    * path it always did — one band per series, one colour per series — so no
    * existing figure moves by a micron; `parity.test.tsx` pins that.
    */
-  const twoFactor = series.every((s) => s.category !== undefined && s.group !== undefined);
+  const twoFactor = isTwoFactor(series);
+
+  // Absent reads as the default the literals used to hardcode, so a figure that
+  // says nothing about spacing is byte-identical to one drawn before the fields
+  // existed — `grouped-plots.test.ts` asserts exactly that.
+  const groupGap = node.groupGapFraction ?? DEFAULT_GROUP_GAP_FRACTION;
+  const barGap = node.barGapFraction ?? DEFAULT_BAR_GAP_FRACTION;
 
   const grouped = twoFactor
     ? makeGroupedBandScale(
         series.map((s) => ({ name: s.name, category: s.category!, group: s.group! })),
         [0, plotWidth],
+        groupGap,
+        barGap,
       )
     : null;
 
-  const band = grouped ? grouped.band : makeBandScale(series.map((s) => s.name), [0, plotWidth]);
+  const band = grouped
+    ? grouped.band
+    : makeBandScale(series.map((s) => s.name), [0, plotWidth], groupGap);
 
   /*
    * Colour keys on the legend factor, not on series order.

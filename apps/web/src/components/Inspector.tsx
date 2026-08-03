@@ -19,6 +19,7 @@ import {
   findDataset,
   formatMm,
   hasReplicatesAtX,
+  isTwoFactor,
   normaliseArrowFrame,
   resizePanel,
   resyncScaleBars,
@@ -39,6 +40,7 @@ import {
   type TextStyle,
 } from '@figureforge/doc-model';
 import { reflowBrackets } from '@figureforge/render';
+import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
@@ -367,6 +369,49 @@ function PlotFields({
     commit(label, (draft) => updateNode<PlotNode>(draft, node.id, patch));
   };
 
+  /*
+   * Spacing moves every band centre, and a significance bracket is anchored to
+   * one — so the brackets are put back on their bars inside the same commit,
+   * or a figure with statistics silently detaches its annotations from the data
+   * it annotates. One undo entry either way.
+   *
+   * `barWidthFraction` deliberately does not use this: a wider bar changes no
+   * centre and no mark top, so nothing a bracket reads has moved.
+   */
+  const setPlotGeometry = (label: string, patch: Partial<PlotNode>): void => {
+    commit(label, (draft) => {
+      updateNode<PlotNode>(draft, node.id, patch);
+      reflowBrackets(draft, theme);
+    });
+  };
+
+  /**
+   * A 0–1 model fraction edited as a percentage, which is how a bar chart's
+   * spacing is described everywhere an author has met it before. 0.35 in a spin
+   * box does not read as "a third of the slot".
+   */
+  const percentField = (
+    text: string,
+    value: number,
+    max: number,
+    apply: (fraction: number) => void,
+  ): React.ReactElement => (
+    <label className="field" key={text}>
+      {text}
+      <input
+        type="number"
+        min={0}
+        max={max}
+        step={5}
+        value={Math.round(value * 100)}
+        onChange={(e) => {
+          const pct = Number(e.target.value);
+          if (Number.isFinite(pct)) apply(Math.max(0, Math.min(max, pct)) / 100);
+        }}
+      />
+    </label>
+  );
+
   const setSeriesColor = (index: number, color: string): void => {
     const next = [...colors];
     next[index] = color;
@@ -396,6 +441,17 @@ function PlotFields({
    * already names it.
    */
   const perSeriesShapes = CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && series.length > 1;
+
+  /*
+   * Band spacing, and what to call it. Two factors put marks inside a category,
+   * so both gaps mean something; one factor gives each mark its own category,
+   * where the group gap *is* the gap between the bars. `barWidthFraction` also
+   * sets box and violin width and clamps the jitter spread, so calling it "bar"
+   * on a violin plot would be wrong.
+   */
+  const twoFactor = isTwoFactor(series);
+  const barLike = node.plotType === 'bar' || node.plotType === 'bar-dot';
+  const markWord = barLike ? 'bars' : 'marks';
 
   return (
     <>
@@ -640,6 +696,37 @@ function PlotFields({
         />
         {node.plotType === 'box' ? 'Overlay all points' : 'Show replicate points'}
       </label>
+
+      {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && (
+        <>
+          <div className="field-row">
+            {percentField(
+              `${barLike ? 'Bar' : 'Mark'} width (%)`,
+              node.barWidthFraction,
+              100,
+              (v) => setPlot('Change bar width', { barWidthFraction: v }),
+            )}
+            {twoFactor &&
+              percentField(
+                'Gap within group (%)',
+                node.barGapFraction ?? DEFAULT_BAR_GAP_FRACTION,
+                90,
+                (v) => setPlotGeometry('Change gap within group', { barGapFraction: v }),
+              )}
+            {percentField(
+              twoFactor ? 'Gap between groups (%)' : `Gap between ${markWord} (%)`,
+              node.groupGapFraction ?? DEFAULT_GROUP_GAP_FRACTION,
+              90,
+              (v) => setPlotGeometry('Change gap between groups', { groupGapFraction: v }),
+            )}
+          </div>
+          <p className="hint">
+            Shares of the slot each {markWord.slice(0, -1)} sits in, so they hold as the panel is
+            resized. {barLike ? 'Bars' : 'Marks'} {twoFactor ? 'within a group ' : ''}meet at 100%
+            width with no gap.
+          </p>
+        </>
+      )}
 
       <div className="field-row">
         <label className="field">

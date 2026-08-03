@@ -582,10 +582,14 @@ function DataTab({
               are as plausibly six groups of one as two of three, and a wrong
               guess averages the wrong numbers into a plausible mean.
 
-              Offered on `prism` too, where it is the *only* way to say that the
-              y columns are replicates of one series rather than series of their
-              own; a count of 2 or more reads the table as XY + replicates. */}
-          {(GROUPED_FORMATS.has(preview.format) || preview.format === 'prism') && (
+              Offered on `prism` and `replicate` too, where it is the *only* way
+              to say that the columns block rather than each standing alone; a
+              count of 2 or more reads them as XY + replicates and as Grouped
+              respectively. Both detections are what a Prism table lands on when
+              it is pasted without its group-title row. */}
+          {(GROUPED_FORMATS.has(preview.format) ||
+            preview.format === 'prism' ||
+            preview.format === 'replicate') && (
             <div className="field-row">
               <label className="field">
                 {XY_REPLICATE_FORMATS.has(preview.format)
