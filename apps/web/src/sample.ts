@@ -10,7 +10,9 @@ import {
   addPanelWithPlot,
   applyAutoLayout,
   createDocument,
+  couldHaveRowNames,
   createIdFactory,
+  dataColumnOffset,
   editDocument,
   inferFormat,
   parseDelimited,
@@ -44,6 +46,13 @@ export interface ImportOptions extends ParseOptions {
    * the only one who actually knows, so they get the last word.
    */
   format?: DataFormat;
+  /**
+   * Override whether column 0 holds row labels rather than data.
+   *
+   * Same reason as `format`: "text column, then numbers" is both a row-labelled
+   * xy table and a replicate table, and only the author knows which.
+   */
+  hasRowNames?: boolean;
 }
 
 export function datasetFromText(
@@ -54,17 +63,67 @@ export function datasetFromText(
   options: ImportOptions = {},
 ): Dataset {
   const parsed = parseDelimited(text, options);
+  /*
+   * Never inferred: see `couldHaveRowNames`. Absent means "column 0 is data",
+   * which is how every table has been read until now, so no existing import
+   * changes meaning.
+   *
+   * Gated on the reading being *available*, not merely requested. The importer
+   * keeps its overrides between pastes, so a table where column 0 really was a
+   * label can be followed by one where it is the x values — and the setting
+   * would otherwise still be applied, with the control that set it no longer
+   * on screen to explain why.
+   */
+  const hasRowNames = (options.hasRowNames ?? false) && couldHaveRowNames(parsed.columns);
   return {
     id,
     name,
-    format: options.format ?? inferFormat(parsed.columns),
+    format: options.format ?? inferFormat(parsed.columns, { hasRowNames }),
     columns: parsed.columns,
     rows: parsed.rows,
+    // Written only when true: absent is the shape every existing file has, and
+    // an explicit `false` everywhere would be noise in every saved document.
+    ...(hasRowNames ? { hasRowNames: true } : {}),
     sourcePath: `data/${id}.csv`,
     sourceFilename: filename,
     importedAt: new Date().toISOString(),
   };
 }
+
+/**
+ * Axis titles a dataset's own header row already supplies.
+ *
+ * The header names were parsed, stored as `Column.name` and then ignored: every
+ * imported panel got `yTitle: 'Value'` and no x title at all, so an author who
+ * had already labelled their columns had to type both again. Only offered for
+ * the layouts where a column *is* an axis — on a replicate table column 0 names
+ * the groups, which the band labels already show.
+ */
+export function axisTitlesFor(dataset: Dataset): { x?: string; y?: string } {
+  if (!CONTINUOUS_X_FORMATS.has(dataset.format)) return {};
+
+  const first = dataColumnOffset(dataset);
+  const x = dataset.columns[first]?.name.trim();
+  const y = dataset.columns[first + 1]?.name.trim();
+
+  // `defaultColumnName` produces A, B, C… when there was no header row. Those
+  // are placeholders, not labels, and putting one on an axis is worse than
+  // leaving it blank for the author to fill.
+  const usable = (name: string | undefined): string | undefined =>
+    name !== undefined && name !== '' && !/^[A-Z]{1,2}$/.test(name) ? name : undefined;
+
+  return {
+    ...(usable(x) ? { x: usable(x)! } : {}),
+    ...(usable(y) ? { y: usable(y)! } : {}),
+  };
+}
+
+/** Layouts whose column 0 (or 1) is an x axis rather than a group label. */
+const CONTINUOUS_X_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
+  'simple-xy',
+  'prism',
+  'sigmaplot',
+]);
 
 export function createSampleDocument(): FigureDocument {
   const newId = createIdFactory();

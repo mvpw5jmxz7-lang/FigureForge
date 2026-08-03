@@ -140,6 +140,19 @@ button.icon.danger:hover { color: var(--danger); }
 
 /* Crop chrome. HTML above the SVG, so none of it can reach an export. */
 .crop-overlay { position: absolute; z-index: 4; touch-action: none; }
+/*
+ * The whole source image, covering the cropped result the SVG has drawn. Crop
+ * mode outlines *source* pixels, so it has to show them — outlining a region of
+ * the already-cropped picture is how the tool came to cut somewhere else.
+ * `pixelated` for the same reason the renderer uses it: interpolation invents
+ * detail an author might then crop to.
+ */
+.crop-source {
+  position: absolute;
+  image-rendering: pixelated;
+  pointer-events: none;
+  user-select: none;
+}
 .crop-shade { position: absolute; background: rgba(0, 0, 0, 0.55); pointer-events: none; }
 .crop-window {
   position: absolute;

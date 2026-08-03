@@ -16,7 +16,11 @@ import {
   effectiveDpi,
   findAsset,
   findDataset,
+  couldHaveRowNames,
   imagesUsingAsset,
+  plotsUsingDataset,
+  removeDataset,
+  setDatasetReading,
   isContingency,
   contingencyCategories,
   isStale,
@@ -42,13 +46,15 @@ import {
 import {
   measureAllPlots,
   measurePlot,
+  bracketStepMm,
+  reflowBrackets,
   type Finding,
   type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
 import { InspectorTab } from './Inspector.js';
-import { datasetFromText, type ImportOptions } from '../sample.js';
+import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
 import { ACCEPTED_IMAGE_TYPES, importImage, initialImageSize } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
@@ -195,6 +201,7 @@ function DataTab({
   const [headerMode, setHeaderMode] = useState<'auto' | 'yes' | 'no'>('auto');
   const [transpose, setTranspose] = useState(false);
   const [format, setFormat] = useState<DataFormat | ''>('');
+  const [firstColumn, setFirstColumn] = useState<'data' | 'names'>('data');
 
   const parseOptions: ImportOptions = useMemo(
     () => ({
@@ -202,8 +209,9 @@ function DataTab({
       ...(headerMode !== 'auto' ? { hasHeader: headerMode === 'yes' } : {}),
       ...(transpose ? { transpose: true } : {}),
       ...(format !== '' ? { format } : {}),
+      ...(firstColumn === 'names' ? { hasRowNames: true } : {}),
     }),
-    [delimiter, headerMode, transpose, format],
+    [delimiter, headerMode, transpose, format, firstColumn],
   );
 
   const preview = useMemo(() => {
@@ -232,6 +240,9 @@ function DataTab({
         draft.datasets = [...draft.datasets, dataset];
       });
       commit('Add panel', (draft) => {
+        // The author already labelled their columns; asking them to type the
+        // same two words into the Inspector is work the header row did.
+        const titles = axisTitlesFor(dataset);
         addPanelWithPlot(draft, newId, {
           // Below whatever is already on the page, so auto-layout's reading
           // order puts the new panel last rather than in panel a's cell.
@@ -239,7 +250,8 @@ function DataTab({
           name: dataset.name,
           datasetId: dataset.id,
           plotType: 'bar-dot',
-          yTitle: 'Value',
+          yTitle: titles.y ?? 'Value',
+          ...(titles.x ? { xTitle: titles.x } : {}),
         });
         applyAutoLayout(draft, {
           marginMm: theme.spacing.marginMm,
@@ -253,7 +265,7 @@ function DataTab({
         });
         // Importing re-lays out every panel, so existing brackets would
         // otherwise be left where the old, wider panels used to be.
-        repositionBrackets(draft, measureAllPlots(draft, theme));
+        reflowBrackets(draft, theme);
       });
     });
 
@@ -317,7 +329,7 @@ function DataTab({
           fontSizePt: theme.type.panelLabelPt,
           offsetMm: 4,
         });
-        repositionBrackets(draft, measureAllPlots(draft, theme));
+        reflowBrackets(draft, theme);
       });
 
       if (imported.notes.length > 0) onError(imported.notes.join(' '));
@@ -449,8 +461,30 @@ function DataTab({
               Transpose
             </label>
           </div>
+
+          {/* Offered only when the question is genuinely open — a text column
+              in front of numbers is both a row-labelled xy table and a
+              replicate table, and nothing in the cells tells them apart. It is
+              a choice, never a guess: guessing read a dose-response replicate
+              table as xy, because its group means ascend like an axis. */}
+          {couldHaveRowNames(preview.columns) && (
+            <div className="field-row">
+              <label className="field">
+                First column
+                <select
+                  value={firstColumn}
+                  onChange={(e) => setFirstColumn(e.target.value as 'data' | 'names')}
+                >
+                  <option value="data">Data — group labels or x values</option>
+                  <option value="names">Row names — the data starts in column 2</option>
+                </select>
+              </label>
+            </div>
+          )}
+
           <p className="hint">
             {DATA_FORMATS.find((f) => f.id === preview.format)?.hint}
+            {preview.hasRowNames && ' Column 1 names the rows; the data starts in column 2.'}
           </p>
           <table>
             <thead>
@@ -493,43 +527,81 @@ function DataTab({
 
       <h3>Datasets</h3>
       <ul className="list">
-        {doc.datasets.map((dataset) => (
-          <li key={dataset.id}>
-            {/* Editable in place: the name propagates to the panel and plot,
-                which is what makes the Layers list readable. */}
-            <input
-              className="rename"
-              value={dataset.name}
-              onChange={(e) =>
-                commit('Rename dataset', (draft) =>
-                  renameDataset(draft, dataset.id, e.target.value),
-                )
-              }
-            />
-            {/* Fixable after the fact: a layout is a reading of the same rows,
-                not a transformation of them, so changing it is lossless.
-                `toSeries` is the only consumer and it reads this field. */}
-            <select
-              value={dataset.format}
-              title="How these columns are read"
-              onChange={(e) =>
-                commit('Change data layout', (draft) => {
-                  const next = e.target.value as DataFormat;
-                  draft.datasets = draft.datasets.map((d) =>
-                    d.id === dataset.id ? { ...d, format: next } : d,
-                  );
-                })
-              }
-            >
-              {DATA_FORMATS.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
-            <span className="muted">{toSeries(dataset).length} series</span>
-          </li>
-        ))}
+        {doc.datasets.map((dataset) => {
+          const uses = plotsUsingDataset(doc.nodes, dataset.id);
+          return (
+            <li key={dataset.id}>
+              {/* Editable in place: the name propagates to the panel and plot,
+                  which is what makes the Layers list readable. */}
+              <input
+                className="rename"
+                value={dataset.name}
+                onChange={(e) =>
+                  commit('Rename dataset', (draft) =>
+                    renameDataset(draft, dataset.id, e.target.value),
+                  )
+                }
+              />
+              {/* Fixable after the fact: a layout is a reading of the same rows,
+                  not a transformation of them, so changing it is lossless.
+                  `toSeries` is the only consumer and it reads this field. */}
+              <select
+                value={dataset.format}
+                title="How these columns are read"
+                onChange={(e) =>
+                  commit('Change data layout', (draft) =>
+                    setDatasetReading(draft, dataset.id, {
+                      format: e.target.value as DataFormat,
+                    }),
+                  )
+                }
+              >
+                {DATA_FORMATS.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+              <span className="muted">{toSeries(dataset).length} series</span>
+              <div className="field-row">
+                <label className="check" title="Column 1 labels the rows rather than holding data">
+                  <input
+                    type="checkbox"
+                    checked={dataset.hasRowNames ?? false}
+                    onChange={(e) =>
+                      commit('Change first column', (draft) =>
+                        setDatasetReading(draft, dataset.id, { hasRowNames: e.target.checked }),
+                      )
+                    }
+                  />
+                  Row names in column 1
+                </label>
+                {uses.length > 0 ? (
+                  <span className="muted">
+                    used by {uses.length} {uses.length === 1 ? 'panel' : 'panels'}
+                  </span>
+                ) : (
+                  <>
+                    {/* Offered only once nothing reads it. A plot pointing at a
+                        missing dataset fails referential integrity, so the
+                        figure would edit fine and then refuse to save. */}
+                    <span className="muted">not used</span>
+                    <button
+                      className="danger"
+                      onClick={() =>
+                        commit('Remove dataset', (draft) => {
+                          removeDataset(draft, dataset.id);
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </>
+                )}
+              </div>
+            </li>
+          );
+        })}
         {doc.datasets.length === 0 && <li className="muted">No data imported yet.</li>}
       </ul>
 
@@ -794,10 +866,9 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
           removeBracketsForPlot(draft, activePlot.id);
 
           // Measured from the renderer's own band scale so bracket ends land on
-          // the bars; the gap grows per bracket so stacked ones do not collide.
-          // The *draft's* node, not the one captured from the previous document
-          // state: mixing the two puts a revoked Immer proxy into `measurePlot`'s
-          // identity-keyed cache.
+          // the bars. The *draft's* node, not the one captured from the previous
+          // document state: mixing the two puts a revoked Immer proxy into
+          // `measurePlot`'s identity-keyed cache.
           const draftPlot = draft.nodes[activePlot.id];
           const measurements =
             draftPlot?.type === 'plot' ? (measurePlot(draft, draftPlot, theme) ?? undefined) : undefined;
@@ -807,11 +878,15 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
           if (!xyCorrelation) {
             result.comparisons.forEach((comparison, index) => {
               if (comparison.pAdjusted > options.alpha) return;
+              // Placed provisionally; the stacking is settled below, once every
+              // bracket on this plot exists. The caller used to pass an
+              // increasing gap per bracket, which cannot see whether two
+              // comparisons even overlap and collapsed them onto one line as
+              // soon as the panel ran out of headroom.
               const bracket = addBracket(draft, newId, {
                 plotId: activePlot.id,
                 analysis,
                 comparisonIndex: index,
-                gapMm: 2 + placed * 3.5,
                 measurements,
               });
               if (bracket) placed++;
@@ -819,9 +894,11 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
             });
           }
 
-          // Bring any bracket on another panel back onto its bars too, in case
-          // the layout moved since it was placed.
-          repositionBrackets(draft, measureAllPlots(draft, theme));
+          // Settles this plot's stack, and brings any bracket on another panel
+          // back onto its bars in case the layout moved since it was placed.
+          repositionBrackets(draft, measureAllPlots(draft, theme), {
+            stepMm: bracketStepMm(theme),
+          });
         });
       });
 

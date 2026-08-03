@@ -302,18 +302,6 @@ export function categoricalMarks(
   });
 }
 
-/**
- * Where a bracket end should land, whichever mark family the plot uses. Every
- * variant is centred on its band slot, so this is the one place that has to know
- * which geometry is present.
- */
-function markCenterX(mark: SeriesMarks): number {
-  if (mark.bar) return mark.bar.x + mark.bar.width / 2;
-  if (mark.box) return mark.box.x + mark.box.width / 2;
-  if (mark.violin) return mark.violin.centerX;
-  return mark.errorBar?.x ?? 0;
-}
-
 /** Keep a swarm inside its slot rather than letting it bleed into the neighbour. */
 function clampOffsets(offsets: readonly number[], limitMm: number): number[] {
   const widest = Math.max(...offsets.map(Math.abs), 0);
@@ -506,75 +494,4 @@ export function histogramMarks(options: HistogramMarkOptions): HistogramBin[] {
       height: Math.abs(baseline - top),
     };
   });
-}
-
-// ---------------------------------------------------------------------------
-// Significance brackets
-// ---------------------------------------------------------------------------
-
-export interface BracketGeometry {
-  xA: number;
-  xB: number;
-  /** Horizontal span of the bracket, in mm. */
-  yMm: number;
-  tickMm: number;
-  labelX: number;
-  labelY: number;
-}
-
-/**
- * Stack brackets so that overlapping comparisons never collide. Each bracket is
- * lifted above both the data it spans and any bracket already placed beneath it.
- */
-export function stackBrackets(
-  comparisons: readonly { indexA: number; indexB: number }[],
-  marks: readonly SeriesMarks[],
-  options: { gapMm: number; stepMm: number; tickMm: number; labelOffsetMm: number },
-): BracketGeometry[] {
-  const placed: BracketGeometry[] = [];
-
-  // Short spans first, so nested comparisons sit below wider ones.
-  const ordered = comparisons
-    .map((c, i) => ({ ...c, i }))
-    .sort((a, b) => Math.abs(a.indexA - b.indexA) - Math.abs(b.indexB - b.indexA));
-
-  const result = new Array<BracketGeometry>(comparisons.length);
-
-  for (const comparison of ordered) {
-    const a = marks[comparison.indexA];
-    const b = marks[comparison.indexB];
-    if (!a || !b) continue;
-
-    const xA = markCenterX(a);
-    const xB = markCenterX(b);
-
-    const spanned = marks.slice(
-      Math.min(comparison.indexA, comparison.indexB),
-      Math.max(comparison.indexA, comparison.indexB) + 1,
-    );
-
-    // y is inverted: "above" means a smaller value.
-    let y = Math.min(...spanned.map((m) => m.topMm)) - options.gapMm;
-
-    for (const existing of placed) {
-      const overlaps =
-        Math.min(xA, xB) <= Math.max(existing.xA, existing.xB) &&
-        Math.max(xA, xB) >= Math.min(existing.xA, existing.xB);
-      if (overlaps) y = Math.min(y, existing.yMm - options.stepMm);
-    }
-
-    const geometry: BracketGeometry = {
-      xA,
-      xB,
-      yMm: y,
-      tickMm: options.tickMm,
-      labelX: (xA + xB) / 2,
-      labelY: y - options.labelOffsetMm,
-    };
-
-    placed.push(geometry);
-    result[comparison.i] = geometry;
-  }
-
-  return result.filter(Boolean);
 }

@@ -7,7 +7,9 @@
  */
 
 import {
+  BRACKET_HEIGHT_MM,
   CONTINUOUS_X_PLOT_TYPES,
+  DEFAULT_BRACKET_GAP_MM,
   absoluteFrame,
   isLocked,
   childrenOf,
@@ -15,6 +17,7 @@ import {
   findDataset,
   findLayer,
   ptToMm,
+  repositionBrackets,
   scaleBarWidthMm,
   toSeries,
   type ArrowNode,
@@ -791,7 +794,8 @@ function requiredMargin(
   node: PlotNode,
   theme: Theme,
   geometry: PlotGeometry,
-): { left: number; bottom: number; right: number } {
+  reserveTopMm = 0,
+): { left: number; bottom: number; right: number; top: number } {
   const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
 
   // An inward tick takes no gutter at all, so it must not reserve any.
@@ -834,11 +838,16 @@ function requiredMargin(
 
   // Never take so much that nothing is left to plot in: on a panel too small
   // for its own labels, a crowded axis still reads where a zero-height plot
-  // does not.
+  // does not. The annotation reserve is capped hardest — a plot squeezed to a
+  // sliver so its brackets fit has lost the thing the brackets annotate.
   return {
     left: Math.min(left, node.frame.width * 0.6),
     bottom: Math.min(bottom, node.frame.height * 0.6),
     right: Math.min(right, node.frame.width * 0.3),
+    top: Math.min(
+      theme.spacing.plotMarginMm.top + reserveTopMm,
+      Math.max(theme.spacing.plotMarginMm.top, node.frame.height * 0.35),
+    ),
   };
 }
 
@@ -865,11 +874,12 @@ function computePlotGeometry(
    * and rebuilding once against the answer terminates by construction, which is
    * what keeps the canvas and the exporter agreeing.
    */
-  const needed = requiredMargin(node, theme, first);
+  const needed = requiredMargin(node, theme, first, annotationReserveMm(node, doc, theme));
   if (
     needed.left <= themeMargin.left + 0.01 &&
     needed.bottom <= themeMargin.bottom + 0.01 &&
-    needed.right <= themeMargin.right + 0.01
+    needed.right <= themeMargin.right + 0.01 &&
+    needed.top <= themeMargin.top + 0.01
   ) {
     return first;
   }
@@ -879,6 +889,9 @@ function computePlotGeometry(
     left: Math.max(themeMargin.left, needed.left),
     bottom: Math.max(themeMargin.bottom, needed.bottom),
     right: Math.max(themeMargin.right, needed.right),
+    // Room above the marks for the brackets over them. Without it the stack
+    // ran off the top of the panel and had to be shoved back down onto the data.
+    top: Math.max(themeMargin.top, needed.top),
   };
   return geometryForMargin(node, series, grown) ?? first;
 }
@@ -950,6 +963,44 @@ export function measurePlot(
 }
 
 /**
+ * Vertical pitch between two brackets stacked over the same bars.
+ *
+ * A bracket node declares itself 1.2 mm tall, but `renderBracket` draws its
+ * label *above* the frame at negative y, so the ink is the frame plus a line of
+ * type plus a gap. Placing on the declared height is why consecutive brackets
+ * used to be drawn 3.5 mm apart with about half a millimetre between the
+ * glyphs — and less than none as soon as the theme's `statisticPt` grew.
+ *
+ * Measured through the same static tables the axis labels use, so the canvas
+ * and the headless exporter stack brackets identically.
+ */
+export function bracketStepMm(theme: Theme): number {
+  return (
+    BRACKET_HEIGHT_MM +
+    estimateTextHeightMm(theme.type.statisticPt) +
+    theme.spacing.bracketGapMm
+  );
+}
+
+/**
+ * Height a plot must keep clear above its marks for the brackets over it.
+ *
+ * Derived from the *count* of brackets, never from where they were placed. The
+ * dependency has to be broken somewhere — placement reads the geometry, and the
+ * geometry would read the placement — and a count is the one quantity that does
+ * not move when the answer does, so this terminates by construction. It is the
+ * same argument the two-pass margin rule rests on.
+ */
+function annotationReserveMm(node: PlotNode, doc: FigureDocument, theme: Theme): number {
+  let count = 0;
+  for (const other of Object.values(doc.nodes)) {
+    if (other.type === 'bracket' && other.plotId === node.id) count++;
+  }
+  if (count === 0) return 0;
+  return DEFAULT_BRACKET_GAP_MM + count * bracketStepMm(theme);
+}
+
+/**
  * Measure every plot in the document, keyed by node id.
  *
  * The bridge for `repositionBrackets`, which lives in `doc-model` and so cannot
@@ -965,6 +1016,20 @@ export function measureAllPlots(doc: FigureDocument, theme: Theme): Map<string, 
     if (measured) out.set(node.id, measured);
   }
   return out;
+}
+
+/**
+ * Put every bracket back on its bars, stacked by the theme's own metrics.
+ *
+ * Every caller wrote `repositionBrackets(draft, measureAllPlots(draft, theme))`
+ * and now needs the bracket pitch as well — which only the render package can
+ * measure. Nine copies of that pairing is nine places for the pitch to be
+ * forgotten, and a forgotten pitch is brackets that overlap again on one screen
+ * and not the next. One composition, like `scaleBarWidthMm` and
+ * `analysisInputHash`.
+ */
+export function reflowBrackets(draft: FigureDocument, theme: Theme): void {
+  repositionBrackets(draft, measureAllPlots(draft, theme), { stepMm: bracketStepMm(theme) });
 }
 
 function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions): SceneNode | null {
