@@ -50,6 +50,19 @@ export interface Dataset {
   format: DataFormat;
   columns: readonly Column[];
   rows: readonly (readonly CellValue[])[];
+  /**
+   * Column 0 holds row labels rather than data, so the x values start in
+   * column 1.
+   *
+   * Only meaningful for the xy layouts (`simple-xy`, `prism`, `sigmaplot`).
+   * `grouped`, `replicate` and `contingency` already read column 0 as a label
+   * by definition, and a second way of saying the same thing is a second thing
+   * that can disagree.
+   *
+   * A *reading* of the rows, like `format` — nothing is dropped and toggling it
+   * is lossless, which is what lets it be corrected after import.
+   */
+  hasRowNames?: boolean;
   /** Path inside the .figureforge archive holding the verbatim original. */
   sourcePath: string | null;
   sourceFilename: string | null;
@@ -217,10 +230,47 @@ function defaultColumnName(index: number): string {
 }
 
 /**
+ * Whether column 0 could be row labels in front of xy data.
+ *
+ * There is deliberately **no guess here** — it reports only that the question
+ * is open, so the importer can offer the choice.
+ *
+ * A text column 0 followed by numbers is the `replicate` signature too, and the
+ * two readings are indistinguishable from the cells:
+ *
+ *     Treatment,R1,R2,R3      Sample,Dose,Alive,Dead
+ *     Vehicle,10,11,12        a,10,11,12
+ *
+ * The first is four groups of replicates, the second is one x and two y series,
+ * and they are the same rectangle of numbers. A heuristic was tried — unique
+ * labels plus a strictly ascending first numeric column, on the theory that a
+ * dose or time axis ascends and replicate measurements do not — and it
+ * immediately misread a real dose-response table, whose group means ascend by
+ * construction. That is precisely the class of silent misreading this round
+ * exists to remove, so the ambiguity is handed to the author instead of being
+ * resolved wrongly on their behalf.
+ */
+export function couldHaveRowNames(columns: readonly Column[]): boolean {
+  return (
+    columns.length >= 3 &&
+    columns[0]?.kind === 'text' &&
+    columns.slice(1).every((c) => c.kind === 'number')
+  );
+}
+
+/**
  * Guess the layout from the column shape. The importer shows this as a
  * pre-selected suggestion in the live preview, never as a silent decision.
+ *
+ * With `hasRowNames`, column 0 is a label rather than data and the shape is
+ * read from what follows it — otherwise every row-labelled xy table infers as
+ * `replicate`, since a text column in front of numbers is that signature.
  */
-export function inferFormat(columns: readonly Column[]): DataFormat {
+export function inferFormat(
+  columns: readonly Column[],
+  options: { hasRowNames?: boolean } = {},
+): DataFormat {
+  if (options.hasRowNames) return inferFormat(columns.slice(1));
   const kinds = columns.map((c) => c.kind);
   const numericCount = kinds.filter((k) => k === 'number').length;
 
@@ -325,35 +375,79 @@ export function toSeries(ds: Dataset): Series[] {
     }
 
     case 'prism': {
-      const xValues = numericColumnAt(ds, 0);
-      return ds.columns.slice(1).map((col, i) => {
-        const values = numericColumnAt(ds, i + 1);
-        return { name: col.name, values, x: xValues.slice(0, values.length) };
-      });
+      // Column 0 is x — or the row labels, with x in column 1.
+      const first = dataColumnOffset(ds);
+      return ds.columns.slice(first + 1).map((col, i) => ({
+        name: col.name,
+        ...numericPairsAt(ds, first, first + 1 + i),
+      }));
     }
 
     case 'sigmaplot': {
+      const first = dataColumnOffset(ds);
       const out: Series[] = [];
-      for (let i = 0; i + 1 < ds.columns.length; i += 2) {
-        const xs = numericColumnAt(ds, i);
-        const ys = numericColumnAt(ds, i + 1);
-        out.push({ name: ds.columns[i + 1]!.name, values: ys, x: xs });
+      for (let i = first; i + 1 < ds.columns.length; i += 2) {
+        out.push({ name: ds.columns[i + 1]!.name, ...numericPairsAt(ds, i, i + 1) });
       }
       return out;
     }
 
     case 'simple-xy':
     default: {
-      const xs = numericColumnAt(ds, 0);
-      const ys = numericColumnAt(ds, 1);
-      const name = ds.columns[1]?.name ?? 'Y';
-      return [{ name, values: ys, x: xs }];
+      const first = dataColumnOffset(ds);
+      const name = ds.columns[first + 1]?.name ?? 'Y';
+      return [{ name, ...numericPairsAt(ds, first, first + 1) }];
     }
   }
 }
 
-function numericColumnAt(ds: Dataset, index: number): number[] {
-  return ds.rows
-    .map((r) => r[index] ?? null)
-    .filter((v): v is number => typeof v === 'number');
+/**
+ * Index of the first *data* column: 1 when column 0 holds row labels.
+ *
+ * Applies to the xy layouts only — see `Dataset.hasRowNames`.
+ */
+export function dataColumnOffset(ds: Dataset): number {
+  return ds.hasRowNames ? 1 : 0;
+}
+
+/**
+ * The row labels, when column 0 carries them. Empty for a table without.
+ *
+ * Nothing plots these — they name the rows for the author, in the data grid and
+ * in a point's identity. Exposed so a caller does not re-derive "column 0 when
+ * the flag is set" and get the format exceptions wrong.
+ */
+export function rowNames(ds: Dataset): string[] {
+  if (!ds.hasRowNames) return [];
+  return ds.rows.map((r) => (r[0] === null ? '' : String(r[0])));
+}
+
+/**
+ * Paired (x, y) values read by *row index*, keeping only rows where both are
+ * numbers.
+ *
+ * Reading the two columns independently and filtering each is what this
+ * replaced, and it silently misplotted data: a blank y in the middle of a
+ * column shortened that series by one, and the shared x was then truncated
+ * from its *end* — so every point after the gap was drawn against the x of the
+ * row before it. The gap was invisible and the resulting curve entirely
+ * plausible. Dropping the whole pair is the only reading that cannot move a
+ * point onto an x it was never measured at; `xyMarks` already applies exactly
+ * this rule downstream, too late to help.
+ */
+function numericPairsAt(
+  ds: Dataset,
+  xIndex: number,
+  yIndex: number,
+): { values: number[]; x: number[] } {
+  const values: number[] = [];
+  const x: number[] = [];
+  for (const row of ds.rows) {
+    const xValue = row[xIndex];
+    const yValue = row[yIndex];
+    if (typeof xValue !== 'number' || typeof yValue !== 'number') continue;
+    x.push(xValue);
+    values.push(yValue);
+  }
+  return { values, x };
 }

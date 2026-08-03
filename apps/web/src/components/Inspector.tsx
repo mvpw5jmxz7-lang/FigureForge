@@ -19,7 +19,6 @@ import {
   findDataset,
   formatMm,
   normaliseArrowFrame,
-  repositionBrackets,
   resizePanel,
   resyncScaleBars,
   scaleBarWidthMm,
@@ -38,7 +37,7 @@ import {
   type PointShape,
   type TextStyle,
 } from '@figureforge/doc-model';
-import { measureAllPlots } from '@figureforge/render';
+import { reflowBrackets } from '@figureforge/render';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
@@ -265,7 +264,7 @@ export function InspectorTab({
                   // alone would leave the plot at its old size inside it.
                   if (node.type === 'panel') resizePanel(draft, node.id, frame);
                   else updateNode(draft, node.id, { frame });
-                  repositionBrackets(draft, measureAllPlots(draft, theme));
+                  reflowBrackets(draft, theme);
                 });
               }}
             />
@@ -1042,7 +1041,7 @@ function ImageFields({
                 (target.naturalPx.height * target.crop.height);
               target.frame = { ...target.frame, height: target.frame.width / aspect };
               resyncScaleBars(draft);
-              repositionBrackets(draft, measureAllPlots(draft, theme));
+              reflowBrackets(draft, theme);
             })
           }
         >

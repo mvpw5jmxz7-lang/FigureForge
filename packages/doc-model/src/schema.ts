@@ -252,6 +252,10 @@ const datasetSchema = z.object({
   format: z.enum(['simple-xy', 'prism', 'sigmaplot', 'grouped', 'replicate', 'contingency']),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
+  // Optional, so files written before it still load. zod strips unknown keys,
+  // so a field present only on the TS type is dropped on save — this is the
+  // half that makes it survive.
+  hasRowNames: z.boolean().optional(),
   sourcePath: z.string().nullable(),
   sourceFilename: z.string().nullable(),
   importedAt: z.string(),

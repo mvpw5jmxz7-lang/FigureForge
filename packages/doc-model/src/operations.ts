@@ -12,7 +12,7 @@
 import { current, isDraft } from 'immer';
 import type { Analysis } from './analysis.js';
 import { significanceStars } from './analysis.js';
-import type { Dataset } from './data.js';
+import type { DataFormat, Dataset } from './data.js';
 import { toSeries } from './data.js';
 import type { Asset, FigureDocument } from './document.js';
 import { layerByName, nextZ } from './document.js';
@@ -33,6 +33,7 @@ import type {
   AxisSpec,
   BracketNode,
   CalibrationSource,
+  DatasetId,
   Fill,
   FigureNode,
   GroupNode,
@@ -788,8 +789,14 @@ export interface PlotMeasurements {
 /** Measurements for many plots at once, keyed by plot node id. */
 export type PlotMeasurementMap = ReadonlyMap<NodeId, PlotMeasurements>;
 
-/** Height of a bracket's tick descent; the span sits at the frame top. */
-const BRACKET_HEIGHT_MM = 1.2;
+/**
+ * Height of a bracket's tick descent; the span sits at the frame top.
+ *
+ * Not the height of what a bracket *draws*: the label is rendered above the
+ * frame at negative y. Anything spacing two brackets apart wants
+ * `bracketStepMm` in the render package, which adds the label.
+ */
+export const BRACKET_HEIGHT_MM = 1.2;
 
 export interface AddBracketOptions {
   plotId: NodeId;
@@ -804,11 +811,79 @@ export interface AddBracketOptions {
 }
 
 /**
+ * Where one bracket's span sits horizontally, and what it has to clear.
+ *
+ * Split out from `bracketFrame` so that the *vertical* decision can be taken
+ * for a plot's brackets together — see `layoutBracketsForPlot`. Positions are
+ * relative to the plot's own frame; the panel offset is added by the caller.
+ */
+interface BracketSpan {
+  indexA: number;
+  indexB: number;
+  xA: number;
+  xB: number;
+  /** Top of the tallest drawn feature anywhere under the span, in mm. */
+  contentTop: number;
+}
+
+function bracketSpan(
+  draft: FigureDocument,
+  options: {
+    plotId: NodeId;
+    datasetId: string;
+    groupA: string;
+    groupB: string;
+    measurements?: PlotMeasurements;
+  },
+): BracketSpan | null {
+  const plot = draft.nodes[options.plotId];
+  if (!plot || plot.type !== 'plot') return null;
+
+  const dataset = draft.datasets.find((d) => d.id === options.datasetId);
+  if (!dataset) return null;
+
+  const seriesNames = toSeries(dataset).map((s) => s.name);
+  const indexA = seriesNames.indexOf(options.groupA);
+  const indexB = seriesNames.indexOf(options.groupB);
+  if (indexA < 0 || indexB < 0) return null;
+
+  const leftName = seriesNames[Math.min(indexA, indexB)]!;
+  const rightName = seriesNames[Math.max(indexA, indexB)]!;
+
+  if (options.measurements) {
+    const measurements = options.measurements;
+    // Clear the tallest feature anywhere under the bracket's span.
+    const spanned = seriesNames.slice(Math.min(indexA, indexB), Math.max(indexA, indexB) + 1);
+    const top = Math.min(...spanned.map((name) => measurements.categoryTop.get(name) ?? Infinity));
+    return {
+      indexA,
+      indexB,
+      xA: measurements.categoryX.get(leftName) ?? 0,
+      xB: measurements.categoryX.get(rightName) ?? plot.frame.width,
+      contentTop: Number.isFinite(top) ? top : 0,
+    };
+  }
+
+  // Fallback: even spacing across the plot. Approximate, but the bracket is
+  // a normal draggable object, so the user can correct it.
+  const slot = plot.frame.width / Math.max(1, seriesNames.length);
+  return {
+    indexA,
+    indexB,
+    xA: slot * (Math.min(indexA, indexB) + 0.5),
+    xB: slot * (Math.max(indexA, indexB) + 0.5),
+    contentTop: 0,
+  };
+}
+
+/**
  * Page-space frame for a bracket spanning two categories of a plot.
  *
- * Shared by creation and repositioning. Keeping one implementation is the
- * point: two copies of this arithmetic would drift, and the symptom would be
- * brackets that sit correctly when first placed and wrongly ever after.
+ * Provisional placement for a bracket being created: it clears the data it
+ * spans but knows nothing about its neighbours, because at creation time they
+ * may not exist yet. `layoutBracketsForPlot` is what settles the stack, and
+ * every creation path runs it immediately afterwards — so this position is
+ * never what the author sees.
  */
 export function bracketFrame(
   draft: FigureDocument,
@@ -827,49 +902,150 @@ export function bracketFrame(
   const panel = plot.parentId ? draft.nodes[plot.parentId] : null;
   if (!panel) return null;
 
-  const dataset = draft.datasets.find((d) => d.id === options.datasetId);
-  if (!dataset) return null;
+  const span = bracketSpan(draft, options);
+  if (!span) return null;
 
-  const seriesNames = toSeries(dataset).map((s) => s.name);
-  const indexA = seriesNames.indexOf(options.groupA);
-  const indexB = seriesNames.indexOf(options.groupB);
-  if (indexA < 0 || indexB < 0) return null;
-
-  const leftName = seriesNames[Math.min(indexA, indexB)]!;
-  const rightName = seriesNames[Math.max(indexA, indexB)]!;
-
-  let xA: number;
-  let xB: number;
-  let contentTop = 0;
-
-  if (options.measurements) {
-    const measurements = options.measurements;
-    xA = measurements.categoryX.get(leftName) ?? 0;
-    xB = measurements.categoryX.get(rightName) ?? plot.frame.width;
-    // Clear the tallest feature anywhere under the bracket's span.
-    const spanned = seriesNames.slice(Math.min(indexA, indexB), Math.max(indexA, indexB) + 1);
-    contentTop = Math.min(
-      ...spanned.map((name) => measurements.categoryTop.get(name) ?? Infinity),
-    );
-    if (!Number.isFinite(contentTop)) contentTop = 0;
-  } else {
-    // Fallback: even spacing across the plot. Approximate, but the bracket is
-    // a normal draggable object, so the user can correct it.
-    const slot = plot.frame.width / Math.max(1, seriesNames.length);
-    xA = slot * (Math.min(indexA, indexB) + 0.5);
-    xB = slot * (Math.max(indexA, indexB) + 0.5);
-  }
-
-  const gap = options.gapMm ?? 4;
+  const gap = options.gapMm ?? DEFAULT_BRACKET_GAP_MM;
+  const left = Math.min(span.xA, span.xB);
+  const right = Math.max(span.xA, span.xB);
 
   return {
-    x: panel.frame.x + xA,
+    x: panel.frame.x + left,
     // The tick ends are the bottom of the frame, so position the frame so
     // they stop `gap` above the tallest datum rather than overlapping it.
-    y: panel.frame.y + Math.max(0, contentTop - gap - BRACKET_HEIGHT_MM),
-    width: Math.max(1, xB - xA),
+    y: panel.frame.y + span.contentTop - gap - BRACKET_HEIGHT_MM,
+    width: Math.max(1, right - left),
     height: BRACKET_HEIGHT_MM,
   };
+}
+
+/** Clearance between the tallest mark and the lowest bracket over it. */
+export const DEFAULT_BRACKET_GAP_MM = 2;
+
+/**
+ * Vertical pitch between two brackets that overlap horizontally.
+ *
+ * A bracket's *node* is 1.2 mm tall, but its label is drawn above the frame at
+ * negative y, so its real ink is roughly 3 mm at the default 6 pt. Callers with
+ * a theme should measure it (`bracketStepMm` in the render package) rather than
+ * inherit this; the constant exists so a headless caller still gets a stack
+ * that does not collide.
+ */
+export const DEFAULT_BRACKET_STEP_MM = 3.6;
+
+export interface BracketLayoutOptions {
+  gapMm?: number;
+  stepMm?: number;
+}
+
+/**
+ * Place every bracket on one plot, together.
+ *
+ * This has to be one pass over the whole set, because where a bracket goes
+ * depends on what is already above the bars it spans. Placing each one alone —
+ * which is what happened until now, with the caller passing an increasing
+ * `gapMm` per bracket — fails four ways, all reachable with default settings:
+ *
+ *   - the per-bracket clamp at the panel top collapsed every bracket past the
+ *     second onto the same line, pixel for pixel;
+ *   - the increment was a fixed 3.5 mm against a frame declared 1.2 mm tall,
+ *     leaving half a millimetre of real clearance for a ~3 mm label;
+ *   - comparisons that do not overlap horizontally were still stacked, which
+ *     spent the vertical budget that then triggered the clamp;
+ *   - and a later bracket over short bars could end up below an earlier one
+ *     over tall bars, crossing it.
+ *
+ * So: shortest span first, so nested comparisons sit below the wider ones that
+ * contain them, and each bracket rises above both the data under it and any
+ * *horizontally overlapping* bracket already placed. Disjoint comparisons share
+ * a height, which is both correct and what a reader expects.
+ *
+ * Returns base frames by node id — before `userOffsetMm`, which callers apply.
+ */
+export function layoutBracketsForPlot(
+  draft: FigureDocument,
+  plotId: NodeId,
+  measurements: PlotMeasurements | undefined,
+  options: BracketLayoutOptions = {},
+): Map<NodeId, RectMm> {
+  const frames = new Map<NodeId, RectMm>();
+
+  const plot = draft.nodes[plotId];
+  if (!plot || plot.type !== 'plot') return frames;
+  const panel = plot.parentId ? draft.nodes[plot.parentId] : null;
+  if (!panel) return frames;
+
+  const gapMm = options.gapMm ?? DEFAULT_BRACKET_GAP_MM;
+  const stepMm = options.stepMm ?? DEFAULT_BRACKET_STEP_MM;
+
+  const entries: (BracketSpan & { id: NodeId })[] = [];
+  for (const node of bracketsForPlot(draft, plotId)) {
+    const analysis = node.analysisId
+      ? draft.analyses.find((a) => a.id === node.analysisId)
+      : undefined;
+    const comparison = analysis?.result?.comparisons[node.comparisonIndex ?? 0];
+    if (!analysis || !comparison) continue;
+
+    const span = bracketSpan(draft, {
+      plotId,
+      datasetId: analysis.spec.datasetId,
+      groupA: comparison.groupA,
+      groupB: comparison.groupB,
+      ...(measurements ? { measurements } : {}),
+    });
+    if (span) entries.push({ ...span, id: node.id });
+  }
+  if (entries.length === 0) return frames;
+
+  entries.sort((a, b) => {
+    const spanA = Math.abs(a.indexB - a.indexA);
+    const spanB = Math.abs(b.indexB - b.indexA);
+    // Ties broken by position so the order is stable across renders — two
+    // brackets swapping heights between two identical documents would make the
+    // canvas and the export disagree.
+    return spanA !== spanB ? spanA - spanB : Math.min(a.xA, a.xB) - Math.min(b.xA, b.xB);
+  });
+
+  const placed: { left: number; right: number; y: number }[] = [];
+  for (const entry of entries) {
+    const left = Math.min(entry.xA, entry.xB);
+    const right = Math.max(entry.xA, entry.xB);
+
+    // y is inverted: "above" is a smaller number.
+    let y = entry.contentTop - gapMm - BRACKET_HEIGHT_MM;
+    for (const existing of placed) {
+      if (left <= existing.right && right >= existing.left) {
+        y = Math.min(y, existing.y - stepMm);
+      }
+    }
+
+    placed.push({ left, right, y });
+    frames.set(entry.id, {
+      x: panel.frame.x + left,
+      y: panel.frame.y + y,
+      width: Math.max(1, right - left),
+      height: BRACKET_HEIGHT_MM,
+    });
+  }
+
+  /*
+   * A panel too short for the stack pushes it above its own top edge, where it
+   * would overprint the panel above. Shift the *whole* stack down by the
+   * shortfall rather than clamping each bracket, which is precisely how they
+   * came to pile up on one line before: clamping individually destroys the
+   * separation this function exists to produce, while shifting preserves both
+   * the order and the spacing and merely crowds the tallest bar — visible, and
+   * an obvious "this panel needs to be taller".
+   *
+   * `computePlotGeometry` reserves headroom from the bracket count, so this is
+   * a backstop rather than the normal path.
+   */
+  const highest = Math.min(...[...frames.values()].map((f) => f.y - panel.frame.y));
+  if (highest < 0) {
+    for (const [id, frame] of frames) frames.set(id, { ...frame, y: frame.y - highest });
+  }
+
+  return frames;
 }
 
 /**
@@ -996,35 +1172,28 @@ export function replaceAnalysisForPlot(draft: FigureDocument, analysis: Analysis
 export function repositionBrackets(
   draft: FigureDocument,
   measurements: PlotMeasurementMap,
+  options: BracketLayoutOptions = {},
 ): void {
+  // Grouped by plot, because the placement of any one bracket depends on the
+  // others over the same bars — see `layoutBracketsForPlot`.
+  const plotIds = new Set<NodeId>();
   for (const node of Object.values(draft.nodes)) {
-    if (node.type !== 'bracket') continue;
-    const plotId = node.plotId ?? null;
-    if (plotId === null) continue;
+    if (node.type === 'bracket' && node.plotId) plotIds.add(node.plotId);
+  }
 
-    const analysis = node.analysisId
-      ? draft.analyses.find((a) => a.id === node.analysisId)
-      : undefined;
-    const comparison = analysis?.result?.comparisons[node.comparisonIndex ?? 0];
-    if (!analysis || !comparison) continue;
-
+  for (const plotId of plotIds) {
     const measured = measurements.get(plotId);
+    // Plots absent from the map are unmeasurable (collapsed to zero width);
+    // leaving their brackets alone is better than moving them somewhere wrong.
     if (!measured) continue;
 
-    const frame = bracketFrame(draft, {
-      plotId,
-      datasetId: analysis.spec.datasetId,
-      groupA: comparison.groupA,
-      groupB: comparison.groupB,
-      ...(node.gapMm !== undefined ? { gapMm: node.gapMm } : {}),
-      measurements: measured,
-    });
-    if (!frame) continue;
-
-    const offset = node.userOffsetMm;
-    node.frame = offset
-      ? { ...frame, x: frame.x + offset.x, y: frame.y + offset.y }
-      : frame;
+    const frames = layoutBracketsForPlot(draft, plotId, measured, options);
+    for (const [id, frame] of frames) {
+      const node = draft.nodes[id];
+      if (!node || node.type !== 'bracket') continue;
+      const offset = node.userOffsetMm;
+      node.frame = offset ? { ...frame, x: frame.x + offset.x, y: frame.y + offset.y } : frame;
+    }
   }
 }
 
@@ -1032,11 +1201,16 @@ export function repositionBrackets(
  * Record a bracket's manual displacement from where the geometry would put it.
  *
  * Called after a drag, so the next reposition can re-apply the same offset.
+ * The baseline is the *collective* placement, the same one `repositionBrackets`
+ * will compute next time — deriving it from a single-bracket rule would make
+ * the offset a difference against a position nothing else agrees with, and the
+ * bracket would jump the first time anything re-laid it out.
  */
 export function recordBracketOffset(
   draft: FigureDocument,
   bracketId: NodeId,
   measurements: PlotMeasurementMap,
+  options: BracketLayoutOptions = {},
 ): void {
   const node = draft.nodes[bracketId];
   if (!node || node.type !== 'bracket') return;
@@ -1044,23 +1218,12 @@ export function recordBracketOffset(
   const plotId = node.plotId ?? null;
   if (plotId === null) return;
 
-  const analysis = node.analysisId
-    ? draft.analyses.find((a) => a.id === node.analysisId)
-    : undefined;
-  const comparison = analysis?.result?.comparisons[node.comparisonIndex ?? 0];
-  if (!analysis || !comparison) return;
-
   const measured = measurements.get(plotId);
   if (!measured) return;
 
-  const base = bracketFrame(draft, {
-    plotId,
-    datasetId: analysis.spec.datasetId,
-    groupA: comparison.groupA,
-    groupB: comparison.groupB,
-    ...(node.gapMm !== undefined ? { gapMm: node.gapMm } : {}),
-    measurements: measured,
-  });
+  // The layout returns base frames with no offset applied, so the difference
+  // against the dragged frame is the whole displacement, not an increment.
+  const base = layoutBracketsForPlot(draft, plotId, measured, options).get(bracketId);
   if (!base) return;
 
   node.userOffsetMm = { x: node.frame.x - base.x, y: node.frame.y - base.y };
@@ -1318,6 +1481,77 @@ export function renameDataset(draft: FigureDocument, datasetId: string, name: st
     const renamed = { ...analysis, name: `${analysis.test} on ${trimmed}` };
     draft.analyses = draft.analyses.map((a) => (a.id === analysis.id ? renamed : a));
   }
+}
+
+/** Plot nodes reading a dataset. Empty means nothing on the page needs it. */
+export function plotsUsingDataset(nodes: NodeMap, datasetId: DatasetId): PlotNode[] {
+  return Object.values(nodes).filter(
+    (n): n is PlotNode => n.type === 'plot' && n.datasetId === datasetId,
+  );
+}
+
+/**
+ * Drop a dataset, and the analyses computed from it.
+ *
+ * Refuses while any plot still reads it: `checkReferentialIntegrity` rejects a
+ * document whose plot points at a missing dataset, so removing it anyway would
+ * produce a figure that edits perfectly and then cannot be saved. Returns
+ * whether it went, so the caller can say why not.
+ *
+ * The analyses have to go with it. A result card citing a dataset the document
+ * no longer contains cannot be checked against its data, and `analysisInputHash`
+ * has nothing left to re-hash — the staleness warning that exists to catch
+ * exactly this would be reporting on numbers that are gone.
+ *
+ * Deliberately *not* automatic when the last plot is deleted, for the same
+ * reason orphan image assets are kept: undo has to be able to bring the plot
+ * back, and collecting its data on the way out is what would strand it.
+ */
+export function removeDataset(draft: FigureDocument, datasetId: DatasetId): boolean {
+  if (plotsUsingDataset(draft.nodes, datasetId).length > 0) return false;
+  if (!draft.datasets.some((d) => d.id === datasetId)) return false;
+
+  const orphaned = new Set(
+    draft.analyses.filter((a) => a.spec.datasetId === datasetId).map((a) => a.id),
+  );
+
+  draft.datasets = draft.datasets.filter((d) => d.id !== datasetId);
+  draft.analyses = draft.analyses.filter((a) => !orphaned.has(a.id));
+
+  // A bracket whose analysis is gone can never be repositioned again —
+  // `repositionBrackets` looks the analysis up and skips it — so it would sit
+  // frozen at its last position, labelled with a p-value nothing can verify.
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type === 'bracket' && node.analysisId !== null && orphaned.has(node.analysisId)) {
+      delete draft.nodes[node.id];
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Change how a dataset's columns are read, without touching the rows.
+ *
+ * `format` and `hasRowNames` are both *readings* of the same cells, so changing
+ * either is lossless and reversible — which is what makes correcting a
+ * mis-detected layout after import safe. The plot follows automatically:
+ * `toSeries` is the only consumer of both fields.
+ */
+export function setDatasetReading(
+  draft: FigureDocument,
+  datasetId: DatasetId,
+  reading: { format?: DataFormat; hasRowNames?: boolean },
+): void {
+  draft.datasets = draft.datasets.map((d) =>
+    d.id === datasetId
+      ? {
+          ...d,
+          ...(reading.format !== undefined ? { format: reading.format } : {}),
+          ...(reading.hasRowNames !== undefined ? { hasRowNames: reading.hasRowNames } : {}),
+        }
+      : d,
+  );
 }
 
 /**

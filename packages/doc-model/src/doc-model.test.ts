@@ -3,8 +3,10 @@ import {
   analysisInputHash,
   ArchiveError,
   buildArchiveContents,
+  checkReferentialIntegrity,
   createDocument,
   createIdFactory,
+  couldHaveRowNames,
   DocumentStore,
   editDocument,
   formatMm,
@@ -16,6 +18,7 @@ import {
   mmToPt,
   parseDelimited,
   ptToMm,
+  rowNames,
   saveArchive,
   significanceStars,
   toMm,
@@ -43,8 +46,11 @@ import {
   normaliseArrowFrame,
   normaliseCrop,
   nextPanelFrame,
+  plotsUsingDataset,
+  recordBracketOffset,
   relabelPanels,
   removeBracketsForPlot,
+  removeDataset,
   renameDataset,
   reorderNode,
   reparentNode,
@@ -53,6 +59,7 @@ import {
   resizePanel,
   scaleBarWidthMm,
   setArrowPoint,
+  setDatasetReading,
   setImageCrop,
   ungroup,
   type PlotMeasurements,
@@ -70,6 +77,7 @@ import {
 import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './templates.js';
 import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
+import type { FigureDocument } from './document.js';
 
 // ---------------------------------------------------------------------------
 // Units
@@ -240,6 +248,76 @@ describe('series extraction', () => {
   it('skips missing replicates instead of counting them', () => {
     const series = toSeries(dataset('Treatment,R1,R2,R3\nA,10,,12'));
     expect(series[0]?.values).toEqual([10, 12]);
+  });
+
+  it('keeps every xy point on its own x when a value is missing', () => {
+    /*
+     * The columns used to be read independently and filtered separately, then
+     * x was truncated to the y count — so a hole at row 2 shifted rows 3+ onto
+     * the x of the row before, and dropped the last x entirely. Nothing about
+     * the resulting curve looked wrong.
+     */
+    const series = toSeries(dataset('Time,WT,KO\n0,10,1\n1,,2\n2,30,3\n3,40,4'));
+
+    expect(series[0]?.x).toEqual([0, 2, 3]);
+    expect(series[0]?.values).toEqual([10, 30, 40]);
+    // The untouched series must not be disturbed by its neighbour's hole.
+    expect(series[1]?.x).toEqual([0, 1, 2, 3]);
+    expect(series[1]?.values).toEqual([1, 2, 3, 4]);
+  });
+
+  it('drops an xy pair whose x is missing, not just its y', () => {
+    // A blank x is equally unplottable: the point has no position to take.
+    const series = toSeries(dataset('X1,Y1,X2,Y2\n1,10,5,50\n,20,6,60\n3,30,7,70'));
+    expect(series[0]?.x).toEqual([1, 3]);
+    expect(series[0]?.values).toEqual([10, 30]);
+    expect(series[1]?.x).toEqual([5, 6, 7]);
+  });
+
+  it('pairs a simple xy table by row', () => {
+    const series = toSeries(dataset('X,Y\n1,10\n2,\n3,30'));
+    expect(series[0]).toEqual({ name: 'Y', values: [10, 30], x: [1, 3] });
+  });
+
+  it('reads x from column 2 when column 1 holds row names', () => {
+    // Without the flag this is the `replicate` signature — a text column in
+    // front of numbers — and the x values would be read as replicate data.
+    const table: Dataset = {
+      ...dataset('Sample,Time,WT,KO\na,0,10,1\nb,1,20,2\nc,2,30,3'),
+      format: 'prism',
+      hasRowNames: true,
+    };
+    const series = toSeries(table);
+    expect(series.map((s) => s.name)).toEqual(['WT', 'KO']);
+    expect(series[0]?.x).toEqual([0, 1, 2]);
+    expect(series[0]?.values).toEqual([10, 20, 30]);
+    expect(rowNames(table)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('offers the row-name reading without guessing at it', () => {
+    /*
+     * These two tables are the same rectangle of numbers and mean opposite
+     * things. An earlier version guessed between them on "unique labels and an
+     * ascending first numeric column" and read a real dose-response replicate
+     * table — whose group means ascend by construction — as row names plus xy.
+     * So the question is reported as open and the author settles it.
+     */
+    const labelled = parseDelimited('Sample,Time,WT,KO\na,0,10,1\nb,1,20,2\nc,2,30,3');
+    const replicates = parseDelimited(
+      'Treatment,R1,R2,R3\nVehicle,10,11,12\nLow,25,26,24\nMid,50,51,49\nHigh,80,81,79',
+    );
+
+    expect(couldHaveRowNames(labelled.columns)).toBe(true);
+    expect(couldHaveRowNames(replicates.columns)).toBe(true);
+
+    // Neither is *read* that way unless asked: the replicate reading is what
+    // both tables get by default, which is how they have always been read.
+    expect(inferFormat(labelled.columns)).toBe('replicate');
+    expect(inferFormat(replicates.columns)).toBe('replicate');
+    expect(inferFormat(labelled.columns, { hasRowNames: true })).toBe('prism');
+
+    // An all-numeric table has no label column to be asked about.
+    expect(couldHaveRowNames(parseDelimited('X,Y1,Y2\n1,2,3\n4,5,6').columns)).toBe(false);
   });
 });
 
@@ -1442,6 +1520,218 @@ describe('statistical annotation lifecycle', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bracket stacking
+// ---------------------------------------------------------------------------
+
+/** Four groups, so comparisons can genuinely overlap or not. */
+const FOUR_GROUP_CSV = 'Treatment,R1,R2,R3\nA,1,2,3\nB,4,5,6\nC,7,8,9\nD,10,11,12';
+
+/** Band centres 10 mm apart, every category the same height. */
+function fourGroupMeasurements(top = 8): PlotMeasurements {
+  return {
+    categoryX: new Map([
+      ['A', 10],
+      ['B', 20],
+      ['C', 30],
+      ['D', 40],
+    ]),
+    categoryTop: new Map([
+      ['A', top],
+      ['B', top],
+      ['C', top],
+      ['D', top],
+    ]),
+  };
+}
+
+/** A document with one plot over four groups and a bracket per comparison. */
+function stackedDocument(pairs: readonly [string, string][], measured = fourGroupMeasurements()) {
+  const newId = createIdFactory();
+  const base = createDocument({
+    widthMm: 183,
+    heightMm: 75,
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  const doc = editDocument(base, (draft) => {
+    const ds = dataset(FOUR_GROUP_CSV, newId());
+    draft.datasets = [ds];
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 60, height: 50 },
+      datasetId: ds.id,
+      name: 'One',
+    });
+  });
+
+  const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+  const analysis: Analysis = {
+    ...sampleAnalysis(newId(), plot.id, doc.datasets[0]!.id),
+    spec: { datasetId: doc.datasets[0]!.id, groups: ['A', 'B', 'C', 'D'] },
+    result: {
+      ...sampleAnalysis('x', plot.id, doc.datasets[0]!.id).result!,
+      comparisons: pairs.map(([groupA, groupB]) => ({
+        groupA,
+        groupB,
+        statistic: 4,
+        p: 0.001,
+        pAdjusted: 0.001,
+        df: 4,
+        ci: null,
+        effectSize: 1,
+        effectSizeName: "Hedges' g",
+        n: [3, 3],
+      })),
+    },
+  };
+
+  const annotated = editDocument(doc, (draft) => {
+    replaceAnalysisForPlot(draft, analysis);
+    pairs.forEach((_, index) => {
+      addBracket(draft, newId, {
+        plotId: plot.id,
+        analysis,
+        comparisonIndex: index,
+        measurements: measured,
+      });
+    });
+  });
+
+  return { doc: annotated, plotId: plot.id, measured };
+}
+
+/** Bracket frames in creation order, as a list of {y, left, right}. */
+function bracketBoxes(doc: FigureDocument) {
+  return Object.values(doc.nodes)
+    .filter((n) => n.type === 'bracket')
+    .map((n) => ({
+      y: n.frame.y,
+      left: n.frame.x,
+      right: n.frame.x + n.frame.width,
+      name: n.name,
+    }));
+}
+
+describe('bracket stacking', () => {
+  it('separates every overlapping comparison by the step', () => {
+    // A–B, A–C and A–D all start at A, so all three overlap horizontally and
+    // each must clear the one below it. Placing them independently — which is
+    // what the caller's increasing-gap sequence did — put the second and third
+    // on the same line as soon as the panel ran out of headroom.
+    const { doc, plotId, measured } = stackedDocument([
+      ['A', 'B'],
+      ['A', 'C'],
+      ['A', 'D'],
+    ]);
+
+    const laid = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+
+    const ys = bracketBoxes(laid)
+      .map((b) => b.y)
+      .sort((a, b) => a - b);
+    expect(new Set(ys).size).toBe(3);
+    // y is inverted, so consecutive brackets differ by a full step upward.
+    expect(ys[1]! - ys[0]!).toBeCloseTo(4, 6);
+    expect(ys[2]! - ys[1]!).toBeCloseTo(4, 6);
+  });
+
+  it('puts the shortest span lowest, so nested comparisons sit inside wider ones', () => {
+    const { doc, plotId, measured } = stackedDocument([
+      ['A', 'D'],
+      ['A', 'B'],
+    ]);
+
+    const laid = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+
+    const boxes = bracketBoxes(laid);
+    const wide = boxes.find((b) => b.right - b.left > 20)!;
+    const narrow = boxes.find((b) => b.right - b.left <= 20)!;
+    // Declared first but spanning further, so it must end up above — the old
+    // rule keyed the height off comparison order and would have crossed them.
+    expect(wide.y).toBeLessThan(narrow.y);
+  });
+
+  it('lets disjoint comparisons share a height', () => {
+    // A–B and C–D do not overlap, so lifting the second buys nothing and costs
+    // the vertical budget that the overlapping case actually needs.
+    const { doc, plotId, measured } = stackedDocument([
+      ['A', 'B'],
+      ['C', 'D'],
+    ]);
+
+    const laid = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+
+    const [first, second] = bracketBoxes(laid);
+    expect(first!.y).toBeCloseTo(second!.y, 6);
+  });
+
+  it('shifts the whole stack down rather than collapsing it onto the panel top', () => {
+    /*
+     * The tallest mark 1 mm from the panel top leaves no room for three
+     * brackets. The old code clamped each one to `Math.max(0, …)`, which is
+     * exactly how they came to be drawn on top of one another. Shifting the
+     * stack keeps every separation intact.
+     */
+    const { doc, plotId, measured } = stackedDocument(
+      [
+        ['A', 'B'],
+        ['A', 'C'],
+        ['A', 'D'],
+      ],
+      fourGroupMeasurements(1),
+    );
+
+    const laid = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+
+    const boxes = bracketBoxes(laid);
+    const ys = boxes.map((b) => b.y).sort((a, b) => a - b);
+    expect(new Set(ys).size).toBe(3);
+    expect(ys[1]! - ys[0]!).toBeCloseTo(4, 6);
+    // Still inside the panel, which starts at y = 0.
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('keeps a manual nudge measured against the collective placement', () => {
+    const { doc, plotId, measured } = stackedDocument([
+      ['A', 'B'],
+      ['A', 'C'],
+    ]);
+
+    const laid = editDocument(doc, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+    const target = bracketBoxes(laid)[0]!;
+    const targetId = Object.values(laid.nodes).find(
+      (n) => n.type === 'bracket' && n.name === target.name,
+    )!.id;
+
+    // Drag it 3 mm up, record the offset, then re-lay everything out.
+    const nudged = editDocument(laid, (draft) => {
+      const node = draft.nodes[targetId]!;
+      node.frame = { ...node.frame, y: node.frame.y - 3 };
+      recordBracketOffset(draft, targetId, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+
+    const recorded = nudged.nodes[targetId]!;
+    expect(recorded.type === 'bracket' && recorded.userOffsetMm).toEqual({ x: 0, y: -3 });
+
+    const again = editDocument(nudged, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, measured]]), { stepMm: 4 });
+    });
+    // The adjustment survives, and is not applied twice.
+    expect(again.nodes[targetId]!.frame.y).toBeCloseTo(target.y - 3, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Dataset naming
 // ---------------------------------------------------------------------------
 
@@ -1464,5 +1754,77 @@ describe('dataset renaming', () => {
       renameDataset(draft, doc.datasets[0]!.id, '   '),
     );
     expect(after.datasets[0]!.name).toBe(before);
+  });
+});
+
+describe('dataset removal', () => {
+  it('refuses while a plot still reads it', () => {
+    const { doc } = sampleDocument();
+    const datasetId = doc.datasets[0]!.id;
+    expect(plotsUsingDataset(doc.nodes, datasetId).length).toBeGreaterThan(0);
+
+    let removed = true;
+    const after = editDocument(doc, (draft) => {
+      removed = removeDataset(draft, datasetId);
+    });
+
+    // Removing it anyway would fail `checkReferentialIntegrity` on save: the
+    // figure would edit perfectly and then refuse to be written.
+    expect(removed).toBe(false);
+    expect(after.datasets).toHaveLength(doc.datasets.length);
+    expect(checkReferentialIntegrity(after)).toEqual([]);
+  });
+
+  it('takes its analyses and their brackets with it once nothing reads it', () => {
+    const { doc } = annotatedDocument();
+    const datasetId = doc.analyses[0]!.spec.datasetId;
+    expect(doc.analyses).toHaveLength(1);
+
+    const after = editDocument(doc, (draft) => {
+      // *Every* plot on it, not just the annotated one — the sample document
+      // draws the same dataset in two panels, and one remaining reader is
+      // still a reader.
+      for (const plot of plotsUsingDataset(draft.nodes, datasetId)) deleteNode(draft, plot.id);
+      expect(removeDataset(draft, datasetId)).toBe(true);
+    });
+
+    expect(after.datasets.some((d) => d.id === datasetId)).toBe(false);
+    // A result card citing data the document no longer holds cannot be checked
+    // against it, and its bracket could never be repositioned again.
+    expect(after.analyses).toHaveLength(0);
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toHaveLength(0);
+    expect(checkReferentialIntegrity(after)).toEqual([]);
+  });
+
+  it('leaves another dataset’s analysis alone', () => {
+    const { doc } = annotatedDocument();
+    const kept = doc.analyses[0]!;
+    const spare: Dataset = { ...doc.datasets[0]!, id: 'spare', name: 'Spare' };
+
+    const after = editDocument(doc, (draft) => {
+      draft.datasets = [...draft.datasets, spare];
+      expect(removeDataset(draft, 'spare')).toBe(true);
+    });
+
+    expect(after.analyses.map((a) => a.id)).toEqual([kept.id]);
+    expect(after.datasets.some((d) => d.id === 'spare')).toBe(false);
+  });
+});
+
+describe('dataset reading', () => {
+  it('changes how columns are read without touching the rows', () => {
+    const { doc } = sampleDocument();
+    const before = doc.datasets[0]!;
+
+    const after = editDocument(doc, (draft) =>
+      setDatasetReading(draft, before.id, { format: 'prism', hasRowNames: true }),
+    );
+
+    const changed = after.datasets[0]!;
+    expect(changed.format).toBe('prism');
+    expect(changed.hasRowNames).toBe(true);
+    // Lossless and reversible: only the reading moved.
+    expect(changed.rows).toEqual(before.rows);
+    expect(changed.columns).toEqual(before.columns);
   });
 });

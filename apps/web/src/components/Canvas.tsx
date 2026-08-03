@@ -12,10 +12,11 @@ import {
   ancestorsOf,
   deleteNode,
   duplicateNode,
+  fitAspect,
   isDerivedNode,
   isLocked,
+  normaliseCrop,
   recordBracketOffset,
-  repositionBrackets,
   rescaleArrowPoints,
   resizeFrame,
   resizePanel,
@@ -25,13 +26,14 @@ import {
   snapFrame,
   snapResize,
   type AlignmentGuide,
+  type Crop01,
   type FigureDocument,
   type FigureNode,
   type NodeId,
   type RectMm,
   type ResizeHandle,
 } from '@figureforge/doc-model';
-import { measureAllPlots, renderDocument, toReact } from '@figureforge/render';
+import { measureAllPlots, reflowBrackets, renderDocument, toReact } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
@@ -319,7 +321,7 @@ export function Canvas({
           resyncScaleBars(draft);
           // The direct fix for stranded significance brackets: their geometry
           // is absolute, so nothing else would move them with the bars.
-          repositionBrackets(draft, measureAllPlots(draft, theme));
+          reflowBrackets(draft, theme);
         });
         return;
       }
@@ -590,7 +592,19 @@ export function Canvas({
             a scene node. Resize handles are proven not to leak into an export
             by the parity test; crop chrome would have no such guard, and it is
             editor state rather than part of the drawing. */}
-        {cropTarget && <CropOverlay api={api} node={cropTarget} zoom={zoom} theme={theme} />}
+        {cropTarget && (
+          // Keyed by node so switching images remounts: the in-flight crop is
+          // component state, and carrying one image's dragged rectangle onto
+          // the next would apply it to a picture it was never drawn against.
+          <CropOverlay
+            key={cropTarget.id}
+            api={api}
+            node={cropTarget}
+            zoom={zoom}
+            theme={theme}
+            assetUrls={assetUrls}
+          />
+        )}
 
         {measureTarget && (
           <MeasureOverlay doc={doc} node={measureTarget} zoom={zoom} onMeasured={onMeasured} />
@@ -654,19 +668,30 @@ function CropOverlay({
   node,
   zoom,
   theme,
+  assetUrls,
 }: {
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'image' }>;
   zoom: number;
   theme: Theme;
+  assetUrls: Record<string, string>;
 }) {
   const { document: doc } = api;
   const dragRef = useRef<{
     grip: string | null;
     startX: number;
     startY: number;
-    crop: { x: number; y: number; width: number; height: number };
+    crop: Crop01;
   } | null>(null);
+
+  /*
+   * The crop being dragged, or null when nothing is in flight.
+   *
+   * Held here and committed once, on release. Every pointer-move used to be its
+   * own `api.commit`, so a single crop wrote a hundred entries into the undo
+   * history and one Ctrl+Z moved the window by a pixel.
+   */
+  const [pending, setPending] = useState<Crop01 | null>(null);
 
   const frame = absoluteFrame(doc.nodes, node.id);
   if (!frame) return null;
@@ -679,14 +704,35 @@ function CropOverlay({
     height: frame.height * pxPerMm,
   };
 
-  const crop = node.crop;
-  // The window is drawn in the image's own normalised space, which is what the
-  // model stores — no conversion, so what is dragged is what is saved.
+  /*
+   * Where the *whole* source image sits inside the frame, in overlay pixels.
+   *
+   * This is the fix for a crop that cut somewhere other than the outline. The
+   * window is stored in normalised *source* coordinates, but it used to be
+   * drawn as a fraction of the panel frame — and the renderer scales the kept
+   * region up to fill that frame, so the two spaces stop agreeing the moment
+   * anything is cropped. The picture zoomed, the outline shrank into a corner,
+   * and the next drag applied frame fractions as source fractions.
+   *
+   * So crop mode shows the entire picture instead, letterboxed exactly as
+   * `preserveAspectRatio="xMidYMid meet"` would. The window is then genuinely
+   * in source space: what is outlined is what is kept.
+   */
+  const fullBox = { x: 0, y: 0, width: box.width, height: box.height };
+  const imageRect =
+    node.preserveAspect && node.naturalPx.height > 0
+      ? // `fitAspect` is the same centred fit the renderer's "xMidYMid meet"
+        // performs, and already carries the layout tests. A second copy of the
+        // arithmetic here is a second thing that can disagree with the drawing.
+        fitAspect(fullBox, node.naturalPx.width / node.naturalPx.height)
+      : fullBox;
+
+  const crop = pending ?? node.crop;
   const window = {
-    left: crop.x * box.width,
-    top: crop.y * box.height,
-    width: crop.width * box.width,
-    height: crop.height * box.height,
+    left: imageRect.x + crop.x * imageRect.width,
+    top: imageRect.y + crop.y * imageRect.height,
+    width: crop.width * imageRect.width,
+    height: crop.height * imageRect.height,
   };
 
   const onGripDown = (grip: string | null) => (event: React.PointerEvent) => {
@@ -699,9 +745,12 @@ function CropOverlay({
   const onMove = (event: React.PointerEvent): void => {
     const drag = dragRef.current;
     if (!drag) return;
+    if (imageRect.width <= 0 || imageRect.height <= 0) return;
 
-    const dx = (event.clientX - drag.startX) / box.width;
-    const dy = (event.clientY - drag.startY) / box.height;
+    // Against the drawn image, not the frame: they differ whenever the picture
+    // is letterboxed inside its panel.
+    const dx = (event.clientX - drag.startX) / imageRect.width;
+    const dy = (event.clientY - drag.startY) / imageRect.height;
     const start = drag.crop;
 
     let next = { ...start };
@@ -722,17 +771,26 @@ function CropOverlay({
       if (drag.grip.includes('s')) next.height = start.height + dy;
     }
 
-    // setImageCrop clamps into the unit square and re-derives the scale bars,
-    // so a drag cannot produce a state the numeric fields could not.
-    api.commit('Crop image', (draft) => {
-      setImageCrop(draft, node.id, next);
-      repositionBrackets(draft, measureAllPlots(draft, theme));
-    });
+    // Normalised as it is dragged, so the outline can never show a rectangle
+    // the model would refuse — what is on screen is what will be committed.
+    setPending(normaliseCrop(next));
   };
 
   const endDrag = (): void => {
+    const drag = dragRef.current;
     dragRef.current = null;
+    if (!drag || !pending) return;
+
+    setPending(null);
+    // setImageCrop re-derives the scale bars: cropping changes how many source
+    // pixels span the frame, which is the ratio a bar's length comes from.
+    api.commit('Crop image', (draft) => {
+      setImageCrop(draft, node.id, pending);
+      reflowBrackets(draft, theme);
+    });
   };
+
+  const href = assetUrls[node.assetId];
 
   return (
     <div
@@ -743,6 +801,24 @@ function CropOverlay({
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
     >
+      {/* The uncropped picture, covering whatever the SVG has drawn beneath.
+          Without it the author would be outlining a region of the *result*
+          while the model records a region of the *source*. */}
+      {href && (
+        <img
+          className="crop-source"
+          src={href}
+          alt=""
+          draggable={false}
+          style={{
+            left: imageRect.x,
+            top: imageRect.y,
+            width: imageRect.width,
+            height: imageRect.height,
+          }}
+        />
+      )}
+
       {/* Four dimmed bands rather than one box with a hole: a single element
           cannot both darken the discarded region and leave the kept region
           untinted, and tinting what is kept misrepresents the result. */}
@@ -784,6 +860,7 @@ function CropOverlay({
     </div>
   );
 }
+
 
 /**
  * Drag a ruler across a feature of known length to calibrate the image.

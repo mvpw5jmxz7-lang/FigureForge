@@ -9,7 +9,6 @@ import {
   formatMm,
   relabelPanels,
   reorderNode,
-  repositionBrackets,
   suggestGrid,
   templatesForPanelCount,
   findLayoutTemplate,
@@ -18,7 +17,7 @@ import {
   type NodeId,
   type RectMm,
 } from '@figureforge/doc-model';
-import { measureAllPlots } from '@figureforge/render';
+import { reflowBrackets } from '@figureforge/render';
 import { PAGE_PRESETS, type Theme } from '@figureforge/theme';
 import { frameOf } from './Canvas.js';
 import type { DocumentApi } from '../useDocument.js';
@@ -158,7 +157,7 @@ export function Toolbar({
         applyAutoLayout(draft, layoutOptions);
         // Brackets sit in absolute page space, so nothing else moves them with
         // the panels they annotate.
-        repositionBrackets(draft, measureAllPlots(draft, theme));
+        reflowBrackets(draft, theme);
       });
     });
   };
@@ -180,7 +179,7 @@ export function Toolbar({
         });
       });
       commit('Reposition brackets', (draft) => {
-        repositionBrackets(draft, measureAllPlots(draft, theme));
+        reflowBrackets(draft, theme);
       });
     });
   };
