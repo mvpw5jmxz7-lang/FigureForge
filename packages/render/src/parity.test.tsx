@@ -30,7 +30,7 @@ import { NATURE_THEME } from '@figureforge/theme';
 import { renderDocument } from './render-document.js';
 import { toSvgString } from './svg-string.js';
 import { toReact } from './react.js';
-import { collectAttr, collectByRole, walkScene } from './scene.js';
+import { collectAttr, collectByRole, walkScene, walkWithOwner } from './scene.js';
 
 const CSV = `Treatment,Rep1,Rep2,Rep3
 Vehicle,98.2,95.4,101.3
@@ -520,6 +520,52 @@ describe('typography', () => {
     const svg = toSvgString(scene);
     expect(svg).toContain('<text');
     expect(svg).toContain('Cell viability (%)');
+  });
+
+  /**
+   * The spec lists "editable text" as something to validate before export. In
+   * this architecture it cannot fail at runtime — the renderer has no path that
+   * outlines a glyph — so a quality *rule* for it would be a category that
+   * always passes, which is worse than an absent one: it teaches an author to
+   * trust a check that is not checking.
+   *
+   * This is the guard instead. It would catch the only way the claim could
+   * actually be lost: a future mark family drawing its own labels as paths.
+   */
+  it('gives every text-bearing node exactly one <text>, and none of them empty', () => {
+    const textNodes: { role?: string; text?: string }[] = [];
+    walkScene(scene, (node) => {
+      if (node.tag === 'text') textNodes.push({ role: node.role, text: node.text });
+    });
+
+    expect(textNodes.length).toBeGreaterThan(0);
+    for (const node of textNodes) {
+      // A <text> with nothing in it is a label that silently went missing.
+      expect(node.text ?? '').not.toBe('');
+    }
+
+    // Every document node that carries text is represented, and once only.
+    const documentText = Object.values(doc.nodes).filter(
+      (n) => n.type === 'text' || n.type === 'panel-label',
+    );
+    for (const node of documentText) {
+      const owned: string[] = [];
+      walkWithOwner(scene, (element, ownerId) => {
+        if (element.tag === 'text' && ownerId === node.id) owned.push(element.text ?? '');
+      });
+      expect(owned).toHaveLength(1);
+    }
+  });
+
+  it('draws nothing with a path where a glyph belongs', () => {
+    // Belt to the brace above: no <path> may carry text-ish attributes, which
+    // is what a naive "convert text to outlines" change would produce.
+    walkScene(scene, (node) => {
+      if (node.tag !== 'path') return;
+      expect(node.attrs?.['font-size']).toBeUndefined();
+      expect(node.role).not.toBe('tick-label');
+      expect(node.role).not.toBe('axis-title');
+    });
   });
 });
 

@@ -14,13 +14,14 @@ export cannot drift from what the author saw on screen.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .export.renderer import ExportRequest, render, shutdown_browser
 from .images.decode import DecodeError, TooLargeError, decode
@@ -236,17 +237,86 @@ async def limit_request_size(request: Request, call_next):
     return await call_next(request)
 
 
+# Markup this renderer never emits, and that a browser would act on.
+#
+# Refused rather than sanitised. The SVG is interpolated into a page a real
+# Chromium then loads with JavaScript enabled, and regex-scrubbing untrusted
+# markup is a game you lose quietly — whereas refusing cannot corrupt a figure
+# into something subtly different from what the author saw. Proven against the
+# acceptance run's own output, which contains none of these.
+# Only genuinely active elements. `javascript:` is not in the list because a
+# figure could legitimately *say* it in a label, and the href check below
+# catches it where it would actually do something. False positives matter: the
+# renderer XML-escapes every `<` and `"` it writes, in text and attributes
+# alike, so a label reading "<script>" cannot reach here as markup — but it can
+# reach here as the literal characters of a naive substring test.
+_FORBIDDEN_MARKUP = ("<script", "<foreignobject", "<iframe")
+_EVENT_ATTRIBUTE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.IGNORECASE)
+_HREF_PATTERN = re.compile(r"""\b(?:xlink:)?href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+
+def _reject_active_content(svg: str) -> str | None:
+    """Why this SVG must not be rendered, or None if it is inert."""
+    lowered = svg.lower()
+    for token in _FORBIDDEN_MARKUP:
+        if token in lowered:
+            return f"The figure contains {token.lstrip('<')}, which this exporter does not render."
+
+    if _EVENT_ATTRIBUTE.search(svg):
+        return "The figure carries an event handler attribute, which this exporter does not run."
+
+    for href in _HREF_PATTERN.findall(svg):
+        value = href.strip()
+        # Everything legitimate is self-contained: images arrive as data URIs
+        # and clip paths as same-document fragments.
+        if value.startswith("data:") or value.startswith("#") or value == "":
+            continue
+        return (
+            f"The figure references an external resource ({value[:60]}). "
+            "Embed it in the document instead."
+        )
+
+    return None
+
+
+# Beyond this, a raster export is an allocation the service does not survive.
+# 2000 mm at 600 dpi is 47 244 px per side — 2.2 Gpx, an OOM kill behind a
+# generic 500. The same reasoning as `Image.MAX_IMAGE_PIXELS` in the decoder:
+# raise the ceiling to cover real work, do not remove it.
+MAX_RASTER_PIXELS = 250_000_000
+
+
 class ExportBody(BaseModel):
     svg: str = Field(min_length=1, max_length=MAX_EXPORT_BYTES)
     widthMm: float = Field(gt=0, le=2000)
     heightMm: float = Field(gt=0, le=2000)
     format: Literal["svg", "pdf", "eps", "png", "tiff"] = "pdf"
     dpi: Literal[150, 300, 450, 600] = 300
-    filename: str = "figure"
+    # A quote or a newline here injects into the Content-Disposition header. The
+    # web client happens to strip the name to the same shape; a direct caller
+    # does not, so the guarantee belongs on this side of the wire.
+    filename: str = Field(default="figure", pattern=r"^[A-Za-z0-9_-]{1,120}$")
+
+    @model_validator(mode="after")
+    def _check_raster_size(self) -> ExportBody:
+        if self.format not in ("png", "tiff"):
+            return self
+        pixels = round(self.widthMm / 25.4 * self.dpi) * round(self.heightMm / 25.4 * self.dpi)
+        if pixels > MAX_RASTER_PIXELS:
+            raise ValueError(
+                f"{self.widthMm:.0f} × {self.heightMm:.0f} mm at {self.dpi} dpi is "
+                f"{pixels / 1e6:.0f} megapixels, over the {MAX_RASTER_PIXELS / 1e6:.0f} Mpx "
+                "limit. Export a smaller figure, or a lower resolution."
+            )
+        return self
 
 
 @app.post("/export")
 async def export(body: ExportBody) -> Response:
+    refusal = _reject_active_content(body.svg)
+    if refusal is not None:
+        raise HTTPException(status_code=422, detail=refusal)
+
     try:
         data = await render(
             ExportRequest(

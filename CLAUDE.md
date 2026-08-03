@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–5 are done, plus three rounds of reported fixes; phases 6–9 are not.**
+could be proven before breadth was added. **Phases 1–6 are done, plus three rounds of reported fixes; phases 7–9 are not.**
 
 ---
 
@@ -22,7 +22,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 241 TypeScript + 76 Python tests
+make test        # 265 TypeScript + 105 Python tests
 make acceptance  # 43-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -185,7 +185,7 @@ follows; **all three stages are done** — see "The reported-bug rounds" below.
 Run `git status` and `git branch` before assuming the tree is clean or which
 branch you're on.
 
-**Verified:** 241 TypeScript tests, 76 Python tests, typecheck and lint clean,
+**Verified:** 265 TypeScript tests, 105 Python tests, typecheck and lint clean,
 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
@@ -209,6 +209,14 @@ demand, a triangle marker replacing 16 circles on one plot only, minor ticks
 at NaN in the gap, a sedimentation-style paste detected as `sigmaplot` and drawn
 as two overlaid lines, a right-hand axis, and Fisher's exact on a contingency
 import reading `Treated vs Control  P = 0.025, odds ratio 5.57`.
+
+Phase 6 was driven the same way. A 4 pt label reported, fixed by its button,
+score 81 → 96, Ctrl+Z restoring both; a deleted panel letter relettered; the
+export confirmation naming `"cells.png" is 175 dpi at its current size` and
+routing to the Quality tab. A 1200 × 900 micrograph cropped to 30% × 30% took
+the export payload from **4234 KB to 438 KB** and still produced a single-page
+PDF with fonts embedded and exactly one image XObject. Six concurrent exports
+queued through the semaphore without deadlocking.
 
 Working end to end: CSV/TSV import with format detection, live preview and a
 user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
@@ -327,6 +335,103 @@ correlation was unreachable for the plot type it matters most for.
   t-approximation. The two legitimately disagree at low n — the test asserts
   SciPy's own reproducible value and documents why, rather than forcing a
   match that isn't real.
+
+### Phase 6 — export/QC hardening, autofixes
+
+Three debts, two of which this file had already confessed. The interesting part
+is that two planned features were *cancelled by measurement*, not built.
+
+- **`Finding.autoFixable` was a claim nothing honoured.** Set `true` on ten
+  findings, read by zero code; `GUIDE.md` told users the buttons did nothing.
+  Replaced by **`Finding.fix?`**, a recipe the *rule that found the defect*
+  constructs — it already knows which nodes are wrong and what the right value
+  is, and re-deriving that from a finding id at apply time is how two
+  derivations of one fact come to disagree (the reason `analysisInputHash` and
+  `scaleBarWidthMm` are each composed in exactly one place). `checkFigure` stays
+  pure: a rule *constructs* a mutation, it never executes one. Recipes live in
+  `fixes.ts`; the app runs one through `api.commit` (already one undo entry) and
+  a batch through `store.transaction`.
+  `Finding` is never persisted or structured-cloned, which is what makes
+  carrying a closure free — that constraint is written on the field.
+- **Ten claimed fixes became seven, plus one conditional.** `checkTextSize` had
+  been collapsing two unrelated defects: a label whose *own* `style.fontSizePt`
+  is below the floor (mechanical — clamp it; the Inspector accepts 4 pt while
+  Nature's floor is 5) and a tick label drawn at the *theme's* size (raising
+  that re-flows every gutter through `requiredMargin`, and the other repair is a
+  bigger panel — both authorial). They are now two findings and only the first
+  has a button. `walkWithOwner` in `scene.ts` makes the distinction exact rather
+  than inferred: `nodeId` sits only on each document node's container `<g>`, so
+  the walk tracks the nearest ancestor that has one.
+  `colour-blind-conflict` **lost** its fix — remapping decides which plot to
+  recolour *and* what the colours mean to a reader who already keyed them — and
+  gained `nodeIds`, so "Select N affected" lands on the Inspector's existing
+  palette control. `page-width-mismatch` offers a fix only when no content
+  overhangs the target width, which makes the change pure and exactly
+  reversible. `uneven-gutters-*` is fixable but `rearranges`, so it is excluded
+  from "fix all safe issues" and its label says what it does.
+- **The export path now validates, and never refuses.** The report is computed
+  once in `App` and drives both the Quality tab and a score badge beside the
+  export buttons. Errors — and only errors — open a confirmation that lists them
+  by name, with *Review in Quality* and *Export anyway*. Warnings never
+  interrupt and there is no "don't ask again": a draft going to a colleague is a
+  legitimate export, and a checker that blocks is one authors route around.
+- **Cropped images ship only their crop**, via `flattenCropsForExport` in
+  `apps/web/src/exportImages.ts` — see the risk table. Value-preserving by
+  construction: `naturalPx.width * crop.width`, the quantity
+  `checkImageResolution` and `scaleBarWidthMm` both compute, is held exactly
+  invariant and asserted as an equality. PNG always, because the browser only
+  ever holds display bytes (already 8-bit) and re-encoding a JPEG as JPEG would
+  be a second lossy generation for a saving the crop already delivered.
+  The QC report is computed on the **real** document, never the flattened one.
+
+#### The service, and the two things measurement cancelled
+
+Export hardening the endpoint had never had. Each is a way a caller reaches it
+that the web client happens never to take, which is why the guarantee has to
+live on the service side: a **120 s Ghostscript timeout** (a hung `gs` used to
+hold a worker for the life of the process), Playwright timeouts and an outer
+`asyncio.wait_for`, a **per-export browser context** whose network is blocked
+except for `data:`/`about:`/`blob:` (this kills remote `href`, `<script src>`,
+web-font fetches and SSRF against the pod's own API in one line, and costs
+nothing because everything legitimate is inline), an `asyncio.Semaphore(2)`
+around rendering, a server-side `filename` pattern (a quote injected into
+`Content-Disposition`), a 250 Mpx ceiling on raster requests (2000 mm at 600 dpi
+is 2.2 Gpx — an OOM behind a generic 500), and an explicit `ValueError` for an
+unknown format, which previously fell through and returned a PNG labelled
+otherwise.
+
+Untrusted SVG is **refused, not sanitised** — `<script>`, `<foreignObject>`,
+`<iframe>`, event-handler attributes, and any `href` whose scheme is not `data:`
+or `#`. Regex-scrubbing markup fails quietly; a refusal cannot turn a figure
+into a subtly different one. The predicate was run over the acceptance run's own
+`figure.svg` before shipping, and `javascript:` is deliberately *not* in the
+substring list: the renderer XML-escapes every `<` and `"` it writes, so a
+label reading `<script>` cannot arrive as markup — but it can arrive as those
+literal characters, and the `href` check catches the case that would actually do
+something.
+
+**The spec lists "editable text" and "vector compliance" as things to validate
+before export. Neither became a rule, and both decisions were measured:**
+
+- **Editable text cannot fail here.** The renderer has no path that outlines a
+  glyph. A rule for it would be a category that always passes, which is worse
+  than an absent one — it teaches an author to trust a check that is not
+  checking. `parity.test.tsx` asserts the invariant instead: every text-bearing
+  document node produces exactly one `<text>`, none of them empty, and no
+  `<path>` carries text attributes. That would catch the only way the claim
+  could actually be lost — a future mark family drawing its own labels as paths.
+- **A transparency warning would have been a false alarm.** PostScript has no
+  alpha, and violin/box marks are hardcoded at `fill-opacity: 0.55`, so the
+  concern was that `eps2write` would fall back to a raster tile and cost the
+  figure its vector claim. Measured in this image: the translucent overlap comes
+  back from EPS **pixel-identical to the screen** (241, 202, 115 both ways) and
+  the file grows **+4.2%**. There is nothing to warn anyone about.
+- **A vector asset placed as an `<image>` is not rasterised either.** An SVG
+  logo as a `data:image/svg+xml` href produces **zero image XObjects** in the
+  PDF, so `checkImageResolution`'s decision to skip vector assets is sound and
+  the "hole between two rules" did not exist. Both measurements are now
+  regression tests in `TestVectorFidelity`, since the wording above depends on
+  the answers not changing.
 
 ### The editing iteration (after phases 1–2)
 
@@ -554,7 +659,7 @@ Phases 5–9, with the actual entry points:
 | 3 | **done** — all 9 plot types render | `PlotGeometry` is a discriminated union on `kind: 'categorical' \| 'continuous'`; `renderNumericXTicks` is the numeric x axis |
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
-| 6 | export/QC hardening, autofixes | `packages/render/src/quality.ts` |
+| 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
 | 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; needs the DOM-volume answer below first |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
@@ -589,9 +694,9 @@ Phases 5–9, with the actual entry points:
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, and stage C's `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
-| **Autofixes are advertised, not implemented** | Quality checker findings carry `autoFixable: true`, but no fixer is wired up and the UI offers no button. Either build them or stop claiming it. |
+| **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
 | **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
-| **Cropped images ship at full size** | `renderImage` embeds the whole asset and discards the out-of-crop pixels with a `clipPath`, so a 100 MP image cropped to 10% still uploads 100 MP. Shipping *only* the cropped region at full resolution is pixel-identical to the screen, so unlike downsampling it is value-preserving — it needs an `OffscreenCanvas` re-encode, which is phase 6 work. The export size guard (128 MiB, client pre-check plus a `Content-Length` middleware) is the interim answer. |
+| **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets, trivial crops, and the letterboxed `preserveAspectRatio` case. |
 | **Opening a TIFF project needs the API** | The archive stores only the original bytes, so the PNG display proxy is regenerated on open. If the service is down the images render as placeholders and a message says why; everything else in the figure still works. Reversible with one optional field (`Asset.proxyPath?`) if the trade proves wrong. |
 | **16-bit micrographs export at 8 bits** | The archive keeps the 16-bit original verbatim, so reproducibility holds, but the figure ships the 8-bit proxy with the observed range mapped linearly. Correct for print, and reported in the UI rather than left to be discovered. |
 | **JPEG EXIF orientation is ignored** | A rotated JPEG displays in its stored orientation. Detecting *whether* a JPEG needs transposing requires client-side EXIF parsing, and routing every JPEG through the server for the 1% that need it is a bad trade. Not half-done on purpose. |
