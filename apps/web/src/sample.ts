@@ -133,14 +133,33 @@ export function axisTitlesFor(dataset: Dataset): { x?: string; y?: string } {
   if (!CONTINUOUS_X_FORMATS.has(dataset.format)) return {};
 
   const first = dataColumnOffset(dataset);
-  const x = dataset.columns[first]?.name.trim();
+  const names = dataset.columns.slice(first).map((c) => c.name.trim());
+
   /*
-   * Only where the second column really is the y axis. On a replicate-blocked
-   * table it is `A:Y1` — one replicate of one group — and putting that on the
-   * axis labels the whole quantity after a single column of it.
+   * A column name titles an axis only when *every* column feeding that axis
+   * carries it. Otherwise the name belongs to one series, the legend already
+   * shows it, and putting it on the axis labels the whole quantity after a
+   * third of it — `X1,Y1,X2,Y2,X3,Y3` was titling its axes "X1" and "Y1" while
+   * "Y1" sat in the legend beside "Y2" and "Y3".
+   *
+   * The same rule reads the honest case correctly: a sedimentation export
+   * headed `Radius,C(s)_run1,Radius,C(s)_run2` really does measure every run
+   * against a radius, so "Radius" is the x axis.
+   */
+  const agreed = (values: readonly string[]): string | undefined =>
+    values.length > 0 && values.every((v) => v === values[0]) ? values[0] : undefined;
+
+  const isPaired = dataset.format === 'sigmaplot';
+  const x = agreed(isPaired ? names.filter((_, i) => i % 2 === 0) : names.slice(0, 1));
+  /*
+   * Only where the y columns really are one quantity. On a replicate-blocked
+   * table the second column is `A:Y1` — one replicate of one group — and on a
+   * shared-x table the y columns are the series names.
    */
   const y =
-    dataset.format === 'xy-replicates' ? undefined : dataset.columns[first + 1]?.name.trim();
+    dataset.format === 'xy-replicates'
+      ? undefined
+      : agreed(isPaired ? names.filter((_, i) => i % 2 === 1) : names.slice(1));
 
   // `defaultColumnName` produces A, B, C… when there was no header row. Those
   // are placeholders, not labels, and putting one on an axis is worse than

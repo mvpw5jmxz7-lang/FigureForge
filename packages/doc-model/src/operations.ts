@@ -150,7 +150,19 @@ export interface AddPlotOptions {
  */
 export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
   switch (format) {
-    // A trend with its spread; read as bars, the timepoints become categories.
+    /*
+     * Every layout that carries an x per y is an xy graph, and opens as one —
+     * a trend, with its spread where there are replicates.
+     *
+     * Read as bars instead, the x columns are simply discarded and each series
+     * collapses to the mean of its y column: one number that is nowhere in the
+     * table, drawn over a category axis the data never had. Only
+     * `xy-replicates` was covered before, so a plain `X1,Y1,X2,Y2` export came
+     * in correctly detected and then drew three bars over its runs.
+     */
+    case 'simple-xy':
+    case 'prism':
+    case 'sigmaplot':
     case 'xy-replicates':
       return 'line';
     // Nested data is drawn as its observations: a bar over subjects averages
