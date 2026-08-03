@@ -29,6 +29,7 @@ import {
   type PanelLabelNode,
   type PanelNode,
   type PlotNode,
+  type PointShape,
   type ScaleBarNode,
   type ShapeNode,
   type Stroke,
@@ -48,7 +49,7 @@ import {
   xyMarks,
   type NumericScale,
 } from '@figureforge/plots';
-import { el, group, round, text, translate, type SceneNode } from './scene.js';
+import { el, group, round, text, translate, type SceneNode, type SceneRole } from './scene.js';
 import { estimateTextHeightMm, estimateTextWidthMm, truncateToWidth } from './text-width.js';
 
 export interface RenderOptions {
@@ -1192,15 +1193,41 @@ function renderLegend(
         ? 0
         : index * (legendWidthMm([entry], theme) + theme.spacing.axisTitleGapMm);
 
+    /*
+     * The swatch is the *marker* once any series carries its own shape, and a
+     * plain block otherwise.
+     *
+     * Per-series symbols exist to carry the series identity where colour
+     * cannot — greyscale print, a colour-vision deficiency — and a key of
+     * identical blocks beside different symbols withholds exactly the mapping
+     * the reader needs.
+     *
+     * "Any", not "this one": a series left on the plot-wide shape still draws a
+     * marker, so a key of one block and two symbols cannot happen. That case is
+     * the common one — an author sets shapes on the series they want to
+     * distinguish and leaves the first alone — and it is what drew a block
+     * beside a line of circles until a real browser showed it.
+     */
+    const shape =
+      geometry.kind === 'continuous' && (node.pointShapes?.some((s) => s != null) ?? false)
+        ? (shapeForSeries(node, index) ?? node.pointShape ?? 'circle')
+        : undefined;
     children.push(
-      el('rect', {
-        x,
-        y: y + (rowHeight - LEGEND_SWATCH_MM) / 2,
-        width: LEGEND_SWATCH_MM,
-        height: LEGEND_SWATCH_MM,
-        fill: entry.color,
-        stroke: 'none',
-      }, undefined, { role: 'legend' }),
+      shape
+        ? markerNode(node, theme, x + LEGEND_SWATCH_MM / 2, y + rowHeight / 2, {
+            fill: entry.color,
+            sizeMm: LEGEND_SWATCH_MM,
+            shape,
+            role: 'legend',
+          })
+        : el('rect', {
+            x,
+            y: y + (rowHeight - LEGEND_SWATCH_MM) / 2,
+            width: LEGEND_SWATCH_MM,
+            height: LEGEND_SWATCH_MM,
+            fill: entry.color,
+            stroke: 'none',
+          }, undefined, { role: 'legend' }),
       text(entry.label, {
         x: x + LEGEND_SWATCH_MM + gap,
         // Baseline within the row, matching how tick labels are placed.
@@ -1398,6 +1425,17 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
  * belongs in one place rather than at each of the three call sites that draw a
  * point.
  */
+/**
+ * The marker shape a given series draws, in one place.
+ *
+ * Undefined rather than `'circle'` where nothing is set, so `markerNode` falls
+ * through to `node.pointShape` and a plot that never used per-series shapes
+ * emits byte-identical markup.
+ */
+function shapeForSeries(node: PlotNode, index: number): PointShape | undefined {
+  return node.pointShapes?.[index] ?? undefined;
+}
+
 function markerNode(
   node: PlotNode,
   theme: Theme,
@@ -1413,6 +1451,17 @@ function markerNode(
      * and the radius stays the one input every shape is area-matched from.
      */
     sizeMm?: number;
+    /**
+     * Override the plot's marker shape — for a series carrying its own. Absent
+     * is `node.pointShape`, so every existing call is unchanged.
+     */
+    shape?: PointShape;
+    /**
+     * What the mark *is*. `'point'` everywhere but the legend key, which draws
+     * the same shapes so the swatch matches the marker it stands for — and
+     * which must not be counted as a data point by anything reading roles.
+     */
+    role?: SceneRole;
   },
 ): SceneNode {
   const r = (style.sizeMm ?? node.pointSizeMm) / 2;
@@ -1426,7 +1475,9 @@ function markerNode(
     ...strokeAttrs,
   };
 
-  switch (node.pointShape ?? 'circle') {
+  const role: SceneRole = style.role ?? 'point';
+
+  switch (style.shape ?? node.pointShape ?? 'circle') {
     case 'square': {
       // Every shape is matched on *area* to the circle of the same nominal
       // size, so switching shape does not silently change how heavy a series
@@ -1442,7 +1493,7 @@ function markerNode(
           ...common,
         },
         undefined,
-        { role: 'point' },
+        { role },
       );
     }
     case 'triangle': {
@@ -1453,17 +1504,17 @@ function markerNode(
         `M${round(cx)} ${round(cy - (2 / 3) * height)} ` +
         `L${round(cx + side / 2)} ${round(cy + height / 3)} ` +
         `L${round(cx - side / 2)} ${round(cy + height / 3)} Z`;
-      return el('path', { d, ...common }, undefined, { role: 'point' });
+      return el('path', { d, ...common }, undefined, { role });
     }
     case 'diamond': {
       const half = r * Math.sqrt(Math.PI / 2);
       const d =
         `M${round(cx)} ${round(cy - half)} L${round(cx + half)} ${round(cy)} ` +
         `L${round(cx)} ${round(cy + half)} L${round(cx - half)} ${round(cy)} Z`;
-      return el('path', { d, ...common }, undefined, { role: 'point' });
+      return el('path', { d, ...common }, undefined, { role });
     }
     default:
-      return el('circle', { cx, cy, r, ...common }, undefined, { role: 'point' });
+      return el('circle', { cx, cy, r, ...common }, undefined, { role });
   }
 }
 
@@ -1489,8 +1540,10 @@ function renderContinuousMarks(
     );
   }
 
-  for (const s of geometry.series) {
+  for (const [index, s] of geometry.series.entries()) {
     const markChildren: SceneNode[] = [];
+    // Indexed by series order, the key the palette and `seriesAxis` already use.
+    const shape = shapeForSeries(node, index);
 
     /*
      * The error interval, first, so the line and its points sit on top of it.
@@ -1560,6 +1613,7 @@ function renderContinuousMarks(
           fill: s.color,
           fillOpacity: 0.45,
           sizeMm: node.pointSizeMm * 0.6,
+          ...(shape ? { shape } : {}),
         }),
       );
     }
@@ -1581,7 +1635,10 @@ function renderContinuousMarks(
 
     for (const point of s.points) {
       markChildren.push(
-        markerNode(node, theme, point.x, point.y, { fill: node.pointFill ?? s.color }),
+        markerNode(node, theme, point.x, point.y, {
+          fill: node.pointFill ?? s.color,
+          ...(shape ? { shape } : {}),
+        }),
       );
     }
 

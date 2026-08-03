@@ -351,6 +351,12 @@ h4 { margin: 0 0 6px; font-size: 13px; }
   margin-bottom: 10px;
 }
 .axis-fields .field input[type='number'] { width: 68px; }
+/* A swatch carrying a shape control is too wide to sit beside its neighbours
+   in a 340 px panel, so those stack one series per row instead. */
+.swatches.with-shapes { flex-direction: column; align-items: stretch; gap: 4px; }
+.swatches.with-shapes .swatch span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.swatches.with-shapes .swatch select { width: 96px; flex: none; }
+
 .swatch { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
 .swatch input[type='color'] {
   width: 24px;

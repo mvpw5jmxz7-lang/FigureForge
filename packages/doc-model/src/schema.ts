@@ -137,6 +137,9 @@ const plotSchema = z.object({
   histogramBins: z.number().int().positive().optional(),
   errorBarDirection: z.enum(['both', 'up']).optional(),
   pointShape: z.enum(['circle', 'square', 'triangle', 'diamond']).optional(),
+  pointShapes: z
+    .array(z.enum(['circle', 'square', 'triangle', 'diamond']).nullable())
+    .optional(),
   pointFill: z.string().optional(),
   pointStroke: strokeSchema.optional(),
   y2: axisSchema.optional(),

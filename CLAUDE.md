@@ -189,9 +189,13 @@ Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests
 Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
 panels) is done — see "Round 4" below. **Round 5 is in progress on
 `feat/round-5-*`**: the import surface, one reported item at a time — stage 1
-(xy pairs) and stage 2 (a shared x with replicate y) are merged. Run
+(xy pairs), stage 2 (a shared x with replicate y) and stage 3 (a symbol per
+series) are merged. Run
 `git status` and `git branch` before assuming the tree is clean or which branch
 you're on.
+
+**Verified after round 5 stage 3:** 343 TypeScript tests, 105 Python tests,
+typecheck and lint clean, 46-check acceptance run.
 
 **Verified after round 5 stage 2:** 338 TypeScript tests, 105 Python tests,
 typecheck and lint clean, 46-check acceptance run (unchanged — the acceptance
@@ -948,6 +952,39 @@ replicates with 2 groups. Both states exported single-page at exactly
 183.0000 × 75.0000 mm, fonts embedded, text selectable, **zero** image
 XObjects — the translucent band is still vector.
 
+#### Stage 3 — a symbol per series
+
+Reported next: line plots need different symbols for different series.
+`pointShape` was plot-wide, so every series drew the same marker and the only
+thing separating them was colour — which greyscale print and a colour-vision
+deficiency both take away. `pointShapes` is indexed by series *order*, the same
+key `seriesAxis` and the palette array use, so it needs no names and cannot go
+stale when a series is renamed. `null` in a slot follows `pointShape`, so a plot
+that sets only the plot-wide shape is byte-identical.
+
+- **The legend draws the symbol, not a block, once *any* series carries one** —
+  including the series that carry none, which take the plot-wide shape. A key of
+  identical blocks beside different symbols withholds exactly the mapping the
+  symbols exist to supply. The narrower rule (a marker only for the series that
+  named one) was written first and put a *block* beside a line of circles
+  whenever an author set shapes on series 2 and 3 and left series 1 alone — the
+  common case. The unit test set all three and passed over it; **driving a real
+  browser is what caught it**, which is the standing rule earning its keep again.
+- **`markerNode` gained `shape` and `role`**, both optional and both defaulting
+  to today's values, so it stays the single implementation of the area-matched
+  shapes. The legend needs `role: 'legend'` or its swatch would be counted as a
+  data point by everything that reads roles.
+- **Offered on continuous plots with more than one series.** On a categorical
+  plot each mark has its own band and the axis already names it.
+- Storing an all-`null` array would leave the field set on every figure whose
+  author opened the control, so clearing the last series removes it entirely.
+
+Driven in a real browser, light and **dark**: three lines of circles became
+**6** circles + **6** squares + **6** triangles with a matching three-symbol
+legend, one Ctrl+Z reverted one series, clearing every series back to *Default*
+restored the plain block key, and the exported PDF stayed single-page at
+183.0000 × 75.0000 mm with **zero** image XObjects — the symbols are vector.
+
 ---
 
 ## What's next
@@ -996,7 +1033,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates` and `pointShapes`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
