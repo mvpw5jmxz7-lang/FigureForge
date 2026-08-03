@@ -78,6 +78,20 @@ export class AssetStore {
     return this.entries.get(id)?.original;
   }
 
+  /**
+   * The bytes a browser can decode, with their type.
+   *
+   * The export-time crop re-encode needs both, and it needs the *display*
+   * representation: the original may be a TIFF, which `createImageBitmap`
+   * cannot open. Returns a snapshot rather than the entry, so a caller cannot
+   * reach the cached object URL and revoke it.
+   */
+  displayBytes(id: AssetId): { bytes: Uint8Array; mimeType: string } | undefined {
+    const entry = this.entries.get(id);
+    if (!entry) return undefined;
+    return { bytes: entry.display, mimeType: entry.displayMimeType };
+  }
+
   /** Blob URL for the canvas. Created once per asset and cached. */
   urlFor(id: AssetId): string | undefined {
     const entry = this.entries.get(id);

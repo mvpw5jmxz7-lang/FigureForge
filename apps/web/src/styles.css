@@ -390,6 +390,17 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .save-dialog .hint { margin: 0; }
 .save-dialog code { font-size: 11px; }
 
+/* Anchored under the export buttons it is about, not under Save. */
+.save-dialog.right { left: auto; right: 12px; }
+.list.compact li { padding: 3px 0; border: 0; font-size: 12px; display: list-item; }
+.list.compact { list-style: disc; padding-left: 16px; }
+
+/* Readiness at a glance, next to the buttons that would send it out. */
+.readiness { font-variant-numeric: tabular-nums; }
+.readiness.good { color: var(--good); border-color: var(--good); }
+.readiness.fair { color: var(--warn); border-color: var(--warn); }
+.readiness.poor { color: var(--danger); border-color: var(--danger); }
+
 .statusbar {
   position: relative;
   display: flex;

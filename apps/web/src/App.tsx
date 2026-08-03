@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ARCHIVE_EXTENSION,
   buildArchiveContents,
@@ -7,10 +7,10 @@ import {
   type FigureDocument,
   type NodeId,
 } from '@figureforge/doc-model';
-import { renderDocument, toSvgString } from '@figureforge/render';
+import { checkFigure, renderDocument, toSvgString } from '@figureforge/render';
 import { resolveTheme } from '@figureforge/theme';
 import { Canvas } from './components/Canvas.js';
-import { SidePanel } from './components/SidePanel.js';
+import { SidePanel, scoreTone, type Tab } from './components/SidePanel.js';
 import { Toolbar } from './components/Toolbar.js';
 import {
   decodeImage,
@@ -21,6 +21,7 @@ import {
   type ExportFormat,
 } from './api.js';
 import { useAssets, type AssetStore } from './assets.js';
+import { flattenCropsForExport } from './exportImages.js';
 import { createSampleDocument } from './sample.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
@@ -133,8 +134,32 @@ export function App() {
   const [dpi, setDpi] = useState<150 | 300 | 450 | 600>(300);
   /** Filename being confirmed before a save; null means the dialog is closed. */
   const [saveName, setSaveName] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>('data');
+  /** Format waiting on the author's confirmation; null means nothing pending. */
+  const [pendingExport, setPendingExport] = useState<ExportFormat | null>(null);
 
   const theme = resolveTheme(api.document.themeId, api.document.themeOverrides);
+
+  /**
+   * Publication readiness for the current figure.
+   *
+   * Computed here rather than in the Quality tab because the export path needs
+   * the same answer — the spec's "before export, validate" is not a second
+   * check, it is this one, read at the moment it matters. Two computations of
+   * one figure's readiness would eventually disagree about that figure.
+   */
+  const report = useMemo(() => {
+    // The scene has to carry its images: text-size and colour rules read the
+    // rendered tree, and a figure checked as a set of grey placeholders is not
+    // the figure being submitted.
+    const scene = renderDocument(api.document, {
+      theme,
+      resolveAsset: (id) => assets.urls[id],
+    });
+    return checkFigure({ document: api.document, theme, scene, exportDpi: dpi });
+  }, [api.document, theme, dpi, assets.urls]);
+
+  const blockingErrors = report.findings.filter((f) => f.severity === 'error');
 
   useEffect(() => {
     void health().then(setApiUp);
@@ -158,15 +183,27 @@ export function App() {
 
   const runExport = useCallback(
     async (format: ExportFormat) => {
+      setPendingExport(null);
       setBusy(`Exporting ${format.toUpperCase()}`);
       setError(null);
       try {
+        // Bake every crop into its own pixels first, so a micrograph cropped to
+        // a tenth uploads a tenth. The result is a throwaway document — it is
+        // never committed, never saved, and the readiness check above ran
+        // against the real one.
+        const flattened = await flattenCropsForExport(
+          api.document,
+          assets.store,
+          assets.resolveForExport,
+          setError,
+        );
+
         // Render without editor chrome: no selection outlines, no grid.
         // Assets resolve to data URIs, never the canvas's blob URLs: those are
         // meaningless outside this tab, so the service would render blanks.
-        const scene = renderDocument(api.document, {
+        const scene = renderDocument(flattened.document, {
           theme,
-          resolveAsset: assets.resolveForExport,
+          resolveAsset: flattened.resolve,
         });
         const svg = toSvgString(scene, { xmlDeclaration: format === 'svg' });
 
@@ -201,6 +238,25 @@ export function App() {
       }
     },
     [api.document, theme, dpi, assets],
+  );
+
+  /**
+   * Validate before exporting, and say so — but never refuse.
+   *
+   * The defects that matter most here are invisible in the output file: a
+   * p-value the data no longer supports, a scale bar drawn from a placeholder.
+   * A figure carrying one should not leave silently. It should still be able to
+   * leave: a draft going to a colleague is a legitimate export, and a checker
+   * that blocks is one authors learn to route around. So errors interrupt once,
+   * warnings never do, and there is no "don't ask again" — the click is cheap
+   * and the mistake is not.
+   */
+  const requestExport = useCallback(
+    (format: ExportFormat) => {
+      if (blockingErrors.length > 0) setPendingExport(format);
+      else void runExport(format);
+    },
+    [blockingErrors.length, runExport],
   );
 
   // --- project file -------------------------------------------------------
@@ -334,6 +390,9 @@ export function App() {
           assets={assets}
           dataOriginals={dataOriginals.current}
           exportDpi={dpi}
+          tab={tab}
+          onTabChange={setTab}
+          report={report}
           cropNodeId={cropNodeId}
           onCropNodeChange={setCropNodeId}
           measureNodeId={measureNodeId}
@@ -364,6 +423,16 @@ export function App() {
         </div>
 
         <div className="group">
+          <button
+            className={`readiness ${scoreTone(report.score)}`}
+            onClick={() => setTab('quality')}
+            title="Publication readiness — click for the findings"
+          >
+            {report.score}/100
+            {blockingErrors.length > 0 && ` · ${blockingErrors.length} error`}
+            {blockingErrors.length > 1 && 's'}
+          </button>
+
           <label className="field">
             Raster DPI
             <select
@@ -383,7 +452,7 @@ export function App() {
               key={format.id}
               className={format.vector ? 'vector' : ''}
               disabled={busy !== null}
-              onClick={() => void runExport(format.id)}
+              onClick={() => requestExport(format.id)}
               title={format.vector ? 'Vector, editable text' : `Raster at ${dpi} dpi`}
             >
               {format.label}
@@ -398,7 +467,60 @@ export function App() {
             onCancel={() => setSaveName(null)}
           />
         )}
+        {pendingExport !== null && (
+          <ExportConfirmDialog
+            format={pendingExport}
+            errors={blockingErrors.map((f) => f.title)}
+            onExport={() => void runExport(pendingExport)}
+            onReview={() => {
+              setPendingExport(null);
+              setTab('quality');
+            }}
+          />
+        )}
       </footer>
+    </div>
+  );
+}
+
+/**
+ * What the figure is about to carry out of the app.
+ *
+ * Lists the errors rather than summarising them: "3 problems" is a number an
+ * author dismisses, whereas "Bar 1 has no calibration" is one they recognise.
+ * Both buttons are exits — neither refuses the export.
+ */
+function ExportConfirmDialog({
+  format,
+  errors,
+  onExport,
+  onReview,
+}: {
+  format: ExportFormat;
+  errors: string[];
+  onExport: () => void;
+  onReview: () => void;
+}) {
+  return (
+    <div className="save-dialog right" role="dialog" aria-label="Confirm export">
+      <strong>
+        {errors.length} issue{errors.length > 1 ? 's' : ''} in this figure
+      </strong>
+      <ul className="list compact">
+        {errors.map((title) => (
+          <li key={title}>{title}</li>
+        ))}
+      </ul>
+      <span className="hint">
+        These are the defects a reader cannot see in the exported file. The {format.toUpperCase()}{' '}
+        will be produced either way.
+      </span>
+      <div className="group">
+        <button className="primary" onClick={onReview}>
+          Review in Quality
+        </button>
+        <button onClick={onExport}>Export anyway</button>
+      </div>
     </div>
   );
 }
