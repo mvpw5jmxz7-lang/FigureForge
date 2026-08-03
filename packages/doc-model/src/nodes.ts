@@ -239,6 +239,15 @@ export interface PlotNode extends NodeBase {
    * the setting is ignored rather than approximated.
    */
   errorDisplay?: 'bars' | 'band';
+  /**
+   * Draw every replicate behind the summarised means.
+   *
+   * Only where replicates were collapsed in the first place — a plot showing one
+   * point per observation is already showing them. Prism's own advice for this
+   * table shape is to plot each replicate as a first step, because a mean with
+   * an interval hides how many measurements it rests on and whether they agree.
+   */
+  showReplicates?: boolean;
 }
 
 export interface ImageNode extends NodeBase {

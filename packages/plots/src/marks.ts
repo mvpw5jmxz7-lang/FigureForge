@@ -337,6 +337,27 @@ export interface XySeriesMarks {
    * that wants whiskers instead can read the same numbers.
    */
   band: { x: number; lowY: number; highY: number }[] | null;
+  /**
+   * Half-width of an error bar's cap, for a renderer drawing `band` as whiskers
+   * rather than as a polygon.
+   *
+   * Sized here rather than in the renderer because it is a number about the
+   * data's spacing: a fixed extent, clamped so a cap can never reach its
+   * neighbour on a series whose timepoints bunch up. The categorical path takes
+   * its cap from the bar width for the same reason; an xy plot has no band to
+   * measure, so the gap between adjacent x is what stands in for one.
+   */
+  capHalfWidthMm: number;
+  /**
+   * Every replicate, when the series was summarised and the plot asked to show
+   * them. Empty otherwise.
+   *
+   * Kept apart from `points` so that stays exactly what it always was — what the
+   * plot draws a marker at, the centres once a series is summarised. Folding the
+   * replicates into it would silently change the meaning of a field the line
+   * path, the bracket clearance and the legend all read.
+   */
+  replicatePoints: PointGeometry[];
   /** What the band or the bars represent, e.g. "mean ± s.d.". */
   errorLabel: string;
   n: number;
@@ -365,7 +386,20 @@ export interface XyMarkOptions {
    * which is what a scatter of the raw data should be.
    */
   summariseAtX?: { center: CenterKind; errorBars: ErrorBarKind };
+  /**
+   * Also return every replicate, for a plot that draws them behind its means.
+   * Only meaningful alongside `summariseAtX`; without it the points already are
+   * the replicates.
+   */
+  showReplicates?: boolean;
 }
+
+/**
+ * Nominal half-width of an error bar cap on a continuous axis, before the
+ * clamp against neighbouring points. Matches the visual weight of the
+ * categorical path's `barWidth * 0.25` at the default panel size.
+ */
+const CAP_HALF_WIDTH_MM = 0.7;
 
 /** Paired (x, y) marks for scatter and line plots. */
 export function xyMarks(
@@ -446,11 +480,24 @@ export function xyMarks(
       : null;
 
     // Summarised, the drawn points are the centres, not every replicate.
-    const drawnPoints: PointGeometry[] = summary && band
+    const summarised = summary !== undefined && band !== null;
+    const drawnPoints: PointGeometry[] = summarised
       ? centres
           .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
           .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
       : points;
+
+    /*
+     * A cap must not reach its neighbour, so the nominal width is clamped to a
+     * share of the smallest gap between adjacent drawn positions. Below two
+     * points there is no neighbour and nothing to clamp against.
+     */
+    const xs = [...(band ?? []).map((p) => p.x)].sort((a, b) => a - b);
+    const gaps = xs.slice(1).map((v, i) => v - xs[i]!);
+    const capHalfWidthMm =
+      gaps.length > 0
+        ? Math.min(CAP_HALF_WIDTH_MM, Math.max(0.15, Math.min(...gaps) * 0.25))
+        : CAP_HALF_WIDTH_MM;
 
     const tops = drawnPoints.map((p) => p.y - (options.showPoints ? options.pointSizeMm / 2 : 0));
     // The band reaches above the centres, so a bracket has to clear it too.
@@ -462,6 +509,10 @@ export function xyMarks(
       points: options.showPoints ? drawnPoints : [],
       linePath,
       band,
+      capHalfWidthMm,
+      // Only where they are not already the drawn points; `points` holds the
+      // raw pairs when nothing was summarised.
+      replicatePoints: summarised && options.showReplicates ? points : [],
       errorLabel,
       n: pairs.length,
       // y is inverted, so the visual top is the minimum.

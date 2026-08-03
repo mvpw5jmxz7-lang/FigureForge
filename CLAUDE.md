@@ -188,13 +188,18 @@ Each guards against a specific, common reporting error:
 Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests.
 Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
 panels) is done — see "Round 4" below. **Round 5 is in progress on
-`feat/round-5-xy-import`**: the import surface, one reported item at a time,
-starting with xy pairs. Run `git status` and `git branch` before assuming the
-tree is clean or which branch you're on.
+`feat/round-5-*`**: the import surface, one reported item at a time — stage 1
+(xy pairs) and stage 2 (a shared x with replicate y) are merged. Run
+`git status` and `git branch` before assuming the tree is clean or which branch
+you're on.
+
+**Verified after round 5 stage 2:** 338 TypeScript tests, 105 Python tests,
+typecheck and lint clean, 46-check acceptance run (unchanged — the acceptance
+script passes its plot types explicitly and its fixtures have fully-named
+header rows).
 
 **Verified after round 5 stage 1:** 325 TypeScript tests, 105 Python tests,
-typecheck and lint clean, 46-check acceptance run (unchanged — the acceptance
-script passes its plot types explicitly).
+typecheck and lint clean, 46-check acceptance run.
 
 **Verified after round 4:** 313 TypeScript tests, 105 Python tests, typecheck
 and lint clean, 46-check acceptance run.
@@ -871,6 +876,78 @@ directly — the file input takes `.csv,.tsv,.txt` and reads bytes as text. The
 author's route is an Excel paste, which is tab-delimited and already works, so
 a spreadsheet reader was not built on speculation.
 
+#### Stage 2 — a shared x with replicate y values
+
+The other xy shape: `TestFiles/test graphs.prism` declares it exactly —
+`dataFormat: "y_replicates"`, `replicatesCount: 3`, datasets **Control** and
+**Treated** over a `y_single` x titled **Hours** — and
+`TestFiles/test2 data table.xlsx` is the same table as a spreadsheet. The model
+could already express it. Four things stood between the paste and the reading,
+and the one the report treats as the new feature was the one that already worked.
+
+- **A merged group-title row is a declaration, and was being ignored.**
+  `parseDelimited` read `columnGroups` only from a *second* header row, which is
+  how Prism writes them. A spreadsheet writes the same declaration in **one** row
+  by merging cells, so `Hours\tControl\t\t\tTreated\t\t` carried no blocks and
+  the table inferred as `prism` — **six** lines named `Control, C, D, Treated, F,
+  G`, four of them after placeholder column letters. `mergedHeaderGroups` reads
+  it, and refuses every shape that is not a replicate table: at most one leading
+  single-column block (the x column, whose own title shares the row — the whole
+  difference from the two-row case), then blocks of **equal** width ≥ 2. Both
+  guards are load-bearing. Without the equal-width test a stray trailing
+  delimiter (`A,B,C,` parses four columns wide) declares `C` a two-column group;
+  without the leading-singleton limit `Hours` becomes a block at index 0 and
+  `inferFormat`'s `firstGrouped === 0` test reads the table as **Nested**. A
+  header that names every column is not sparse, so nothing existing moves.
+- **Stating the replicate count is now one step.** The count control rendered
+  only for `GROUPED_FORMATS`, and detection lands on `prism`, which is not one —
+  so it was invisible until the author had already found the layout in a dropdown
+  listed under a Prism name. It is offered on `prism` too, and a count ≥ 2 there
+  *is* the statement that the y columns are replicates, so `datasetFromText`
+  reads the table as `xy-replicates`. A count of 1 is not a claim about
+  replicates and changes nothing.
+- **"Bars at each point" was unreachable, not merely unimplemented.** The
+  Inspector offers `errorDisplay` inside a branch gated on the plot *not* being
+  continuous — so for a line plot, the only type the control applies to, it never
+  rendered at all. Behind it, `continuousGeometry` engaged `summariseAtX` only
+  for `'band'`, so choosing bars would have drawn nothing anyway: a line
+  zig-zagging through all eighteen replicates with no interval. Both are fixed —
+  the gate now asks whether there is anything to summarise (`hasReplicatesAtX`,
+  a question about the *dataset*; the renderer asks it again downstream on scaled
+  positions because a broken axis can remove points), and the renderer draws
+  capped I-beams from the same `band` edges the polygon uses. `XySeriesMarks`'s
+  own doc comment had anticipated this: the edges are held as two ordered arrays
+  *"so a caller that wants whiskers instead can read the same numbers"*.
+  An **absent** `errorDisplay` summarises too, because `?? 'bars'` is what the
+  Inspector has always displayed. Safe by construction rather than by luck:
+  `summariseAtX` returns the series untouched unless some x carries more than one
+  value, so every `prism`/`sigmaplot`/`simple-xy` figure renders byte-identically
+  — asserted three ways in `grouped-plots.test.ts`.
+- **Whiskers are stroked in the series colour**, not `theme.foreground`. On a bar
+  chart the bar underneath says which group a black whisker belongs to; here
+  several series share the plot area with nothing behind them.
+  `errorBarDirection: 'up'` stays ignored, and its control is now hidden on
+  continuous plots rather than offered and disregarded.
+- **`showReplicates` draws the individual measurements behind the means**, which
+  is what the `.prism` file's own note recommends as a first step. Optional, so
+  `SCHEMA_VERSION` stays 1 — and added to `schema.ts` as well as the type, or zod
+  strips it on save. `XySeriesMarks.replicatePoints` is kept apart from `points`
+  so that keeps meaning "what the plot draws a marker at", which the line path,
+  the bracket clearance and the legend all read. `markerNode` gained an optional
+  `sizeMm`; absent it is `node.pointSizeMm`, so every existing call is unchanged
+  and the area-matched shape rule still rests on one radius.
+
+Driven in a real browser, light and **dark**, 22 checks each: the paste previewed
+as `Detected XY + replicates (Prism) · 7 columns · 6 rows` with *from the header:
+Control, Treated*, imported to **2** lines of **6** vertices (not 18), **2**
+shaded bands, a `Control`/`Treated` legend and an x axis titled `Hours`;
+switching to bars gave **12** capped bars in **2** series colours with **zero**
+polygons; *Show every replicate* added **36** faded markers at 0.6× size; and
+typing 3 on the header-less version of the same table reread it as XY +
+replicates with 2 groups. Both states exported single-page at exactly
+183.0000 × 75.0000 mm, fonts embedded, text selectable, **zero** image
+XObjects — the translucent band is still vector.
+
 ---
 
 ## What's next
@@ -919,7 +996,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

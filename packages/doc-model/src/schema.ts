@@ -143,6 +143,7 @@ const plotSchema = z.object({
   seriesAxis: z.array(z.enum(['y', 'y2'])).optional(),
   legend: z.enum(['auto', 'right', 'bottom', 'none']).optional(),
   errorDisplay: z.enum(['bars', 'band']).optional(),
+  showReplicates: z.boolean().optional(),
 });
 
 const imageSchema = z.object({
