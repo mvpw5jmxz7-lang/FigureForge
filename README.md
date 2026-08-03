@@ -185,18 +185,22 @@ limit rather than pretending the palette is universally safe.
 
 ## Status
 
-Phases 1–2 of the plan are complete and verified end to end: import → plot →
+Phases 1–6 of the plan are complete and verified end to end: import → plot →
 statistics → annotation → layout → export, with a 100/100 readiness score and a
 PDF confirmed to carry selectable text at exact journal dimensions.
 
-**Implemented:** document model with undo/redo and project files, auto-layout
-with smart guides and snapping, bar/dot/beeswarm marks with error bars,
-statistics with corrections and effect sizes, all five export formats, quality
-checker, canvas with selection and nudging, data import with live preview.
+**Implemented:** document model with undo/redo and project files; auto-layout
+with smart guides, snapping and templates; all nine plot types
+(bar/dot/bar+dot/beeswarm/box/violin/scatter/line/histogram) with error bars,
+log and broken axes, secondary axes and marker options; statistics with
+corrections, effect sizes and t-distribution intervals, verified against
+published reference values; image panels with crop, calibrated scale bars and
+annotations; all five export formats; a quality checker that repairs what it
+honestly can and explains what it cannot; canvas selection, copy/paste and
+draw-order control; data import with format detection and live preview.
 
-**Not yet built** (Phases 3+): box/violin/line/scatter/histogram plots, image
-panels with crop and scale bars, omics plots (heatmaps, PCA, UMAP, volcano,
+**Not yet built** (Phases 7–9): omics plots (heatmaps, PCA, UMAP, volcano,
 survival), the Electron desktop shell, and the AI layout assistant. The node
-types, renderer hooks and statistics for several of these are already in place.
+types, renderer hooks and layout geometry for several of these are in place.
 
 Run `make acceptance` to see the whole pipeline execute.

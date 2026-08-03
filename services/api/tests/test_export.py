@@ -217,3 +217,182 @@ class TestResolutionCheck:
 
     def test_guards_against_zero_width(self):
         assert effective_dpi(1000, 0) == 0.0
+
+
+class TestTiff:
+    """TIFF output had no coverage at all — `png_to_tiff` was never executed."""
+
+    @pytest.fixture(scope="class")
+    def tiff_bytes(self) -> bytes:
+        import asyncio
+
+        async def build() -> bytes:
+            try:
+                return await render(
+                    ExportRequest(
+                        svg=SVG, width_mm=WIDTH_MM, height_mm=HEIGHT_MM, format="tiff", dpi=300
+                    )
+                )
+            finally:
+                await shutdown_browser()
+
+        return asyncio.run(build())
+
+    def test_declares_its_resolution_in_the_header(self, tiff_bytes):
+        import io
+
+        from PIL import Image
+
+        # Journals read the embedded resolution. A "300 dpi TIFF" whose header
+        # says 72 is the file getting rejected, and it looks fine on screen.
+        with Image.open(io.BytesIO(tiff_bytes)) as image:
+            assert image.format == "TIFF"
+            dpi = image.info.get("dpi")
+            assert dpi is not None
+            assert round(dpi[0]) == 300 and round(dpi[1]) == 300
+
+    def test_is_lzw_compressed_at_the_requested_size(self, tiff_bytes):
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(tiff_bytes)) as image:
+            assert image.info.get("compression") == "tiff_lzw"
+            assert abs(image.size[0] - round(WIDTH_MM / 25.4 * 300)) <= 2
+
+
+class TestVectorFidelity:
+    """What actually survives the trip to paper.
+
+    Both of these were measured before they were asserted, because the answers
+    decided whether the quality checker needed a "vector compliance" rule. They
+    said it does not — see the note in CLAUDE.md — so these stand as the guard
+    that the answer has not changed.
+    """
+
+    W, H = 100.0, 50.0
+
+    def _page(self, body: str) -> str:
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{self.W}mm" height="{self.H}mm" '
+            f'viewBox="0 0 {self.W:g} {self.H:g}" font-family="Liberation Sans, sans-serif">'
+            f'<rect width="{self.W:g}" height="{self.H:g}" fill="#ffffff"/>'
+            f'<text x="4" y="8" font-size="3">Panel</text>{body}</svg>'
+        )
+
+    #: Two overlapping violins, exactly as `render-document.ts` draws them —
+    #: `fill-opacity: 0.55` is hardcoded there, so this is an ordinary figure.
+    VIOLINS = (
+        '<path d="M20 40 C 26 30, 26 20, 20 10 C 14 20, 14 30, 20 40 Z" fill="#0072b2"{o}/>'
+        '<path d="M32 40 C 38 30, 38 20, 32 10 C 26 20, 26 30, 32 40 Z" fill="#e69f00"{o}/>'
+    )
+
+    def _render(self, svg: str, fmt: str) -> bytes:
+        import asyncio
+
+        async def build() -> bytes:
+            try:
+                return await render(
+                    ExportRequest(svg=svg, width_mm=self.W, height_mm=self.H, format=fmt)
+                )
+            finally:
+                await shutdown_browser()
+
+        return asyncio.run(build())
+
+    def test_transparency_reaches_eps_unchanged(self, tmp_path):
+        """A translucent overlap prints as what the screen showed.
+
+        PostScript has no alpha, so the concern was that `eps2write` would fall
+        back to a raster tile — costing the figure its vector claim in the one
+        format some journals still demand — or drop the blend entirely. Measured
+        instead of assumed: the overlap comes back pixel-identical, and the file
+        grows about 4%. So there is nothing here to warn an author about.
+        """
+        import io
+        import subprocess
+
+        from PIL import Image
+
+        alpha = self._page(self.VIOLINS.format(o=' fill-opacity="0.55"'))
+        opaque = self._page(self.VIOLINS.format(o=""))
+
+        eps = self._render(alpha, "eps")
+        screen = Image.open(io.BytesIO(self._render(alpha, "png"))).convert("RGB")
+
+        src = tmp_path / "f.eps"
+        out = tmp_path / "f.png"
+        src.write_bytes(eps)
+        subprocess.run(
+            ["gs", "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER", "-dEPSCrop",
+             "-sDEVICE=png16m", "-r300", f"-sOutputFile={out}", str(src)],
+            check=True, capture_output=True,
+        )
+        paper = Image.open(io.BytesIO(out.read_bytes())).convert("RGB")
+
+        # A point inside the overlap of the two violins.
+        px = (int(29.0 / 25.4 * 300), int(25.0 / 25.4 * 300))
+        on_screen, on_paper = screen.getpixel(px), paper.getpixel(px)
+        assert all(abs(a - b) <= 6 for a, b in zip(on_screen, on_paper, strict=True))
+
+        # And it did not become a raster: a rasterised plot area would be many
+        # times the vector one, not a few per cent.
+        assert len(eps) < len(self._render(opaque, "eps")) * 1.3
+
+    def test_a_vector_asset_stays_vector_through_the_pdf(self):
+        """An SVG placed as an <image> is not rasterised on print.
+
+        `checkImageResolution` skips vector assets on the grounds that they
+        resolve at whatever the output device offers. That reasoning would be
+        wrong — and nothing in the app would say so — if Chromium flattened
+        them to pixels when printing. It does not: zero image XObjects.
+        """
+        import base64
+
+        logo = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" '
+            'viewBox="0 0 200 100"><circle cx="100" cy="50" r="45" fill="#0072b2"/></svg>'
+        )
+        uri = "data:image/svg+xml;base64," + base64.b64encode(logo.encode()).decode()
+        pdf = self._render(
+            self._page(f'<image href="{uri}" x="20" y="12" width="60" height="30"/>'), "pdf"
+        )
+
+        assert pdf.count(b"/Subtype /Image") + pdf.count(b"/Subtype/Image") == 0
+
+
+class TestFormatDispatch:
+    def test_refuses_a_format_it_does_not_know(self):
+        import asyncio
+
+        # Unreachable over HTTP — pydantic validates the literal first — but
+        # `render` is called directly by the tests and the acceptance script,
+        # where a typo used to fall through and return a PNG labelled otherwise.
+        with pytest.raises(ValueError, match="Unsupported export format"):
+            asyncio.run(
+                render(
+                    ExportRequest(
+                        svg=SVG, width_mm=WIDTH_MM, height_mm=HEIGHT_MM, format="webp"
+                    )
+                )
+            )
+
+
+class TestGhostscriptFailures:
+    def test_reports_a_conversion_failure_with_the_cause(self):
+        from figureforge.export.renderer import pdf_to_eps
+
+        with pytest.raises(RuntimeError, match="EPS conversion failed"):
+            pdf_to_eps(b"not a pdf at all")
+
+    def test_reports_a_hang_rather_than_holding_the_worker(self, monkeypatch):
+        # Without the timeout a Ghostscript that never returns occupies a worker
+        # until the process is restarted, which looks exactly like an outage.
+        from figureforge.export import renderer
+
+        def hang(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="gs", timeout=kwargs.get("timeout", 0))
+
+        monkeypatch.setattr(renderer.subprocess, "run", hang)
+        with pytest.raises(RuntimeError, match="timed out"):
+            renderer.pdf_to_eps(b"%PDF-1.4")
