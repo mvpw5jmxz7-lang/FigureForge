@@ -139,6 +139,31 @@ export interface AddPlotOptions {
   palette?: string;
 }
 
+/**
+ * What a layout opens as, before the author changes it.
+ *
+ * One place, because every import path was passing `'bar-dot'` explicitly and
+ * so the format-aware defaults below never fired — a replicate-per-timepoint
+ * table opened as bars over its timepoints, which is the figure the layout
+ * exists to avoid. A caller that genuinely wants a type still passes one.
+ */
+export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
+  switch (format) {
+    // A trend with its spread; read as bars, the timepoints become categories.
+    case 'xy-replicates':
+      return 'line';
+    // Nested data is drawn as its observations: a bar over subjects averages
+    // away the structure that makes the design nested in the first place.
+    case 'nested':
+      return 'dot';
+    // Counts are magnitudes; a dot over a single frequency says nothing extra.
+    case 'contingency':
+      return 'bar';
+    default:
+      return 'bar-dot';
+  }
+}
+
 export function addPlot(
   draft: FigureDocument,
   newId: () => string,
@@ -162,7 +187,7 @@ export function addPlot(
       nextZ(draft.nodes, panel.id),
     ),
     type: 'plot',
-    plotType: options.plotType ?? 'bar-dot',
+    plotType: options.plotType ?? defaultPlotTypeFor(dataset?.format),
     datasetId: options.datasetId,
     encoding: {},
     x: defaultAxis(options.xTitle ?? ''),
@@ -182,16 +207,37 @@ export function addPlot(
   plot.x.showTicks = CONTINUOUS_X_PLOT_TYPES.has(plot.plotType);
 
   /*
-   * A contingency row is a set of category counts, not replicates of one
-   * measurement. Its mean is meaningless and an SEM over it is a standard error
-   * of nothing, so a count table gets plain bars — the alternative is a figure
-   * that draws error bars on frequencies and looks entirely convincing.
+   * A contingency cell is one count, not a set of replicates. Its mean is
+   * itself and an SEM over it is a standard error of nothing, so a count table
+   * gets plain bars — the alternative is a figure that draws error bars on
+   * frequencies and looks entirely convincing.
    */
   if (dataset && dataset.format === 'contingency') {
     plot.plotType = 'bar';
     plot.errorBars = 'none';
     plot.showPoints = false;
     if (plot.y.title === '') plot.y.title = 'Count';
+  }
+
+  /*
+   * A replicate-per-x table exists to be drawn as a trend with its spread, so
+   * that is what it opens as. Read as one point per replicate the line zig-zags
+   * between the three measurements at each timepoint, which is the figure
+   * nobody wants and the reason this layout is a separate format at all.
+   */
+  if (dataset && dataset.format === 'xy-replicates' && plot.plotType === 'line') {
+    plot.errorDisplay = 'band';
+    plot.errorBars = 'sd';
+  }
+
+  /*
+   * Nested data is drawn as its observations. A bar over subjects would average
+   * away the very structure that makes the design nested, and it is the
+   * clustering — not the summary — that shows how much of the spread is between
+   * subjects rather than within them.
+   */
+  if (dataset && dataset.format === 'nested' && plot.plotType === 'dot') {
+    plot.showPoints = true;
   }
 
   draft.nodes[id] = plot;

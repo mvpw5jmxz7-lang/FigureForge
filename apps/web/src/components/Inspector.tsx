@@ -358,6 +358,28 @@ function PlotFields({
       <h4>Data</h4>
       <p className="hint">{dataset ? dataset.name : 'Dataset missing'}</p>
 
+      <label className="field block">
+        Legend
+        <select
+          value={node.legend ?? 'auto'}
+          onChange={(e) =>
+            setPlot('Change legend', {
+              legend: e.target.value as 'auto' | 'right' | 'bottom' | 'none',
+            })
+          }
+        >
+          <option value="auto">Automatic</option>
+          <option value="right">Right of the plot</option>
+          <option value="bottom">Below the plot</option>
+          <option value="none">None</option>
+        </select>
+      </label>
+      <p className="hint">
+        Automatic shows a key only where there is something it alone can say — a second factor,
+        or several lines. On a plain bar chart the category labels already name every mark, so a
+        key repeating them is furniture.
+      </p>
+
       <h4>Colours</h4>
       <label className="field block">
         Palette
@@ -496,6 +518,30 @@ function PlotFields({
               Only the upper half is drawn, so the figure shows half the spread that was
               measured. Conventional on bar charts, but state it in the legend.
             </p>
+          )}
+
+          {node.plotType === 'line' && (
+            <>
+              <label className="field block">
+                Error display
+                <select
+                  value={node.errorDisplay ?? 'bars'}
+                  onChange={(e) =>
+                    setPlot('Change error display', {
+                      errorDisplay: e.target.value as 'bars' | 'band',
+                    })
+                  }
+                >
+                  <option value="bars">Bars at each point</option>
+                  <option value="band">Shaded band</option>
+                </select>
+              </label>
+              <p className="hint">
+                A band needs several y values at each x to compute an interval from — a table
+                with replicate columns per group. With one value per x there is no interval,
+                so the band is withheld rather than drawn as a hairline.
+              </p>
+            </>
           )}
         </>
       )}

@@ -17,6 +17,8 @@ import {
   findAsset,
   findDataset,
   couldHaveRowNames,
+  dataBlocks,
+  GROUPED_FORMATS,
   imagesUsingAsset,
   plotsUsingDataset,
   removeDataset,
@@ -104,7 +106,22 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
   {
     id: 'contingency',
     label: 'Contingency table (counts)',
-    hint: 'One row per group, one column per category. Counts, not measurements: only chi-square and Fisher apply.',
+    hint: 'One row per group, one column per category. Counts, not measurements: only chi-square and Fisher apply. Each count is its own bar.',
+  },
+  {
+    id: 'grouped-replicates',
+    label: 'Grouped — rows × groups (Prism)',
+    hint: 'Column 1 labels the rows; the rest block into one group of replicates each. Two factors: a mark per row and group, coloured by group.',
+  },
+  {
+    id: 'xy-replicates',
+    label: 'XY + replicates (Prism)',
+    hint: 'Column 1 is a shared x; the rest block into one group of replicate y columns each. Drawn as a line per group through the mean, with its spread.',
+  },
+  {
+    id: 'nested',
+    label: 'Nested — subjects within groups (Prism)',
+    hint: 'Every column is a subject, blocked into groups. Points cluster by subject and colour by group. Plotted but not tested — a nested design needs a hierarchical model.',
   },
 ];
 
@@ -202,6 +219,8 @@ function DataTab({
   const [transpose, setTranspose] = useState(false);
   const [format, setFormat] = useState<DataFormat | ''>('');
   const [firstColumn, setFirstColumn] = useState<'data' | 'names'>('data');
+  // 0 means "use whatever the file's group header row declared".
+  const [replicatesPerGroup, setReplicatesPerGroup] = useState(0);
 
   const parseOptions: ImportOptions = useMemo(
     () => ({
@@ -210,8 +229,9 @@ function DataTab({
       ...(transpose ? { transpose: true } : {}),
       ...(format !== '' ? { format } : {}),
       ...(firstColumn === 'names' ? { hasRowNames: true } : {}),
+      ...(replicatesPerGroup > 0 ? { replicatesPerGroup } : {}),
     }),
-    [delimiter, headerMode, transpose, format, firstColumn],
+    [delimiter, headerMode, transpose, format, firstColumn, replicatesPerGroup],
   );
 
   const preview = useMemo(() => {
@@ -249,7 +269,9 @@ function DataTab({
           frame: nextPanelFrame(draft, { width: 60, height: 50 }),
           name: dataset.name,
           datasetId: dataset.id,
-          plotType: 'bar-dot',
+          // No type here: the layout chooses. Passing 'bar-dot' meant a
+          // replicate-per-timepoint table opened as bars over its timepoints,
+          // which is exactly the figure that layout exists to avoid.
           yTitle: titles.y ?? 'Value',
           ...(titles.x ? { xTitle: titles.x } : {}),
         });
@@ -479,6 +501,32 @@ function DataTab({
                   <option value="names">Row names — the data starts in column 2</option>
                 </select>
               </label>
+            </div>
+          )}
+
+          {/* Column blocks: read from a second header row when the file has
+              one, settable when it does not. Nothing infers a split — six
+              columns are as plausibly six groups of one as two of three, and a
+              wrong guess averages the wrong numbers into a plausible mean. */}
+          {GROUPED_FORMATS.has(preview.format) && (
+            <div className="field-row">
+              <label className="field">
+                Columns per group
+                <input
+                  type="number"
+                  min={0}
+                  max={Math.max(1, preview.columns.length)}
+                  value={replicatesPerGroup}
+                  onChange={(e) => setReplicatesPerGroup(Math.max(0, Number(e.target.value) || 0))}
+                />
+              </label>
+              <span className="muted">
+                {replicatesPerGroup > 0
+                  ? `${dataBlocks(preview).length} groups`
+                  : preview.columnGroups && preview.columnGroups.length > 0
+                    ? `from the header: ${preview.columnGroups.map((g) => g.name).join(', ')}`
+                    : '0 = one group; set it if the file has no group header row'}
+              </span>
             </div>
           )}
 
@@ -801,7 +849,28 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     if (COUNT_TESTS.has(test) !== counts) setTest(counts ? 'chi-square' : 'ttest-welch');
   }
 
+  /*
+   * Nested data is plotted but not tested.
+   *
+   * Prism's nested t-test fits a hierarchical model, in which the subjects are
+   * a random effect. Pooling the subcolumns and running an ordinary test treats
+   * every observation as independent when by construction they are not, which
+   * inflates n and shrinks p — the error the design exists to avoid. Averaging
+   * each subject first is a *different* procedure answering a different
+   * question. SciPy has no nested test, so this is refused with a reason rather
+   * than approximated, exactly as Fisher's is above 2x2.
+   */
+  const nested = dataset?.format === 'nested';
+
   const run = async (): Promise<void> => {
+    if (nested) {
+      onError(
+        'Nested data needs a hierarchical model, which this build does not have. Pooling the ' +
+          'subcolumns would treat observations within a subject as independent and report a ' +
+          'p-value that is too small.',
+      );
+      return;
+    }
     if (blockedByContinuousAxis) {
       onError('Group comparisons need a categorical plot; this one has a numeric x axis.');
       return;
@@ -994,7 +1063,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
-      {blockedByContinuousAxis && (
+      {blockedByContinuousAxis && !nested && (
         <p className="hint">
           This plot has a numeric x axis, so there are no groups to compare and nowhere to
           anchor a significance bracket. Select a categorical plot, or a correlation/regression
@@ -1002,10 +1071,20 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
+      {nested && (
+        <p className="hint">
+          Nested data plots here but is not tested. A nested design needs a hierarchical model,
+          in which the subcolumns are a random effect; pooling them and running an ordinary test
+          would count every observation as independent, inflate n and report a p-value that is
+          too small. Averaging each subject first answers a different question. This build has
+          no nested test, so it declines rather than approximating one.
+        </p>
+      )}
+
       <button
         className="primary"
         onClick={() => void run()}
-        disabled={!minGroupsMet || blockedByContinuousAxis}
+        disabled={!minGroupsMet || blockedByContinuousAxis || nested}
       >
         Run and annotate
       </button>

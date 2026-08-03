@@ -210,6 +210,23 @@ export interface PlotNode extends NodeBase {
    */
   y2?: AxisSpec;
   seriesAxis?: readonly ('y' | 'y2')[];
+  /**
+   * Where the series key is drawn, or `'none'`.
+   *
+   * Absent means `'auto'`: shown when there is a second factor to name and
+   * withheld otherwise. A single-series plot needs no legend — the axis title
+   * already says what is plotted — and a key repeating what the category labels
+   * spell out underneath is furniture, not information.
+   */
+  legend?: 'auto' | 'right' | 'bottom' | 'none';
+  /**
+   * Draw the error interval as a filled band rather than as bars.
+   *
+   * Line plots only, and only where a series carries several y values at one x
+   * to compute an interval from. On anything else there is no band to draw and
+   * the setting is ignored rather than approximated.
+   */
+  errorDisplay?: 'bars' | 'band';
 }
 
 export interface ImageNode extends NodeBase {

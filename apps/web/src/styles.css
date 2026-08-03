@@ -289,11 +289,13 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .rename:hover { border-color: var(--border); }
 .rename:focus { border-color: var(--accent); background: #fff; outline: none; }
 
-/* Asset rows carry an action row as well as a name, so they wrap rather than
-   squeezing three things onto one 340 px line. */
-.list.assets li { flex-wrap: wrap; }
+/* A row carrying an action row as well as a name wraps, rather than squeezing
+   four things onto one 340 px line. Keyed on the structure rather than on which
+   list it is: the dataset rows grew a second line too, and without this the
+   name input collapsed to 10 px — present, correct, and invisible. */
+.list li:has(.field-row) { flex-wrap: wrap; }
+.list li .field-row { flex-basis: 100%; gap: 6px; align-items: center; }
 .list.assets li .rename { cursor: default; font-weight: 600; }
-.list.assets li .field-row { flex-basis: 100%; gap: 6px; align-items: center; }
 .list.assets .warning { display: inline; margin: 0; }
 
 .group-label {

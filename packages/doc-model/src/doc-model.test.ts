@@ -6,7 +6,9 @@ import {
   checkReferentialIntegrity,
   createDocument,
   createIdFactory,
+  blocksOfSize,
   couldHaveRowNames,
+  dataBlocks,
   DocumentStore,
   editDocument,
   formatMm,
@@ -186,16 +188,21 @@ describe('delimited parsing', () => {
     expect(inferFormat(parseDelimited('Dose,A,B,C\n0,1,2,3\n1,2,3,4').columns)).toBe('prism');
   });
 
-  it('reads a contingency table row by row, like replicates', () => {
-    // Same shape, different meaning: the numbers are counts, so what may be
-    // *done* with them differs, which `isContingency` gates rather than this.
+  it('reads a contingency table cell by cell, as two factors', () => {
+    // Same *shape* as a replicate table, different meaning — and the difference
+    // now reaches the series too. Reading the rows as replicates put a bar at
+    // the mean of a count of cases and a count of controls.
     const table: Dataset = {
       ...dataset('Group,Yes,No\nTreated,15,5\nControl,7,13'),
       format: 'contingency',
     };
     const series = toSeries(table);
-    expect(series.map((s) => s.name)).toEqual(['Treated', 'Control']);
-    expect(series[0]?.values).toEqual([15, 5]);
+    expect(series.map((s) => [s.category, s.group, s.values])).toEqual([
+      ['Treated', 'Yes', [15]],
+      ['Treated', 'No', [5]],
+      ['Control', 'Yes', [7]],
+      ['Control', 'No', [13]],
+    ]);
     expect(isContingency(table)).toBe(true);
     expect(contingencyCategories(table)).toEqual(['Yes', 'No']);
     expect(isContingency(dataset('Group,Value\nA,1'))).toBe(false);
@@ -279,6 +286,31 @@ describe('series extraction', () => {
     expect(series[0]).toEqual({ name: 'Y', values: [10, 30], x: [1, 3] });
   });
 
+  it('draws a contingency table one bar per count, not one per row', () => {
+    /*
+     * Read as replicates, a `Smoked` row of [80, 20] became a single bar at 50
+     * — the mean of a count of cases and a count of controls, which is not a
+     * number in the table and not a fact about the experiment.
+     */
+    const table: Dataset = {
+      ...dataset('Group,Cases,Control\nSmoked,80,20\nNever smoked,10,90'),
+      format: 'contingency',
+    };
+    const series = toSeries(table);
+
+    expect(series).toHaveLength(4);
+    expect(series.map((s) => s.values)).toEqual([[80], [20], [10], [90]]);
+    expect(series.map((s) => s.category)).toEqual([
+      'Smoked',
+      'Smoked',
+      'Never smoked',
+      'Never smoked',
+    ]);
+    expect(series.map((s) => s.group)).toEqual(['Cases', 'Control', 'Cases', 'Control']);
+    // Names stay unique, which is what every downstream join relies on.
+    expect(new Set(series.map((s) => s.name)).size).toBe(4);
+  });
+
   it('reads x from column 2 when column 1 holds row names', () => {
     // Without the flag this is the `replicate` signature — a text column in
     // front of numbers — and the x values would be read as replicate data.
@@ -292,6 +324,154 @@ describe('series extraction', () => {
     expect(series[0]?.x).toEqual([0, 1, 2]);
     expect(series[0]?.values).toEqual([10, 20, 30]);
     expect(rowNames(table)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('reads a two-row header as group blocks over columns', () => {
+    // A merged group title exports as a name in the first cell of its span and
+    // blanks across the rest, which is what makes the blocking detectable.
+    const table = parseDelimited(
+      ',Group A,,,Group B,,\n' +
+        'Hours,A:Y1,A:Y2,A:Y3,B:Y1,B:Y2,B:Y3\n' +
+        '0,45,34,20,34,31,29\n' +
+        '6,56,58,61,41,43,42',
+    );
+
+    expect(table.headerRows).toBe(2);
+    // The lower row names the columns; the upper one only blocks them.
+    expect(table.columns.map((c) => c.name)).toEqual([
+      'Hours',
+      'A:Y1',
+      'A:Y2',
+      'A:Y3',
+      'B:Y1',
+      'B:Y2',
+      'B:Y3',
+    ]);
+    expect(table.columnGroups).toEqual([
+      { name: 'Group A', from: 1, to: 3 },
+      { name: 'Group B', from: 4, to: 6 },
+    ]);
+    // Numeric column 0 in front of the blocks means a shared x.
+    expect(inferFormat(table.columns, { columnGroups: table.columnGroups })).toBe('xy-replicates');
+  });
+
+  it('does not mistake an ordinary header for a group row', () => {
+    // An ordinary header names *every* column; a merged group title names one
+    // cell per block. Sparseness is what separates them.
+    const plain = parseDelimited('Treatment,R1,R2,R3\nVehicle,10,11,12\nDrug,4,5,6');
+    expect(plain.headerRows).toBe(1);
+    expect(plain.columnGroups).toEqual([]);
+    expect(inferFormat(plain.columns, { columnGroups: plain.columnGroups })).toBe('replicate');
+  });
+
+  it('reads Prism’s Grouped table as a value per row and group', () => {
+    const table = parseDelimited(
+      ',Group A,,Group B,\n' +
+        'Variant,A:Y1,A:Y2,B:Y1,B:Y2\n' +
+        'WT,0.08,-0.25,0.06,0.006\n' +
+        'Q331K,-0.18,0.12,-0.59,-0.66',
+    );
+    const format = inferFormat(table.columns, { columnGroups: table.columnGroups });
+    expect(format).toBe('grouped-replicates');
+
+    const ds: Dataset = {
+      ...dataset('placeholder,1\n'),
+      format,
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    };
+    const series = toSeries(ds);
+
+    expect(series).toHaveLength(4);
+    expect(series[0]).toEqual({
+      name: 'WT — Group A',
+      values: [0.08, -0.25],
+      category: 'WT',
+      group: 'Group A',
+    });
+    expect(series[3]!.category).toBe('Q331K');
+    expect(series[3]!.group).toBe('Group B');
+    expect(series[3]!.values).toEqual([-0.59, -0.66]);
+  });
+
+  it('reads Prism’s XY-with-replicates as one series per group, x repeated', () => {
+    const table = parseDelimited(
+      ',Control,,,Treated,,\n' +
+        'Hours,A:Y1,A:Y2,A:Y3,B:Y1,B:Y2,B:Y3\n' +
+        '0,45,34,20,34,31,29\n' +
+        '6,56,58,61,41,43,42',
+    );
+    const ds: Dataset = {
+      ...dataset('placeholder,1\n'),
+      format: 'xy-replicates',
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    };
+    const series = toSeries(ds);
+
+    expect(series.map((s) => s.name)).toEqual(['Control', 'Treated']);
+    // Every replicate is its own point at its own x, so a scatter is already
+    // right and the mean is a grouping the renderer does.
+    expect(series[0]!.values).toEqual([45, 34, 20, 56, 58, 61]);
+    expect(series[0]!.x).toEqual([0, 0, 0, 6, 6, 6]);
+    expect(series[1]!.values).toEqual([34, 31, 29, 41, 43, 42]);
+  });
+
+  it('reads Prism’s Nested table clustered by subject, keyed by group', () => {
+    const table = parseDelimited(
+      'Control,,,Treated,,\n' +
+        'Rat 1,Rat 2,Rat 3,Rat 4,Rat 5,Rat 6\n' +
+        '1,2,3,7,8,9\n' +
+        '1.5,2.5,3.5,7.5,8.5,9.5',
+    );
+    expect(table.columnGroups).toEqual([
+      { name: 'Control', from: 0, to: 2 },
+      { name: 'Treated', from: 3, to: 5 },
+    ]);
+    expect(inferFormat(table.columns, { columnGroups: table.columnGroups })).toBe('nested');
+
+    const ds: Dataset = {
+      ...dataset('placeholder,1\n'),
+      format: 'nested',
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    };
+    const series = toSeries(ds);
+
+    expect(series).toHaveLength(6);
+    // One band per group, one sub-band per subject inside it…
+    expect(series[0]!.category).toBe('Control');
+    expect(series[0]!.group).toBe('Rat 1');
+    expect(series[0]!.values).toEqual([1, 1.5]);
+    // …and colour keys on the group, since subjects are not what is compared.
+    expect(series.map((s) => s.legendKey)).toEqual([
+      'Control',
+      'Control',
+      'Control',
+      'Treated',
+      'Treated',
+      'Treated',
+    ]);
+  });
+
+  it('reads one group rather than inventing a split when none is declared', () => {
+    const ds: Dataset = {
+      ...dataset('Variant,A,B,C\nWT,1,2,3\nKO,4,5,6'),
+      format: 'grouped-replicates',
+    };
+    // Guessing that three columns are groups would assert a design the file
+    // never stated. One block draws exactly what the replicate reading draws.
+    expect(dataBlocks(ds)).toEqual([{ name: 'A', from: 1, to: 3 }]);
+    expect(toSeries(ds).map((s) => s.values)).toEqual([[1, 2, 3], [4, 5, 6]]);
+
+    // An author who knows the shape can say so.
+    expect(blocksOfSize(ds, 2)).toEqual([
+      { name: 'A', from: 1, to: 2 },
+      { name: 'C', from: 3, to: 3 },
+    ]);
   });
 
   it('offers the row-name reading without guessing at it', () => {

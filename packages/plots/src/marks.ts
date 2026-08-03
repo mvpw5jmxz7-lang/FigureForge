@@ -328,6 +328,17 @@ export interface XySeriesMarks {
    * over unsorted x values is a scribble, not a trend.
    */
   linePath: { x: number; y: number }[] | null;
+  /**
+   * Upper and lower edge of the error interval at each x, ordered by x — or
+   * null when the series carries no replicates to compute one from.
+   *
+   * The renderer closes it into a polygon. Held as two ordered edges rather
+   * than as a path so the renderer decides how to close it, and so a caller
+   * that wants whiskers instead can read the same numbers.
+   */
+  band: { x: number; lowY: number; highY: number }[] | null;
+  /** What the band or the bars represent, e.g. "mean ± s.d.". */
+  errorLabel: string;
   n: number;
   topMm: number;
 }
@@ -345,6 +356,15 @@ export interface XyMarkOptions {
   showPoints: boolean;
   pointSizeMm: number;
   colors: readonly string[];
+  /**
+   * Collapse replicates sharing an x to their centre, and return the error
+   * interval around it.
+   *
+   * Only meaningful for a table that carries several y at one x — Prism's XY
+   * with replicate subcolumns. Absent, every replicate stays its own point,
+   * which is what a scatter of the raw data should be.
+   */
+  summariseAtX?: { center: CenterKind; errorBars: ErrorBarKind };
 }
 
 /** Paired (x, y) marks for scatter and line plots. */
@@ -377,23 +397,75 @@ export function xyMarks(
       .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
 
+    /*
+     * Replicates at one x, summarised.
+     *
+     * A table with three y columns per group arrives here as three pairs
+     * sharing each x, so the "line" through them zig-zags between replicates
+     * rather than tracing the trend. Grouping by x is what turns that into one
+     * point per timepoint with an interval around it.
+     */
+    const summary = options.summariseAtX;
+    let band: XySeriesMarks['band'] = null;
+    let errorLabel = '';
+    let centres = pairs;
+
+    if (summary) {
+      const byX = new Map<number, number[]>();
+      for (const p of pairs) {
+        const bucket = byX.get(p.xValue);
+        if (bucket) bucket.push(p.yValue);
+        else byX.set(p.xValue, [p.yValue]);
+      }
+      const ordered = [...byX.entries()].sort((a, b) => a[0] - b[0]);
+      // Only worth summarising if some x actually carries replicates; with one
+      // value each the "interval" is zero-width and the band a hairline.
+      if (ordered.some(([, vs]) => vs.length > 1)) {
+        const intervals = ordered.map(([xValue, values]) => ({
+          xValue,
+          interval: errorInterval(summarize(values), summary.center, summary.errorBars),
+        }));
+        errorLabel = intervals[0]?.interval.label ?? '';
+        centres = intervals.map((i) => ({ xValue: i.xValue, yValue: i.interval.center }));
+        band = intervals
+          .map((i) => ({
+            x: options.x.scale(i.xValue),
+            lowY: y.scale(i.interval.low),
+            highY: y.scale(i.interval.high),
+          }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.lowY) && Number.isFinite(p.highY));
+        if (band.length < 2) band = null;
+      }
+    }
+
     const linePath = options.showLine
-      ? [...pairs]
+      ? [...centres]
           .sort((a, b) => a.xValue - b.xValue)
           .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue) }))
           .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
       : null;
 
-    const tops = points.map((p) => p.y - (options.showPoints ? options.pointSizeMm / 2 : 0));
+    // Summarised, the drawn points are the centres, not every replicate.
+    const drawnPoints: PointGeometry[] = summary && band
+      ? centres
+          .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+      : points;
+
+    const tops = drawnPoints.map((p) => p.y - (options.showPoints ? options.pointSizeMm / 2 : 0));
+    // The band reaches above the centres, so a bracket has to clear it too.
+    const bandTop = band ? Math.min(...band.map((p) => Math.min(p.lowY, p.highY))) : Infinity;
 
     return {
       name: s.name,
       color,
-      points: options.showPoints ? points : [],
+      points: options.showPoints ? drawnPoints : [],
       linePath,
+      band,
+      errorLabel,
       n: pairs.length,
       // y is inverted, so the visual top is the minimum.
-      topMm: tops.length > 0 ? Math.min(...tops) : 0,
+      topMm: Math.min(tops.length > 0 ? Math.min(...tops) : 0, bandTop),
     };
   });
 }
