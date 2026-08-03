@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–6 are done, plus three rounds of reported fixes; phases 7–9 are not.**
+could be proven before breadth was added. **Phases 1–6 are done, plus four rounds of reported fixes; phases 7–9 are not.**
 
 ---
 
@@ -22,8 +22,8 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 265 TypeScript + 105 Python tests
-make acceptance  # 43-check end-to-end run (needs `make up` first)
+make test        # 313 TypeScript + 105 Python tests
+make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
 ```
 
@@ -112,12 +112,17 @@ maths in `render`, the split is being eroded.
   **verbatim** original imports, byte for byte — that is what makes the
   reproducibility claim real. Each analysis stores an `inputHash` so a figure can
   never silently display a p-value its data no longer supports.
+  A table edited in the data grid does not weaken this: the edited cells travel
+  in `document.json` while `data/` keeps the bytes that arrived, and
+  `Dataset.editedAt` is what tells them apart. Both are kept, and they are
+  distinguishable — which is the property the claim actually needs.
 
 ### Plot type choices
 
 - **`PlotGeometry` is a discriminated union on `kind`, not one shape with
-  optional fields.** The categorical arm carries `band`/`marks`/`categories`; the
-  continuous arm carries `xScale`/`series`/`bins`. Almost nothing is shared, and
+  optional fields.** The categorical arm carries `band`/`marks`/`categories`
+  plus `axisBand`/`axisCategories`/`legend`; the continuous arm carries
+  `xScale`/`series`/`bins`. Almost nothing is shared, and
   optional fields would let a categorical-only assumption compile against a
   scatter — which is exactly how the unimplemented types went unnoticed.
 - **A plot type the data cannot support is withheld, never approximated.**
@@ -180,13 +185,16 @@ Each guards against a specific, common reporting error:
 
 ## Current state
 
-Phases 1–5 are on `master`. A three-stage round of reported bugs and requests
-follows; **all three stages are done** — see "The reported-bug rounds" below.
-Run `git status` and `git branch` before assuming the tree is clean or which
-branch you're on.
+Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests.
+Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
+panels) is done — see "Round 4" below. Run `git status` and `git branch` before
+assuming the tree is clean or which branch you're on.
 
-**Verified:** 265 TypeScript tests, 105 Python tests, typecheck and lint clean,
-43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
+**Verified after round 4:** 313 TypeScript tests, 105 Python tests, typecheck
+and lint clean, 46-check acceptance run.
+
+**Verified at the end of phase 6:** 265 TypeScript tests, 105 Python tests,
+typecheck and lint clean, 43-check acceptance run. Exported PDF confirmed single-page, fonts embedded,
 text selectable, exactly 183.0000 × 75.0000 mm with an image XObject embedded;
 PNG exactly 300 dpi. The phase 4 surfaces were additionally driven in real
 Chromium against the running app — import, scale bars, annotations, crop and
@@ -218,15 +226,31 @@ the export payload from **4234 KB to 438 KB** and still produced a single-page
 PDF with fonts embedded and exactly one image XObject. Six concurrent exports
 queued through the semaphore without deadlocking.
 
-Working end to end: CSV/TSV import with format detection, live preview and a
-user-supplied dataset name → bar/dot/beeswarm/box/violin/scatter/line/histogram
-marks with error bars → Welch's t-test and friends with corrections and effect
-sizes → significance bracket placed on measured geometry, which follows the plot
-when it moves → PNG/JPEG/SVG/TIFF image panels with drag-crop, calibrated scale
-bars and arrow/shape/text annotations → auto-layout with smart guides and
+Round 4 was driven the same way, in both light and **dark** mode. All four of
+the PDF's table shapes were pasted into the running app: the Grouped table drew
+20 bars over 5 axis labels in 4 colours with a 4-entry legend, the Control /
+Treated timecourse drew 2 lines with 2 shaded bands, the nested table clustered
+in 2 colours and refused its statistics, and the contingency table drew **four**
+bars whose 80/10 heights are in exactly an 8.00 ratio. A one-way ANOVA placed
+six brackets at six distinct heights with no label overlap. Dragging the crop
+window's SE grip to the middle left exactly half the picture, and one Ctrl+Z
+restored it. The data grid opened at 760 px reading `rgb(232,234,237)` on
+`rgb(22,24,28)`, and four PNGs made one panel with four tiles at four distinct
+positions. The exported PDF stayed single-page at 183.0000 × 75.0000 mm with
+fonts embedded, legend text selectable, and **zero** image XObjects — the
+translucent band is still vector.
+
+Working end to end: CSV/TSV import with format detection, live preview, an
+editable data grid and a user-supplied dataset name →
+bar/dot/beeswarm/box/violin/scatter/line/histogram marks with error bars or a
+shaded band, over one factor or two, with a legend → Welch's t-test and friends
+with corrections and effect sizes → significance brackets placed together on
+measured geometry, which follow the plot when it moves → PNG/JPEG/SVG/TIFF image
+panels with drag-crop, calibrated scale bars and arrow/shape/text annotations,
+several tiled into one panel if wanted → auto-layout with smart guides and
 snapping, weighted templates, and drag-resize handles → panel lettering in
 reading order → an Inspector for the selected node (colours, text, axis titles,
-frame, crop, calibration) with double-click-to-edit on canvas →
+frame, crop, calibration, tile grid) with double-click-to-edit on canvas →
 PDF/EPS/SVG/PNG/TIFF export → Publication Readiness Score → project save/load
 with data and images preserved byte for byte.
 
@@ -648,6 +672,144 @@ keys and a field present only in the type is dropped on save.
   raised an opaque "inhomogeneous shape" error. Counts genuinely include zeros,
   so a blank cell is a mistake to report, not a value to skip.
 
+### Round 4 (after phase 6)
+
+Seven items from real use, plus a PDF of Prism table shapes
+(`TestFiles/Document4.pdf`). Three stages, each merged after being driven in a
+real browser. Two of the three bugs were *silent* — the figure looked fine and
+was wrong.
+
+#### Stage A — three bugs and a missing delete
+
+- **Cropping cut somewhere other than the outline.** The overlay drew its window
+  as a fraction of the *panel frame*, but `crop` is normalised **source**
+  coordinates and `renderImage` scales the kept region up to fill the frame. The
+  two spaces stop agreeing the moment anything is cropped: the picture zooms,
+  the outline shrinks into a corner, and the next drag applies frame fractions
+  as source fractions. Crop mode now shows the whole uncropped picture,
+  letterboxed through the existing `fitAspect`, so the window really is in
+  source space — what is outlined is what is kept. It also commits once on
+  release; every `pointermove` used to be its own undo entry.
+- **Brackets had no collective placement at all.** `bracketFrame` positioned
+  each one against the data under its own span, and the entire stacking rule was
+  `gapMm: 2 + placed * 3.5` in the *caller*. On the default 60 × 50 mm panel the
+  `Math.max(0, …)` clamp bites past ~4.6 mm, so **the second bracket and every
+  one after it collapsed onto the panel top, pixel for pixel.**
+  `layoutBracketsForPlot` places a plot's brackets together — shortest span
+  first, each lifted above both its data and any *horizontally overlapping*
+  bracket, so disjoint comparisons share a height instead of spending the
+  budget. The pitch is `bracketStepMm`, measured from the theme: a bracket's
+  node is 1.2 mm tall and its label is drawn *above* the frame at negative y, so
+  3.5 mm left about half a millimetre of real clearance. `computePlotGeometry`
+  reserves headroom from the **count** of brackets — a quantity that does not
+  depend on the answer, so it terminates by construction, the same argument the
+  two-pass margin rule rests on. `reflowBrackets` in the render package pairs
+  the measurement and the pitch in one place; nine call sites each passing the
+  pitch is nine chances to forget it.
+  The correct algorithm had been sitting in `plots/marks.ts` as `stackBrackets`,
+  exported, never called, with a broken sort comparator. Deleted rather than
+  left as a second copy to drift — `doc-model` imports nothing internal, so
+  `plots` could not host the shared implementation anyway.
+- **A blank cell moved every point after it onto the wrong x.** `toSeries` read
+  the x and y columns independently, filtered each for numbers, then truncated x
+  to the y count — so a hole at row 2 shifted rows 3+ onto the x of the row
+  before and dropped the last x entirely. `numericPairsAt` reads by row index
+  and drops the pair, which is the rule `xyMarks` already applied downstream,
+  too late to help.
+- **Datasets can be deleted** once nothing reads them, mirroring the orphan
+  handling image assets already had, cascading to their analyses and brackets
+  and refusing while a plot still points at them —
+  `checkReferentialIntegrity` would reject the save.
+- **A row-name detection was built and then removed.** "Unique labels plus an
+  ascending first numeric column" read a real dose-response *replicate* table as
+  row-names-plus-xy, because its group means ascend exactly like an axis. The
+  two readings are the same rectangle of numbers, so `couldHaveRowNames` reports
+  only that the question is *open* and the author settles it. Found by driving
+  the app; all 279 tests were green over it.
+
+#### Stage B — the Prism table shapes
+
+All four of the PDF's shapes reduce to one thing the model could not express: a
+mark positioned by **two factors**. That is also why a contingency table drew
+one bar at the mean of a count of cases and a count of controls — 50 for an
+80/20 split.
+
+- **`Series` gained `category` (outer band), `group` (sub-band) and
+  `legendKey` (colour).** `name` stays unique and composite (`"WT — Group A"`),
+  which is what lets the second factor arrive without `AnalysisSpec.groups`,
+  `Comparison.groupA`, `PlotMeasurements.categoryX` or `bracketFrame` learning
+  about it: they all join on the name and none of them changed.
+- **`legendKey` is separate from `group` because on nested data they differ.**
+  The sub-bands are subjects (Rat 1, Rat 2, …) but the reading is Control versus
+  Treated, so points cluster by subject and colour by group. Six colours for six
+  rats would key the legend on the one factor a nested design is explicitly not
+  comparing.
+- **`makeGroupedBandScale` returns a `BandScale` addressed by the composite
+  name**, so `categoricalMarks` and `measurePlot` did not change. Only the
+  *axis* reads the new `axisBand`, which is why four variants get four labels
+  rather than sixteen.
+- **Two header rows are detected, not required.** A merged group title exports
+  as a name in the first cell of its span and blanks across the rest; that
+  sparseness is what separates it from an ordinary header, which names every
+  column. Without the test a units row would be read as declaring groups.
+- **Column blocks are never guessed.** Six columns are as plausibly six groups
+  of one as two of three, and a wrong split averages the wrong numbers into a
+  plausible mean. A grouped format with nothing declared reads as one group,
+  which draws exactly what the single-factor path draws.
+- **`'legend'` had been a declared `SceneRole` since phase 1 with nothing
+  constructing one.** It draws from the *geometry*, so the swatch is the colour
+  actually used, and reserves its own margin through `text-width.ts`. `'auto'`
+  shows one only where there is something it alone can say — a plain bar chart
+  already names every mark under its band.
+- **Shaded error bands**: `xyMarks` groups pairs sharing an x and runs the
+  existing `errorInterval` per x. One closed polygon, not a ribbon per segment —
+  two adjacent translucent shapes double their alpha where they meet and print
+  as a seam at every timepoint. Withheld where there is one y per x, and on a
+  scatter, which is its raw observations by definition.
+- **Nested *statistics* are refused**, with the reason in the Stats tab. Prism's
+  nested t-test fits a hierarchical model; pooling the subcolumns counts
+  observations within a subject as independent, inflates n and reports a p-value
+  that is too small. Same stance as Fisher's above 2×2.
+- **`defaultPlotTypeFor` exists because every import path passed
+  `plotType: 'bar-dot'` explicitly**, so the format-aware defaults never fired
+  and the timecourse opened as bars over its timepoints. Found by driving it —
+  the tests called the operation directly and passed.
+
+#### Stage C — the editing surfaces
+
+- **`DataGrid`** edits cells, rows, columns and headers, and takes an Excel
+  paste. The transforms are pure and live in `data.ts`; `editDataset` is the one
+  write-back, so undo/redo, history and staleness apply without the grid
+  existing as far as they are concerned. Every transform re-derives column kinds
+  through `columnKindFor` (shared with the parser) — a cell edited from `12` to
+  `n/a` retypes its column, and the *layout* is inferred from those types.
+  Inserting or removing a column shifts the group blocks with it, or every block
+  after the edit repoints at its neighbour.
+- **Editing does not cost the reproducibility claim.** `buildArchiveContents`
+  already wrote `originals.get(path) ?? datasetToCsv(...)`, so the verbatim
+  import stays at `sourcePath` while edited cells travel in `document.json`.
+  Both are kept and distinguishable; `editedAt` says which. Three acceptance
+  checks prove it.
+- **Ctrl+Z inside a cell.** `useUndoShortcuts` deliberately never steals it from
+  an input — a user mid-typing would lose keystrokes — which also made the grid
+  unusable, since after Enter the cursor sits in the next cell. The grid handles
+  it only when the cell is *untouched*: nothing typed means no keystrokes to
+  lose.
+- **`PanelNode.contentGrid` tiles a panel's children.** `fillPanelChildren`
+  stretched every content child to the whole frame, so two images in one panel
+  came out perfectly coincident with only the highest z visible — an assumption,
+  not a rule. It reuses `gridCells`, whose only page-specific inputs are the
+  extent and the margin, so a panel's own frame and padding drive it unchanged.
+  Children take cells in **`z` order**: `Object.values` order is not a
+  guarantee, and a montage that reshuffled itself on every layout would be
+  unusable. Absent, behaviour is byte-identical, which a regression test pins.
+- **Several files make one tiled panel.** Each tile stays its own `ImageNode`
+  with its own crop, scale bar and annotations. `aspectLock` is null for a
+  montage: it is derived from a single image's ratio and several differently
+  shaped micrographs have no one honest ratio. More tiles than cells leaves the
+  extras at their current size rather than stacked at the origin, where they
+  would be invisible under a tile — the exact failure this replaces.
+
 ---
 
 ## What's next
@@ -668,15 +830,20 @@ Phases 5–9, with the actual entry points:
 
 - **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
   templates and honoured by `autoLayout`, but nothing lets a user author a slot
-  directly — templates are the only way to set one. It is also now *cleared*
-  whenever layout runs without a template; see stage A below for why.
+  directly — templates are the only way to set one. It is also *cleared*
+  whenever layout runs without a template; see the reported-bug rounds for why.
+- **`theme.stroke.bracketMm`** is declared and read by nothing; `addBracket`
+  hardcodes `widthMm: 0.18`. `theme.spacing.bracketGapMm` was in the same state
+  until round 4 wired it into `bracketStepMm`.
+- The `'legend'` `SceneRole` was in this list for six phases. Round 4 emits it —
+  see `renderLegend`.
 
 ### Declared-but-missing things — check before trusting the types
 
 - **All 9 `PlotType` variants now render distinctly.** The dropdown is gated on
   what the *dataset* supports rather than on what is implemented (`typesFor` in
   `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
-  supplies only for `simple-xy`/`prism`/`sigmaplot`; a histogram needs a single
+  supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
   series, since pooling groups invents a bimodal shape belonging to neither.
   `computePlotGeometry` returns null for an unsupported combination, so a type
   set some other way draws nothing rather than something wrong.
@@ -691,7 +858,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, and stage C's `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`) is **optional**, so old files still load. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
