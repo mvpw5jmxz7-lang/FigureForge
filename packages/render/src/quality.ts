@@ -24,7 +24,15 @@ import {
   type ScaleBarNode,
 } from '@figureforge/doc-model';
 import { findColorConflicts, findPreset, type Theme } from '@figureforge/theme';
-import { collectByRole, walkScene, type SceneNode } from './scene.js';
+import {
+  clampFontSize,
+  dropFontOverrides,
+  equaliseGutters,
+  matchPresetWidth,
+  relabelAllPanels,
+  type Fix,
+} from './fixes.js';
+import { walkScene, walkWithOwner, type SceneNode } from './scene.js';
 
 export type Severity = 'error' | 'warning' | 'info';
 
@@ -35,8 +43,17 @@ export interface Finding {
   detail: string;
   /** Document nodes involved, so the UI can select them. */
   nodeIds: string[];
-  /** True when the app can fix this without a decision from the user. */
-  autoFixable: boolean;
+  /**
+   * Present exactly when this can be repaired without a decision from the
+   * author. Replaces an `autoFixable` boolean, which was set on ten findings
+   * and honoured by none: a boolean can claim a fix that does not exist,
+   * whereas a closure either repairs the figure or is absent.
+   *
+   * Findings are transient — never persisted, never structured-cloned — which
+   * is what makes carrying a function here free. If one ever has to cross a
+   * worker or file boundary, this is the field that breaks.
+   */
+  fix?: Fix;
 }
 
 export interface QualityReport {
@@ -85,52 +102,164 @@ const CATEGORY_WEIGHTS: Record<string, number> = {
 // Rules
 // ---------------------------------------------------------------------------
 
-const checkTextSize: Rule = ({ scene, theme }) => {
-  const findings: Finding[] = [];
-  const tooSmall: { size: number; role: string }[] = [];
-  const tooLarge: { size: number; role: string }[] = [];
+/**
+ * Which theme size a scene element was drawn at, for the findings that name it.
+ *
+ * Only needed for text the author did not size themselves — everything else is
+ * reported against the node the author can see in the Inspector.
+ */
+const THEME_SIZE_KEYS: Partial<Record<string, keyof Theme['type']>> = {
+  'tick-label': 'tickLabelPt',
+  'axis-title': 'axisTitlePt',
+  'panel-label': 'panelLabelPt',
+  'bracket-label': 'statisticPt',
+  'scale-bar-label': 'scaleBarPt',
+  legend: 'legendPt',
+};
 
-  walkScene(scene, (node) => {
+interface SizedText {
+  pt: number;
+  role: string;
+  /** Document node that owns this element, when it has one. */
+  ownerId?: string;
+}
+
+/**
+ * Text outside the journal's size range.
+ *
+ * Split into two findings, because there are two defects here with two
+ * different repairs and only one of them is mechanical:
+ *
+ *   override  the node's own `style.fontSizePt` is out of range. The Inspector
+ *             accepts 4 pt while the Nature preset's floor is 5, so this is
+ *             reachable in one click. Clamping honours the author's intent as
+ *             far as the journal permits, and the alternative is rejection.
+ *   theme     a tick label or axis title drawn at the theme's size. Raising
+ *             that re-flows every gutter — `requiredMargin` sizes them from
+ *             exactly these numbers — and can push a plot out of its panel. The
+ *             other repair is a bigger panel. Both are the author's call, so
+ *             this arm offers no fix and names the theme key instead.
+ *
+ * Reporting them as one finding with one button is what made the old
+ * `autoFixable: true` a claim that could not be honoured.
+ */
+const checkTextSize: Rule = ({ scene, theme, document }) => {
+  const findings: Finding[] = [];
+  const small: SizedText[] = [];
+  const large: SizedText[] = [];
+
+  walkWithOwner(scene, (node, ownerId) => {
     const raw = node.attrs?.['font-size'];
     if (typeof raw !== 'number') return;
     const pt = mmToPt(raw);
+    const entry: SizedText = { pt, role: node.role ?? 'text', ownerId };
     // Panel labels are legitimately larger than body text.
     const isPanelLabel = node.role === 'panel-label';
-    if (pt < theme.type.minimumPt - 0.01) tooSmall.push({ size: pt, role: node.role ?? 'text' });
-    else if (!isPanelLabel && pt > theme.type.maximumPt + 0.01) {
-      tooLarge.push({ size: pt, role: node.role ?? 'text' });
-    }
+    if (pt < theme.type.minimumPt - 0.01) small.push(entry);
+    else if (!isPanelLabel && pt > theme.type.maximumPt + 0.01) large.push(entry);
   });
 
-  if (tooSmall.length > 0) {
-    const smallest = Math.min(...tooSmall.map((t) => t.size));
-    findings.push({
-      id: 'text-below-minimum',
-      severity: 'error',
-      title: `${tooSmall.length} text element(s) below ${theme.type.minimumPt} pt`,
-      detail:
-        `Smallest is ${smallest.toFixed(1)} pt. Journals reject figures with text under ` +
-        `${theme.type.minimumPt} pt at final printed size, because it is unreadable in print.`,
-      nodeIds: [],
-      autoFixable: true,
-    });
+  /**
+   * Does this element's size come from its own node, or from the theme?
+   *
+   * Exact rather than inferred: the owner is the document node the element was
+   * rendered from, so the question is simply whether that node's own style
+   * carries the offending number.
+   */
+  const overriddenIds = (entries: SizedText[]): string[] => {
+    const ids = new Set<string>();
+    for (const entry of entries) {
+      if (!entry.ownerId) continue;
+      const owner = document.nodes[entry.ownerId];
+      if (!owner || !('style' in owner)) continue;
+      const own = owner.style.fontSizePt;
+      if (own !== undefined && Math.abs(own - entry.pt) < 0.01) ids.add(entry.ownerId);
+    }
+    return [...ids];
+  };
+
+  const themeKeys = (entries: SizedText[], overridden: Set<string>): string[] => {
+    const keys = new Set<string>();
+    for (const entry of entries) {
+      if (entry.ownerId && overridden.has(entry.ownerId)) continue;
+      keys.add(THEME_SIZE_KEYS[entry.role] ?? entry.role);
+    }
+    return [...keys];
+  };
+
+  if (small.length > 0) {
+    const smallest = Math.min(...small.map((t) => t.pt));
+    const ids = overriddenIds(small);
+    const owned = new Set(ids);
+    const themed = themeKeys(small, owned);
+    const floor =
+      `Journals reject figures with text under ${theme.type.minimumPt} pt at final ` +
+      `printed size, because it is unreadable in print.`;
+
+    if (ids.length > 0) {
+      findings.push({
+        id: 'text-below-minimum-override',
+        severity: 'error',
+        title: `${ids.length} label(s) set below ${theme.type.minimumPt} pt`,
+        detail: `Smallest is ${smallest.toFixed(1)} pt. ${floor}`,
+        nodeIds: ids,
+        fix: {
+          label: `Raise to ${theme.type.minimumPt} pt`,
+          apply: clampFontSize(ids, theme.type.minimumPt),
+        },
+      });
+    }
+
+    if (themed.length > 0) {
+      findings.push({
+        id: 'text-below-minimum-theme',
+        severity: 'error',
+        title: `Theme text below ${theme.type.minimumPt} pt (${themed.join(', ')})`,
+        detail:
+          `${floor} These sizes come from the ${theme.name} preset rather than from any ` +
+          'one label, so raising them re-flows every plot gutter. Enlarge the panels, or ' +
+          'raise the type scale in the theme and re-check the layout.',
+        nodeIds: [],
+      });
+    }
   }
 
-  if (tooLarge.length > 0) {
-    findings.push({
-      id: 'text-above-maximum',
-      severity: 'warning',
-      title: `${tooLarge.length} text element(s) above ${theme.type.maximumPt} pt`,
-      detail: `Oversized text unbalances the figure against the printed page.`,
-      nodeIds: [],
-      autoFixable: true,
-    });
+  if (large.length > 0) {
+    const ids = overriddenIds(large);
+    const owned = new Set(ids);
+    const themed = themeKeys(large, owned);
+
+    if (ids.length > 0) {
+      findings.push({
+        id: 'text-above-maximum-override',
+        severity: 'warning',
+        title: `${ids.length} label(s) set above ${theme.type.maximumPt} pt`,
+        detail: 'Oversized text unbalances the figure against the printed page.',
+        nodeIds: ids,
+        fix: {
+          label: `Reduce to ${theme.type.maximumPt} pt`,
+          apply: clampFontSize(ids, theme.type.maximumPt),
+        },
+      });
+    }
+
+    if (themed.length > 0) {
+      findings.push({
+        id: 'text-above-maximum-theme',
+        severity: 'warning',
+        title: `Theme text above ${theme.type.maximumPt} pt (${themed.join(', ')})`,
+        detail:
+          'Oversized text unbalances the figure against the printed page. These sizes come ' +
+          `from the ${theme.name} preset, so the change belongs in the type scale.`,
+        nodeIds: [],
+      });
+    }
   }
 
   return findings;
 };
 
-const checkFontConsistency: Rule = ({ scene, theme }) => {
+const checkFontConsistency: Rule = ({ scene, theme, document }) => {
   const families = new Set<string>();
   walkScene(scene, (node) => {
     const family = node.attrs?.['font-family'];
@@ -139,6 +268,15 @@ const checkFontConsistency: Rule = ({ scene, theme }) => {
 
   if (families.size <= 1) return [];
 
+  // Nothing in the app writes `style.fontFamily`, so the only way a figure
+  // acquires a second family is by opening a file that already had one. Where
+  // that is what happened, clearing the overrides is the whole repair. Where it
+  // is not — a family set in `themeOverrides` — clearing them fixes nothing, so
+  // no fix is offered rather than a button that appears to do nothing.
+  const overridden = Object.values(document.nodes)
+    .filter((node) => 'style' in node && node.style.fontFamily !== undefined)
+    .map((node) => node.id);
+
   return [
     {
       id: 'mixed-fonts',
@@ -146,9 +284,19 @@ const checkFontConsistency: Rule = ({ scene, theme }) => {
       title: `${families.size} different font stacks in one figure`,
       detail:
         `Found: ${[...families].join(' / ')}. The ${theme.name} preset expects a single ` +
-        `family throughout.`,
-      nodeIds: [],
-      autoFixable: true,
+        `family throughout.` +
+        (overridden.length === 0
+          ? ' None of it comes from an individual label, so the odd family is in the theme itself.'
+          : ''),
+      nodeIds: overridden,
+      ...(overridden.length > 0
+        ? {
+            fix: {
+              label: `Use the ${theme.name} font throughout`,
+              apply: dropFontOverrides(overridden),
+            },
+          }
+        : {}),
     },
   ];
 };
@@ -158,8 +306,19 @@ const checkPanelLabels: Rule = ({ document, scene }) => {
   const panels = Object.values(document.nodes).filter((n) => n.type === 'panel');
   if (panels.length <= 1) return findings;
 
-  const labels = collectByRole(scene, 'panel-label');
-  const labelTexts = labels.map((l) => l.text ?? '');
+  // Read from the scene rather than the document so a label on a hidden layer
+  // counts as missing — which is what a reader of the exported figure sees.
+  // `walkWithOwner` supplies the document node behind each one, so the
+  // duplicates can be selected as well as counted.
+  const labels: { text: string; ownerId?: string }[] = [];
+  walkWithOwner(scene, (node, ownerId) => {
+    if (node.role === 'panel-label') labels.push({ text: node.text ?? '', ownerId });
+  });
+
+  const relabel = {
+    label: 'Letter panels in reading order',
+    apply: relabelAllPanels(),
+  };
 
   if (labels.length < panels.length) {
     findings.push({
@@ -168,19 +327,23 @@ const checkPanelLabels: Rule = ({ document, scene }) => {
       title: `${panels.length - labels.length} panel(s) have no label`,
       detail: 'Every panel in a multi-panel figure needs a letter so the legend can refer to it.',
       nodeIds: panels.map((p) => p.id),
-      autoFixable: true,
+      fix: relabel,
     });
   }
 
-  const duplicates = labelTexts.filter((t, i) => labelTexts.indexOf(t) !== i);
+  const texts = labels.map((l) => l.text);
+  const duplicates = texts.filter((t, i) => texts.indexOf(t) !== i);
   if (duplicates.length > 0) {
+    const clashing = new Set(duplicates);
     findings.push({
       id: 'duplicate-panel-labels',
       severity: 'error',
-      title: `Duplicate panel label(s): ${[...new Set(duplicates)].join(', ')}`,
+      title: `Duplicate panel label(s): ${[...clashing].join(', ')}`,
       detail: 'Two panels share a letter, so the legend cannot address them unambiguously.',
-      nodeIds: [],
-      autoFixable: true,
+      nodeIds: labels
+        .filter((l) => clashing.has(l.text) && l.ownerId !== undefined)
+        .map((l) => l.ownerId as string),
+      fix: relabel,
     });
   }
 
@@ -221,7 +384,6 @@ const checkImageResolution: Rule = ({ document, exportDpi = 300 }) => {
           `${(visiblePx / (exportDpi / 25.4)).toFixed(1)} mm wide, or supply a higher-resolution ` +
           `original. Upscaling cannot recover detail that was never captured.`,
         nodeIds: [image.id],
-        autoFixable: false,
       });
     }
   }
@@ -259,7 +421,6 @@ const checkScaleBarCalibration: Rule = ({ document }) => {
           'is drawn at whatever width it happens to have, which states a ' +
           'measurement no image supports. Drag it onto the micrograph.',
         nodeIds: [bar.id],
-        autoFixable: false,
       });
       continue;
     }
@@ -274,7 +435,6 @@ const checkScaleBarCalibration: Rule = ({ document }) => {
           'Set the image scale in the Inspector — from the microscope metadata, ' +
           'or by measuring a feature of known length.',
         nodeIds: [bar.id],
-        autoFixable: false,
       });
     }
 
@@ -291,7 +451,6 @@ const checkScaleBarCalibration: Rule = ({ document }) => {
           `${parent.frame.width.toFixed(1)} mm image. Check the units — a factor of ` +
           '1000 here usually means nm was entered where µm was meant.',
         nodeIds: [bar.id, parent.id],
-        autoFixable: false,
       });
     }
   }
@@ -299,19 +458,26 @@ const checkScaleBarCalibration: Rule = ({ document }) => {
   return findings;
 };
 
-const checkColorAccessibility: Rule = ({ scene }) => {
-  const seriesColors = new Set<string>();
+const checkColorAccessibility: Rule = ({ scene, document }) => {
   // Every role that carries a *series* colour. A new mark family left off this
   // list still renders, but drops silently out of the colour-vision check.
-  for (const role of ['bar', 'point', 'line', 'box', 'violin', 'outlier'] as const) {
-    for (const node of collectByRole(scene, role)) {
-      const fill = node.attrs?.['fill'];
-      const stroke = node.attrs?.['stroke'];
-      for (const value of [fill, stroke]) {
-        if (typeof value === 'string' && value.startsWith('#')) seriesColors.add(value);
+  const MARK_ROLES = new Set(['bar', 'point', 'line', 'box', 'violin', 'outlier']);
+  const seriesColors = new Set<string>();
+  /** Which plot each colour came from, so the finding can select them. */
+  const plotsByColor = new Map<string, Set<string>>();
+
+  walkWithOwner(scene, (node, ownerId) => {
+    if (!node.role || !MARK_ROLES.has(node.role)) return;
+    for (const value of [node.attrs?.['fill'], node.attrs?.['stroke']]) {
+      if (typeof value !== 'string' || !value.startsWith('#')) continue;
+      seriesColors.add(value);
+      // The owner of a mark is the plot; a mark inside an unowned group is
+      // ignored rather than attributed to whatever is above it.
+      if (ownerId && document.nodes[ownerId]?.type === 'plot') {
+        (plotsByColor.get(value) ?? plotsByColor.set(value, new Set()).get(value)!).add(ownerId);
       }
     }
-  }
+  });
 
   const colors = [...seriesColors];
   if (colors.length < 2) return [];
@@ -326,15 +492,25 @@ const checkColorAccessibility: Rule = ({ scene }) => {
 
   if (cvdConflicts.length > 0) {
     const first = cvdConflicts[0]!;
+    // Deliberately no fix. Remapping to a safe palette is two authorial
+    // decisions at once — which of the two plots to recolour, and what the
+    // colours *mean* to a reader who has already keyed red = treated, or to a
+    // companion figure being matched. The Inspector's palette control states
+    // that choice properly, so the useful thing to offer here is the way to it.
     findings.push({
       id: 'colour-blind-conflict',
       severity: 'warning',
       title: `${first.colorA} and ${first.colorB} are hard to tell apart under ${first.condition}`,
       detail:
         `Perceptual difference ΔE ${first.deltaE.toFixed(1)} once simulated. Around 8% of male ` +
-        `readers have some colour vision deficiency; the Okabe–Ito palette avoids this.`,
-      nodeIds: [],
-      autoFixable: true,
+        `readers have some colour vision deficiency; the Okabe–Ito palette avoids this. ` +
+        `Change it in the Inspector's Palette control.`,
+      nodeIds: [
+        ...new Set([
+          ...(plotsByColor.get(first.colorA) ?? []),
+          ...(plotsByColor.get(first.colorB) ?? []),
+        ]),
+      ],
     });
   }
 
@@ -348,7 +524,6 @@ const checkColorAccessibility: Rule = ({ scene }) => {
         `ΔE ${worst.deltaE.toFixed(1)} in greyscale. Consider differing marker shapes or fill ` +
         `patterns as a redundant channel.`,
       nodeIds: [],
-      autoFixable: false,
     });
   }
 
@@ -362,13 +537,35 @@ const checkPageDimensions: Rule = ({ document }) => {
   const findings: Finding[] = [];
 
   if (Math.abs(document.page.widthMm - preset.widthMm) > 0.5) {
+    // Setting the width is only a *fix* when nothing has to move to accommodate
+    // it. Narrowing a page whose panels overhang pushes them off it, and the
+    // repair for that is a re-layout that discards the arrangement the author
+    // built — so where the change is not pure, the finding says what to do
+    // rather than offering a button that rearranges the figure.
+    const rightmost = Math.max(
+      0,
+      ...Object.values(document.nodes)
+        .filter((n) => n.parentId === null)
+        .map((n) => absoluteFrame(document.nodes, n.id))
+        .filter((f): f is NonNullable<typeof f> => f !== null)
+        .map((f) => f.x + f.width),
+    );
+    const fits = rightmost <= preset.widthMm + 0.01;
+
     findings.push({
       id: 'page-width-mismatch',
       severity: 'warning',
       title: `Width is ${document.page.widthMm.toFixed(1)} mm, not the ${preset.label} ${preset.widthMm} mm`,
-      detail: 'The figure will be rescaled at typesetting, shrinking every font with it.',
+      detail:
+        'The figure will be rescaled at typesetting, shrinking every font with it.' +
+        (fits
+          ? ''
+          : ` The content reaches ${rightmost.toFixed(1)} mm, so setting the width alone would ` +
+            'push it off the page: set the width, then re-run Auto Layout.'),
       nodeIds: [],
-      autoFixable: true,
+      ...(fits
+        ? { fix: { label: `Set width to ${preset.widthMm} mm`, apply: matchPresetWidth(preset.widthMm) } }
+        : {}),
     });
   }
 
@@ -379,7 +576,6 @@ const checkPageDimensions: Rule = ({ document }) => {
       title: `Height ${document.page.heightMm.toFixed(1)} mm exceeds the ${preset.maxHeightMm} mm limit`,
       detail: `${preset.journal} needs the figure and its legend to fit one page.`,
       nodeIds: [],
-      autoFixable: false,
     });
   }
 
@@ -407,7 +603,15 @@ const checkPanelSpacing: Rule = ({ document }) => {
         title: `Uneven ${axis} panel spacing (varies by ${spread.toFixed(1)} mm)`,
         detail: 'Unequal gutters read as misalignment. Auto Layout equalises them.',
         nodeIds: panels.map((p) => p.id),
-        autoFixable: true,
+        fix: {
+          // The label is the disclosure. Auto Layout resizes every panel and
+          // everything in it, so a deliberately asymmetric arrangement does not
+          // survive — that is worth saying on the button rather than in a
+          // dialog the author reads after the fact. Undo is one keystroke.
+          label: 'Re-run Auto Layout (rearranges every panel)',
+          apply: equaliseGutters(),
+          rearranges: true,
+        },
       });
     }
   }
@@ -451,7 +655,6 @@ const checkStaleAnalyses: Rule = ({ document }) => {
         'The values feeding this test have changed since it was run, so the ' +
         'annotated p-values may not reflect what is plotted. Re-run the test.',
       nodeIds: brackets.map((b) => b.id),
-      autoFixable: false,
     });
   }
 
@@ -486,7 +689,6 @@ const checkPlotSize: Rule = ({ document, theme }) => {
         `(${margin.left + margin.right} × ${margin.top + margin.bottom} mm) are taken. ` +
         'Enlarge the panel, reduce the panel count, or use a taller page.',
       nodeIds: [node.id],
-      autoFixable: false,
     });
   }
 
@@ -532,7 +734,6 @@ const checkDistributionSampleSize: Rule = ({ document }) => {
           ? `A violin implies a distribution shape, and ${smallest} replicates cannot support one. A dot or beeswarm plot shows the same data without the implication.`
           : `Quartiles and whiskers are unstable at n = ${smallest}. Consider a dot or bar+points plot, which shows every replicate.`,
       nodeIds: [node.id],
-      autoFixable: false,
     });
   }
 

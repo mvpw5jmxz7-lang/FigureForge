@@ -225,6 +225,7 @@ h4 { margin: 0 0 6px; font-size: 13px; }
   margin-top: 8px;
 }
 .muted { color: var(--muted); }
+.small { font-size: 12px; }
 
 .paste-area {
   width: 100%;
@@ -362,6 +363,7 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .finding.warning { border-color: var(--warn); }
 .finding.info { border-color: var(--accent); }
 .finding p { margin: 3px 0 6px; font-size: 12px; color: var(--muted); }
+.finding-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 
 .layer { margin-bottom: 12px; }
 .layer-head { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }

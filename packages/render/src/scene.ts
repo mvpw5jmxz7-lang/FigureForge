@@ -97,6 +97,26 @@ export function walkScene(node: SceneNode, visit: (n: SceneNode, depth: number) 
   for (const child of node.children ?? []) walkScene(child, visit, depth + 1);
 }
 
+/**
+ * Depth-first walk that also reports the document node each element belongs to.
+ *
+ * `nodeId` is set only on the container `<g>` a document node renders into, so
+ * an offending `<text>` two levels down carries no back-link of its own. The
+ * quality checker needs one: telling an author "some text is below 5 pt" is
+ * useless next to naming the label and offering to fix it. Kept separate from
+ * `walkScene` rather than folded into it — that signature is load-bearing in
+ * the parity test.
+ */
+export function walkWithOwner(
+  root: SceneNode,
+  visit: (node: SceneNode, ownerId: string | undefined) => void,
+  owner?: string,
+): void {
+  const current = root.nodeId ?? owner;
+  visit(root, current);
+  for (const child of root.children ?? []) walkWithOwner(child, visit, current);
+}
+
 /** Collect every node carrying a given role — used by the quality checker. */
 export function collectByRole(root: SceneNode, role: SceneRole): SceneNode[] {
   const out: SceneNode[] = [];

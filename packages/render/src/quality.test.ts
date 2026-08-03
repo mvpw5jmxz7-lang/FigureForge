@@ -11,20 +11,27 @@ import {
   addPanelWithImage,
   addPanelWithPlot,
   addScaleBar,
+  addText,
   createDocument,
   createIdFactory,
+  deleteNode,
+  DocumentStore,
   editDocument,
   inferFormat,
   parseDelimited,
+  relabelPanels,
   setImageCrop,
+  stableStringify,
+  updateNode,
   type CalibrationSource,
   type Dataset,
   type FigureDocument,
   type PlotType,
+  type TextNode,
 } from '@figureforge/doc-model';
-import { NATURE_THEME } from '@figureforge/theme';
+import { NATURE_THEME, resolveTheme, type Theme } from '@figureforge/theme';
 import { renderDocument } from './render-document.js';
-import { checkFigure } from './quality.js';
+import { checkFigure, type Finding } from './quality.js';
 
 /** Three replicates per group — the sample size biology actually runs. */
 const SMALL = `Treatment,Rep1,Rep2,Rep3
@@ -319,5 +326,413 @@ describe('scale bar calibration', () => {
     const findings = scaleBarFindings({ calibrationSource: 'metadata', detach: true });
     expect(findings).toHaveLength(1);
     expect(findings[0]!.title).toContain('not attached to an image');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-fixes
+// ---------------------------------------------------------------------------
+
+/**
+ * These assert the property that matters about a fix: applying it clears the
+ * finding *and introduces no new one*. The second half is the valuable one —
+ * geometry here is coupled, and `requiredMargin` sizes plot gutters from the
+ * very font sizes a text fix changes.
+ */
+
+function report(doc: FigureDocument, theme: Theme = NATURE_THEME) {
+  return checkFigure({
+    document: doc,
+    theme,
+    scene: renderDocument(doc, { theme }),
+    exportDpi: 300,
+  });
+}
+
+function findingById(doc: FigureDocument, id: string, theme: Theme = NATURE_THEME): Finding {
+  const found = report(doc, theme).findings.find((f) => f.id === id);
+  if (!found) {
+    throw new Error(
+      `expected finding "${id}"; got ${report(doc, theme)
+        .findings.map((f) => f.id)
+        .join(', ')}`,
+    );
+  }
+  return found;
+}
+
+/**
+ * Compare two documents ignoring `modifiedAt`.
+ *
+ * `stableStringify` because zod rebuilds objects in schema key order, so a
+ * plain `JSON.stringify` compare reports differences that are not there.
+ * `modifiedAt` is excluded because the store stamps it on commit and `undo`
+ * does not roll it back — the figure genuinely was edited, even if the edit was
+ * then reversed.
+ */
+function sameDocument(a: FigureDocument, b: FigureDocument): void {
+  const strip = (doc: FigureDocument) => stableStringify({ ...doc, modifiedAt: '' });
+  expect(strip(a)).toBe(strip(b));
+}
+
+/** Apply a fix through a real store, so undo is exercised rather than assumed. */
+function applyThroughStore(
+  doc: FigureDocument,
+  finding: Finding,
+  theme: Theme = NATURE_THEME,
+): { store: DocumentStore; fixed: FigureDocument } {
+  const store = new DocumentStore(doc);
+  const fix = finding.fix;
+  if (!fix) throw new Error(`finding "${finding.id}" offers no fix`);
+  store.commit(fix.label, (draft) => fix.apply(draft, { newId: createIdFactory(), theme }));
+  return { store, fixed: store.getDocument() };
+}
+
+/** Two panels of plots plus whatever the caller adds. */
+function twoPanelDocument(extra?: (draft: FigureDocument, newId: () => string) => void) {
+  const newId = createIdFactory();
+  const base = createDocument({
+    title: 'Fixable figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited(LARGE);
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Viability',
+      format: inferFormat(parsed.columns),
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/viability.csv',
+      sourceFilename: 'viability.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    for (const [index, x] of [4, 96].entries()) {
+      addPanelWithPlot(draft, newId, {
+        frame: { x, y: 4, width: 82, height: 60 },
+        name: `Panel ${index + 1}`,
+        datasetId: dataset.id,
+        plotType: 'bar',
+        yTitle: 'Cell viability (%)',
+      });
+    }
+    relabelPanels(draft, newId, { fontSizePt: NATURE_THEME.type.panelLabelPt, offsetMm: 4 });
+    extra?.(draft, newId);
+  });
+}
+
+describe('text size fixes', () => {
+  /** A label the author sized themselves, below the journal's floor. */
+  const undersizedLabel = () => {
+    let textId = '';
+    const doc = twoPanelDocument((draft, newId) => {
+      textId = addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 40, height: 4 },
+        text: 'n = 12 per group',
+        fontSizePt: 3,
+      }).id;
+    });
+    return { doc, textId };
+  };
+
+  it('offers a fix for a label the author sized, and names it', () => {
+    const { doc, textId } = undersizedLabel();
+    const finding = findingById(doc, 'text-below-minimum-override');
+    expect(finding.nodeIds).toEqual([textId]);
+    expect(finding.fix?.label).toBe('Raise to 5 pt');
+  });
+
+  it('clears the finding without introducing another', () => {
+    const { doc } = undersizedLabel();
+    const before = report(doc).findings.map((f) => f.id);
+    const { fixed } = applyThroughStore(doc, findingById(doc, 'text-below-minimum-override'));
+    const after = report(fixed).findings.map((f) => f.id);
+
+    expect(after).not.toContain('text-below-minimum-override');
+    // Nothing new appeared. A font size feeds `requiredMargin`, so a fix here
+    // can move a plot's gutters — this is the assertion that would catch it.
+    expect(after.filter((id) => !before.includes(id))).toEqual([]);
+  });
+
+  it('undoes exactly', () => {
+    const { doc } = undersizedLabel();
+    const { store } = applyThroughStore(doc, findingById(doc, 'text-below-minimum-override'));
+    store.undo();
+    sameDocument(store.getDocument(), doc);
+  });
+
+  it('refuses a fix when the size comes from the theme, not the label', () => {
+    // A tick label at 3 pt is repaired by raising the type scale — which
+    // re-flows every gutter — or by enlarging the panel. Both are the author's
+    // call, so this arm reports the defect and offers no button.
+    const theme = resolveTheme('nature', { type: { ...NATURE_THEME.type, tickLabelPt: 3 } });
+    const doc = twoPanelDocument();
+
+    const finding = findingById(doc, 'text-below-minimum-theme', theme);
+    expect(finding.fix).toBeUndefined();
+    expect(finding.title).toContain('tickLabelPt');
+    // And the override arm must not fire: no label carries its own 3 pt.
+    expect(report(doc, theme).findings.map((f) => f.id)).not.toContain(
+      'text-below-minimum-override',
+    );
+  });
+
+  it('reports an oversized label separately from oversized theme text', () => {
+    const doc = twoPanelDocument((draft, newId) => {
+      addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 60, height: 8 },
+        text: 'Figure 1',
+        fontSizePt: 24,
+      });
+    });
+    const finding = findingById(doc, 'text-above-maximum-override');
+    expect(finding.severity).toBe('warning');
+    const { fixed } = applyThroughStore(doc, finding);
+    expect(report(fixed).findings.map((f) => f.id)).not.toContain('text-above-maximum-override');
+  });
+});
+
+describe('font consistency fix', () => {
+  const mixed = () => {
+    let textId = '';
+    const doc = twoPanelDocument((draft, newId) => {
+      const node = addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 40, height: 5 },
+        text: 'Imported caption',
+      });
+      textId = node.id;
+      updateNode<TextNode>(draft, node.id, {
+        style: { ...node.style, fontFamily: 'Times New Roman, serif' },
+      });
+    });
+    return { doc, textId };
+  };
+
+  it('clears the odd family off the node that carries it', () => {
+    const { doc, textId } = mixed();
+    const finding = findingById(doc, 'mixed-fonts');
+    expect(finding.nodeIds).toEqual([textId]);
+
+    const { fixed } = applyThroughStore(doc, finding);
+    expect(report(fixed).findings.map((f) => f.id)).not.toContain('mixed-fonts');
+  });
+
+  it('offers no fix when the odd family is the theme itself', () => {
+    // Clearing node overrides would repair nothing, and a button that appears
+    // to do nothing is worse than no button.
+    const theme = resolveTheme('nature', { fontFamily: 'Georgia, serif' });
+    const doc = twoPanelDocument((draft, newId) => {
+      const node = addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 40, height: 5 },
+        text: 'Caption',
+      });
+      updateNode<TextNode>(draft, node.id, {
+        style: { ...node.style, fontFamily: undefined },
+      });
+    });
+
+    const findings = report(doc, theme).findings.filter((f) => f.id === 'mixed-fonts');
+    for (const finding of findings) expect(finding.fix).toBeUndefined();
+  });
+});
+
+describe('panel label fixes', () => {
+  it('letters a panel whose label was deleted', () => {
+    const doc = twoPanelDocument();
+    const labelId = Object.values(doc.nodes).find((n) => n.type === 'panel-label')!.id;
+    const stripped = editDocument(doc, (draft) => {
+      deleteNode(draft, labelId);
+    });
+
+    const finding = findingById(stripped, 'missing-panel-labels');
+    const { fixed } = applyThroughStore(stripped, finding);
+
+    const letters = Object.values(fixed.nodes)
+      .filter((n) => n.type === 'panel-label')
+      .map((n) => (n as { text: string }).text)
+      .sort();
+    expect(letters).toEqual(['a', 'b']);
+    expect(report(fixed).findings.map((f) => f.id)).not.toContain('missing-panel-labels');
+  });
+
+  it('selects the clashing labels, not just the panels', () => {
+    const doc = twoPanelDocument();
+    const labels = Object.values(doc.nodes).filter((n) => n.type === 'panel-label');
+    const clashed = editDocument(doc, (draft) => {
+      for (const label of labels) {
+        (draft.nodes[label.id] as { text: string }).text = 'a';
+      }
+    });
+
+    const finding = findingById(clashed, 'duplicate-panel-labels');
+    expect(finding.nodeIds.sort()).toEqual(labels.map((l) => l.id).sort());
+
+    const { fixed } = applyThroughStore(clashed, finding);
+    expect(report(fixed).findings.map((f) => f.id)).not.toContain('duplicate-panel-labels');
+  });
+});
+
+describe('fixes that rearrange the figure', () => {
+  it('marks the gutter fix as rearranging, and it is not in the safe set', () => {
+    // Auto Layout resizes every panel and everything inside it. That is the
+    // right repair and the wrong thing to do inside a batch labelled "fix".
+    // Three panels across one row with gaps of 6 mm and 14 mm. `measureGutters`
+    // pairs frames in x order across the whole figure, so this has to be the
+    // only row — a second row interleaves with it and the pairing breaks up.
+    const newId = createIdFactory();
+    const doc = editDocument(
+      createDocument({
+        widthMm: 183,
+        heightMm: 75,
+        presetId: 'nature-double',
+        idFactory: newId,
+        now: () => '2026-01-01T00:00:00.000Z',
+      }),
+      (draft) => {
+        const parsed = parseDelimited(LARGE);
+        draft.datasets = [
+          {
+            id: newId(),
+            name: 'Viability',
+            format: inferFormat(parsed.columns),
+            columns: parsed.columns,
+            rows: parsed.rows,
+            sourcePath: 'data/viability.csv',
+            sourceFilename: 'viability.csv',
+            importedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ];
+        for (const [index, x] of [4, 60, 130].entries()) {
+          addPanelWithPlot(draft, newId, {
+            frame: { x, y: 4, width: 50, height: 60 },
+            name: `Panel ${index + 1}`,
+            datasetId: draft.datasets[0]!.id,
+            plotType: 'bar',
+          });
+        }
+        relabelPanels(draft, newId, { fontSizePt: NATURE_THEME.type.panelLabelPt, offsetMm: 4 });
+      },
+    );
+
+    const uneven = report(doc).findings.filter((f) => f.id.startsWith('uneven-gutters-'));
+    expect(uneven.length).toBeGreaterThan(0);
+    for (const finding of uneven) {
+      expect(finding.fix?.rearranges).toBe(true);
+      expect(finding.fix?.label).toContain('rearranges');
+    }
+  });
+});
+
+describe('fixing several findings at once', () => {
+  it('collapses into one undo entry', () => {
+    const doc = twoPanelDocument((draft, newId) => {
+      addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 40, height: 4 },
+        text: 'n = 12',
+        fontSizePt: 3,
+      });
+      const caption = addText(draft, newId, {
+        frame: { x: 60, y: 68, width: 40, height: 5 },
+        text: 'Imported caption',
+      });
+      updateNode<TextNode>(draft, caption.id, {
+        style: { ...caption.style, fontFamily: 'Times New Roman, serif' },
+      });
+      const labelId = Object.values(draft.nodes).find((n) => n.type === 'panel-label')!.id;
+      deleteNode(draft, labelId);
+    });
+
+    const safe = report(doc).findings.filter((f) => f.fix && !f.fix.rearranges);
+    expect(safe.length).toBe(3);
+
+    const store = new DocumentStore(doc);
+    const newId = createIdFactory();
+    store.transaction('Fix quality issues', () => {
+      for (const finding of safe) {
+        store.commit(finding.fix!.label, (draft) =>
+          finding.fix!.apply(draft, { newId, theme: NATURE_THEME }),
+        );
+      }
+    });
+
+    expect(store.history()).toHaveLength(1);
+    const fixedIds = report(store.getDocument()).findings.map((f) => f.id);
+    for (const finding of safe) expect(fixedIds).not.toContain(finding.id);
+
+    store.undo();
+    sameDocument(store.getDocument(), doc);
+  });
+
+  it('tolerates a target another fix already removed', () => {
+    // Recipes run in sequence against one draft. A recipe that assumed its
+    // node still existed would throw here and abandon the whole batch.
+    const doc = twoPanelDocument((draft, newId) => {
+      addText(draft, newId, {
+        frame: { x: 4, y: 68, width: 40, height: 4 },
+        text: 'n = 12',
+        fontSizePt: 3,
+      });
+    });
+    const finding = findingById(doc, 'text-below-minimum-override');
+
+    const store = new DocumentStore(doc);
+    store.commit('Delete then fix', (draft) => {
+      deleteNode(draft, finding.nodeIds[0]!);
+      finding.fix!.apply(draft, { newId: createIdFactory(), theme: NATURE_THEME });
+    });
+    expect(store.getDocument().nodes[finding.nodeIds[0]!]).toBeUndefined();
+  });
+});
+
+describe('what the checker claims it can fix', () => {
+  /**
+   * Findings that deliberately carry no fix, with the reason. An inventory
+   * rather than a spot check: the previous `autoFixable` boolean drifted to ten
+   * claims and zero implementations precisely because nothing counted them.
+   */
+  const NOT_AUTO_FIXABLE: Record<string, string> = {
+    'text-below-minimum-theme': 'raising the type scale re-flows every gutter — authorial',
+    'text-above-maximum-theme': 'the change belongs in the theme, not in any one label',
+    'colour-blind-conflict': 'remapping changes what the colours mean to a reader',
+    'grayscale-conflict': 'the redundant channel to add is a design decision',
+    'page-too-tall': 'what to cut from an over-tall figure is the author’s call',
+    'plot-too-small': 'enlarge, drop a panel, or use a taller page — three different figures',
+    'image-low-dpi': 'upscaling cannot recover detail that was never captured',
+    'scale-bar-unparented': 'only the author knows which image the bar measures',
+    'scale-bar-uncalibrated': 'the pixel size is a measurement, not a default',
+    'scale-bar-oversized': 'the units are wrong; guessing which way is worse than saying so',
+    'stale-analysis': 're-running a test is a decision, and the result may change the figure',
+    'distribution-n': 'which mark to use instead is the author’s call',
+    'page-width-mismatch': 'fixable only when no content overhangs; withheld otherwise',
+  };
+
+  it('every finding either fixes itself or is listed as not fixable', () => {
+    const documents = [
+      twoPanelDocument((draft, newId) => {
+        addText(draft, newId, {
+          frame: { x: 4, y: 68, width: 40, height: 4 },
+          text: 'n = 12',
+          fontSizePt: 3,
+        });
+      }),
+      makeDocument(SMALL, 'violin'),
+      imageDocument({ widthMm: EXACT_300_DPI_MM * 2 }),
+    ];
+
+    for (const doc of documents) {
+      for (const finding of report(doc).findings) {
+        if (finding.fix) continue;
+        // Ids are templated with a node id on some rules; match the stem.
+        const known = Object.keys(NOT_AUTO_FIXABLE).some((stem) => finding.id.startsWith(stem));
+        expect(known, `unlisted finding without a fix: ${finding.id}`).toBe(true);
+      }
+    }
   });
 });

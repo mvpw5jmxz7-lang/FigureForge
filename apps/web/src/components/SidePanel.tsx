@@ -1016,19 +1016,34 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 // Quality
 // ---------------------------------------------------------------------------
 
-function QualityTab({ api, theme, onSelectionChange, assets }: SidePanelProps) {
+function QualityTab({ api, theme, onSelectionChange, assets, exportDpi }: SidePanelProps) {
   const { document: doc } = api;
-  const [dpi, setDpi] = useState(300);
 
   const report = useMemo(() => {
     // The scene has to carry its images: text-size and colour rules read the
     // rendered tree, and a figure checked as a set of grey placeholders is not
     // the figure being submitted.
     const scene = renderDocument(doc, { theme, resolveAsset: (id) => assets.urls[id] });
-    return checkFigure({ document: doc, theme, scene, exportDpi: dpi });
-  }, [doc, theme, dpi, assets.urls]);
+    // Checked at the resolution it will be exported at. This tab used to keep
+    // its own target, so two adjacent tabs of one panel could judge the same
+    // micrograph differently — the Data tab has always read `exportDpi`.
+    return checkFigure({ document: doc, theme, scene, exportDpi });
+  }, [doc, theme, exportDpi, assets.urls]);
 
   const tone = report.score >= 90 ? 'good' : report.score >= 70 ? 'fair' : 'poor';
+
+  const applyFix = (finding: Finding): void => {
+    const fix = finding.fix;
+    if (!fix) return;
+    // One commit is already one undo entry, so a fix is undone in one keystroke.
+    api.commit(fix.label, (draft) => fix.apply(draft, { newId: api.newId, theme }));
+  };
+
+  // Everything that repairs a defect without moving anything the author placed.
+  // `rearranges` fixes are excluded: re-running Auto Layout as part of a batch
+  // is exactly the sort of thing an author would not expect from a button
+  // labelled "fix", so it keeps its own, which says what it does.
+  const safeFixes = report.findings.filter((f) => f.fix && !f.fix.rearranges);
 
   return (
     <section>
@@ -1039,16 +1054,10 @@ function QualityTab({ api, theme, onSelectionChange, assets }: SidePanelProps) {
         <span className="score-max">/ 100</span>
       </div>
 
-      <label className="field block">
-        Target resolution
-        <select value={dpi} onChange={(e) => setDpi(Number(e.target.value))}>
-          {[300, 450, 600].map((d) => (
-            <option key={d} value={d}>
-              {d} dpi
-            </option>
-          ))}
-        </select>
-      </label>
+      <p className="muted small">
+        Checked at {exportDpi} dpi, the export resolution. Text stays text in PDF, EPS and SVG;
+        PNG and TIFF are pixels by definition.
+      </p>
 
       <ul className="categories">
         {report.categories.map((category) => (
@@ -1062,15 +1071,36 @@ function QualityTab({ api, theme, onSelectionChange, assets }: SidePanelProps) {
       <h3>Findings</h3>
       {report.findings.length === 0 && <p className="muted">Nothing to fix. Ready to export.</p>}
 
+      {safeFixes.length > 1 && (
+        <button
+          onClick={() =>
+            // One transaction, so the whole batch undoes as a single action
+            // rather than leaving the author to press Ctrl+Z once per fix.
+            api.transaction('Fix quality issues', () => {
+              for (const finding of safeFixes) applyFix(finding);
+            })
+          }
+        >
+          Fix {safeFixes.length} safe issues
+        </button>
+      )}
+
       {report.findings.map((finding: Finding) => (
         <div key={finding.id} className={`finding ${finding.severity}`}>
           <strong>{finding.title}</strong>
           <p>{finding.detail}</p>
-          {finding.nodeIds.length > 0 && (
-            <button onClick={() => onSelectionChange(finding.nodeIds)}>
-              Select {finding.nodeIds.length} affected
-            </button>
-          )}
+          <div className="finding-actions">
+            {finding.fix && (
+              <button className="primary" onClick={() => applyFix(finding)}>
+                {finding.fix.label}
+              </button>
+            )}
+            {finding.nodeIds.length > 0 && (
+              <button onClick={() => onSelectionChange(finding.nodeIds)}>
+                Select {finding.nodeIds.length} affected
+              </button>
+            )}
+          </div>
         </div>
       ))}
     </section>

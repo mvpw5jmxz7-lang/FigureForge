@@ -82,8 +82,11 @@ difference between "this is broken" and "this hasn't been built yet."
 - **Heatmaps, PCA/UMAP plots, volcano plots, survival curves** — not built.
 - **A standalone desktop app.** Right now this only runs as a website you open
   in your browser (see below) — there's no downloadable application yet.
-- **The "fix it for me" buttons** on the readiness score — some findings say
-  they're auto-fixable, but nothing happens yet if you click to fix them.
+- **Not every readiness finding can be fixed for you.** The ones that can now
+  have a button that does the work — undersized labels, missing or duplicated
+  panel letters, a stray font, uneven spacing. The rest need a decision only you
+  can make (which colours mean what, whether to shrink a panel or the type),
+  so they explain the problem and take you to the control instead.
 
 If something looks wrong and it **isn't** on this list, that's useful
 feedback — see [section 10](#10-how-to-give-useful-feedback).
