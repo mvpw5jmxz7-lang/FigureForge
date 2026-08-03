@@ -40,11 +40,10 @@ import {
   type StatTest,
 } from '@figureforge/doc-model';
 import {
-  checkFigure,
   measureAllPlots,
   measurePlot,
-  renderDocument,
   type Finding,
+  type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError } from '../api.js';
@@ -114,6 +113,14 @@ export interface SidePanelProps {
   /** Verbatim import text keyed by archive path; written here, saved in App. */
   dataOriginals: Map<string, string>;
   exportDpi: number;
+  tab: Tab;
+  onTabChange: (tab: Tab) => void;
+  /**
+   * Computed in App, not here: the export path checks the same report before
+   * it sends a figure out, and two independent computations of a figure's
+   * readiness would eventually disagree about the same figure.
+   */
+  report: QualityReport;
   cropNodeId: NodeId | null;
   onCropNodeChange: (id: NodeId | null) => void;
   measureNodeId: NodeId | null;
@@ -123,7 +130,10 @@ export interface SidePanelProps {
 }
 
 export function SidePanel(props: SidePanelProps) {
-  const [tab, setTab] = useState<Tab>('data');
+  // The tab lives in App because two things outside this panel open it: the
+  // readiness badge in the status bar, and the confirmation shown when an
+  // export is about to carry an error out of the app.
+  const { tab, onTabChange: setTab } = props;
 
   return (
     <aside className="side-panel">
@@ -1016,21 +1026,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 // Quality
 // ---------------------------------------------------------------------------
 
-function QualityTab({ api, theme, onSelectionChange, assets, exportDpi }: SidePanelProps) {
-  const { document: doc } = api;
+/** Shared with the status-bar badge, so one score never reads two ways. */
+export function scoreTone(score: number): 'good' | 'fair' | 'poor' {
+  return score >= 90 ? 'good' : score >= 70 ? 'fair' : 'poor';
+}
 
-  const report = useMemo(() => {
-    // The scene has to carry its images: text-size and colour rules read the
-    // rendered tree, and a figure checked as a set of grey placeholders is not
-    // the figure being submitted.
-    const scene = renderDocument(doc, { theme, resolveAsset: (id) => assets.urls[id] });
-    // Checked at the resolution it will be exported at. This tab used to keep
-    // its own target, so two adjacent tabs of one panel could judge the same
-    // micrograph differently — the Data tab has always read `exportDpi`.
-    return checkFigure({ document: doc, theme, scene, exportDpi });
-  }, [doc, theme, exportDpi, assets.urls]);
-
-  const tone = report.score >= 90 ? 'good' : report.score >= 70 ? 'fair' : 'poor';
+function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePanelProps) {
+  const tone = scoreTone(report.score);
 
   const applyFix = (finding: Finding): void => {
     const fix = finding.fix;
