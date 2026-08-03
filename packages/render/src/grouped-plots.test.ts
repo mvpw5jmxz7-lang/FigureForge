@@ -434,6 +434,89 @@ describe('showing every replicate', () => {
   });
 });
 
+describe('bar spacing', () => {
+  const barsOf = (doc: FigureDocument): { x: number; width: number }[] =>
+    collectByRole(scene(doc), 'bar')
+      .map((n) => ({ x: Number(n.attrs?.['x']), width: Number(n.attrs?.['width']) }))
+      .sort((a, b) => a.x - b.x);
+
+  it('draws exactly as before when a plot says nothing about spacing', () => {
+    /*
+     * The two gaps were a dead parameter and a literal inside the band scale.
+     * Absent has to mean precisely what those literals meant, or every saved
+     * figure — one factor or two — re-lays itself out the first time it is
+     * opened. Stated as the equality directly: silent equals the old numbers.
+     *
+     * Both scenes come from *one* document because `createIdFactory` mixes in
+     * `Math.random()` and the jitter seed is hashed from the node id, so two
+     * separately-built documents differ in their replicate points alone.
+     */
+    for (const csv of [GROUPED, REPLICATES]) {
+      const silent = makeDocument(csv, { plotType: 'bar' });
+      const stated = editDocument(silent, (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') {
+            node.barGapFraction = 0.1;
+            node.groupGapFraction = 0.35;
+          }
+        }
+      });
+      expect(toSvgString(scene(stated))).toBe(toSvgString(scene(silent)));
+    }
+  });
+
+  it('makes the bars of a group meet at full width with no gap', () => {
+    const bars = barsOf(
+      makeDocument(GROUPED, { plotType: 'bar', barGapFraction: 0, barWidthFraction: 1 }),
+    );
+    expect(bars).toHaveLength(4);
+
+    // Within a category the bars are flush: one ends exactly where the next
+    // begins. This is what the width control exists for — at 80% of the slot a
+    // sliver survives that no amount of closing the gap can remove.
+    expect(bars[0]!.x + bars[0]!.width).toBeCloseTo(bars[1]!.x, 6);
+    expect(bars[2]!.x + bars[2]!.width).toBeCloseTo(bars[3]!.x, 6);
+    // The categories stay apart: that is the other control's business.
+    expect(bars[2]!.x - (bars[1]!.x + bars[1]!.width)).toBeGreaterThan(1);
+  });
+
+  it('separates the clusters without disturbing the pitch inside one', () => {
+    const base = barsOf(makeDocument(GROUPED, { plotType: 'bar' }));
+    const wide = barsOf(makeDocument(GROUPED, { plotType: 'bar', groupGapFraction: 0.6 }));
+
+    const between = (b: typeof base): number => b[2]!.x - b[1]!.x;
+    expect(between(wide)).toBeGreaterThan(between(base));
+    // Still two tight pairs, just narrower ones — the invariant the two-factor
+    // reading rests on.
+    expect(wide[1]!.x - wide[0]!.x).toBeLessThan(between(wide));
+  });
+
+  it('spaces a single-factor plot by the same control', () => {
+    const tight = barsOf(makeDocument(REPLICATES, { plotType: 'bar', groupGapFraction: 0.05 }));
+    const loose = barsOf(makeDocument(REPLICATES, { plotType: 'bar', groupGapFraction: 0.8 }));
+
+    // One factor gives every bar its own category, so the gap between groups is
+    // the gap between the bars. Wider gap, narrower bars, same plot area.
+    expect(loose[0]!.width).toBeLessThan(tight[0]!.width);
+  });
+
+  it('moves the measured category positions a bracket is anchored to', () => {
+    /*
+     * Why the Inspector reflows brackets in the same commit as a gap change: a
+     * bracket's ends are `margin.left + band.center(name)`, so widening a gap
+     * moves the bars out from under an annotation that stays where it was.
+     */
+    const at = (patch: Partial<PlotNode>): number[] => {
+      const doc = makeDocument(GROUPED, { plotType: 'bar', ...patch });
+      return [...measurePlot(doc, plotOf(doc), NATURE_THEME)!.categoryX.values()];
+    };
+    expect(at({ groupGapFraction: 0.6 })).not.toEqual(at({}));
+    expect(at({ barGapFraction: 0.5 })).not.toEqual(at({}));
+    // Width changes no centre, which is why it commits without a reflow.
+    expect(at({ barWidthFraction: 0.4 })).toEqual(at({}));
+  });
+});
+
 describe('single-factor output is unchanged', () => {
   it('renders a replicate table byte for byte as before', () => {
     /*

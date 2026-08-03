@@ -9,6 +9,7 @@ import {
   histogramMarks,
   kernelDensity,
   makeBandScale,
+  makeGroupedBandScale,
   makeScale,
   mulberry32,
   resolveDomain,
@@ -237,6 +238,53 @@ describe('scales', () => {
     const centres = ['A', 'B', 'C'].map((n) => band.center(n));
     expect(centres[1]! - centres[0]!).toBeCloseTo(centres[2]! - centres[1]!, 6);
     expect(band.bandwidth).toBeGreaterThan(0);
+  });
+});
+
+describe('grouped band spacing', () => {
+  const items = ['WT', 'KO'].flatMap((category) =>
+    ['Control', 'Drug'].map((group) => ({ name: `${category} — ${group}`, category, group })),
+  );
+  const centres = (s: ReturnType<typeof makeGroupedBandScale>): number[] =>
+    items.map((i) => s.band.center(i.name));
+
+  it('reproduces the hardcoded literals when nothing is passed', () => {
+    /*
+     * The two gaps used to be a dead parameter and a literal. Every figure saved
+     * before they became fields says nothing about spacing, so the defaults have
+     * to be exactly what those literals were or every one of them re-lays itself
+     * out the first time it is opened.
+     */
+    const now = makeGroupedBandScale(items, [0, 46]);
+    const then = makeGroupedBandScale(items, [0, 46], 0.35, 0.1);
+    expect(centres(now)).toEqual(centres(then));
+    expect(now.band.bandwidth).toBeCloseTo(then.band.bandwidth, 12);
+    expect(now.outer.step).toBeCloseTo(then.outer.step, 12);
+  });
+
+  it('closes the gap within a group without moving the clusters apart', () => {
+    const base = makeGroupedBandScale(items, [0, 46]);
+    const tight = makeGroupedBandScale(items, [0, 46], 0.35, 0);
+
+    // No padding inside a category means the sub-band slot *is* the sub-band.
+    expect(tight.band.step).toBeCloseTo(tight.band.bandwidth, 12);
+    expect(base.band.bandwidth).toBeLessThan(tight.band.bandwidth);
+    // The categories themselves are untouched: that is the other control's job.
+    expect(tight.outer.step).toBeCloseTo(base.outer.step, 12);
+  });
+
+  it('moves the clusters apart without changing the pitch inside one', () => {
+    const base = centres(makeGroupedBandScale(items, [0, 46]));
+    const wide = centres(makeGroupedBandScale(items, [0, 46], 0.6));
+
+    const within = (c: number[]): number => c[1]! - c[0]!;
+    const between = (c: number[]): number => c[2]! - c[1]!;
+    expect(between(wide)).toBeGreaterThan(between(base));
+    // A wider gap between categories leaves less room inside one, so the
+    // within-group pitch shrinks rather than staying put — the clusters are
+    // narrower, not merely further apart.
+    expect(within(wide)).toBeLessThan(within(base));
+    expect(within(wide)).toBeGreaterThan(0);
   });
 });
 

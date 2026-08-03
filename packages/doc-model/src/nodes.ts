@@ -262,6 +262,24 @@ export interface PlotNode extends NodeBase {
    * an interval hides how many measurements it rests on and whether they agree.
    */
   showReplicates?: boolean;
+  /**
+   * Gap between the bars within one group, as a fraction of the sub-band pitch.
+   *
+   * Two-factor plots only — a single-factor one has nothing inside a category to
+   * space. Absent is `DEFAULT_BAR_GAP_FRACTION`, the literal this replaced, so
+   * every existing figure draws exactly as it did.
+   */
+  barGapFraction?: number;
+  /**
+   * Gap between one category slot and the next. On a single-factor plot that is
+   * the gap between the bars themselves, since there each bar owns a category.
+   *
+   * Absent is `DEFAULT_GROUP_GAP_FRACTION`. Note this changes the slot a
+   * category label has to fit in, so widening it can stand a rotated label back
+   * upright — correct, and safe because the geometry is built in exactly two
+   * passes rather than converged to.
+   */
+  groupGapFraction?: number;
 }
 
 export interface ImageNode extends NodeBase {

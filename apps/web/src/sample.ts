@@ -93,16 +93,24 @@ export function datasetFromText(
     inferFormat(parsed.columns, { hasRowNames, columnGroups: parsed.columnGroups });
 
   /*
-   * Saying "three replicate y columns per series" about a shared-x table *is*
-   * the statement that it is an XY+replicates table, so it is taken as one.
+   * Saying "three columns per group" about a table *is* the statement that its
+   * columns block into groups, so it is taken as one — for the shared-x shape
+   * (which becomes XY+replicates) and for the labelled-rows shape (which becomes
+   * Prism's Grouped).
    *
    * Without this the author has to say the same thing twice — pick the layout
    * from a dropdown that only lists it under a Prism name, *then* type the
    * count — and the control that takes the count is hidden until they have. A
-   * count of 1 is not a claim about replicates, so it changes nothing.
+   * count of 1 is not a claim about groups, so it changes nothing.
    */
   const format =
-    detected === 'prism' && (options.replicatesPerGroup ?? 0) >= 2 ? 'xy-replicates' : detected;
+    (options.replicatesPerGroup ?? 0) >= 2
+      ? detected === 'prism'
+        ? 'xy-replicates'
+        : detected === 'replicate'
+          ? 'grouped-replicates'
+          : detected
+      : detected;
 
   const base: Dataset = {
     id,

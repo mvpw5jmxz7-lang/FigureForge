@@ -324,10 +324,24 @@ export interface BandScale {
   bandwidth: number;
 }
 
+/**
+ * Gap between one category slot and the next, as a fraction of the slot pitch.
+ *
+ * Exported because the Inspector displays it as the value a plot has when it
+ * says nothing, and the renderer passes it when a plot says nothing. Two
+ * spellings of one default is how a control comes to read 35% while the canvas
+ * draws something else — the same reason `analysisInputHash` and
+ * `scaleBarWidthMm` are each composed in exactly one place.
+ */
+export const DEFAULT_GROUP_GAP_FRACTION = 0.35;
+
+/** Gap between the bars inside one category, on a two-factor plot. */
+export const DEFAULT_BAR_GAP_FRACTION = 0.1;
+
 export function makeBandScale(
   categories: readonly string[],
   rangeMm: [number, number],
-  paddingInner = 0.35,
+  paddingInner = DEFAULT_GROUP_GAP_FRACTION,
   paddingOuter = 0.25,
 ): BandScale {
   const d3s = scaleBand<string>()
@@ -377,18 +391,23 @@ export interface GroupedBandScale {
  * The inner band takes no outer padding: the gap between two categories is the
  * outer band's business, and padding the inner one too would leave the groups
  * of a category adrift in their slot rather than reading as one cluster.
+ *
+ * Both gaps are parameters because they are the two things an author adjusts on
+ * a grouped bar chart. `groupGap` had been one since this function was written
+ * and its only caller never passed it; `barGap` was a literal beside it.
  */
 export function makeGroupedBandScale(
   items: readonly GroupedBandItem[],
   rangeMm: [number, number],
-  paddingInner = 0.35,
+  groupGap = DEFAULT_GROUP_GAP_FRACTION,
+  barGap = DEFAULT_BAR_GAP_FRACTION,
 ): GroupedBandScale {
   const categories = [...new Set(items.map((i) => i.category))];
   const groups = [...new Set(items.map((i) => i.group))];
 
-  const outer = makeBandScale(categories, rangeMm, paddingInner, 0.25);
+  const outer = makeBandScale(categories, rangeMm, groupGap, 0.25);
   // Group slots inside one category, measured from that category's left edge.
-  const inner = makeBandScale(groups, [0, outer.bandwidth], 0.1, 0);
+  const inner = makeBandScale(groups, [0, outer.bandwidth], barGap, 0);
 
   const offsets = new Map<string, number>();
   for (const item of items) {

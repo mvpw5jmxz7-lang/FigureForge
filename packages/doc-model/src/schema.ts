@@ -147,6 +147,10 @@ const plotSchema = z.object({
   legend: z.enum(['auto', 'right', 'bottom', 'none']).optional(),
   errorDisplay: z.enum(['bars', 'band']).optional(),
   showReplicates: z.boolean().optional(),
+  // Capped below 1 rather than at it: d3's band scale gives zero bandwidth at a
+  // padding of 1, which is a plot of invisible bars.
+  barGapFraction: finite.min(0).max(0.9).optional(),
+  groupGapFraction: finite.min(0).max(0.9).optional(),
 });
 
 const imageSchema = z.object({

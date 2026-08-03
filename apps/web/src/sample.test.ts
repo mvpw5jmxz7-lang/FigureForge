@@ -31,6 +31,17 @@ const XY_REPLICATES_PASTE = [
   '72\t97\t110\t115\t78\t87\t60',
 ].join('\n');
 
+/**
+ * `TestFiles/grouped data example.prism` — genotypes down the rows, treatments
+ * across the columns, three replicates in each cell.
+ */
+const GROUPED_PASTE = [
+  '\tControl\t\t\tDrug A\t\t\tDrug B\t\t',
+  'Wild type\t23\t21\t19\t67\t79\t98\t88\t86\t89',
+  'Knock-out A\t24\t23\t15\t29\t31\t32\t90\t91\t92',
+  'Knock-out B\t21\t25\t27\t65\t69\t71\t65\t66\t63',
+].join('\n');
+
 describe('import reading', () => {
   it('reads a pasted xy-pair table as independent runs', () => {
     const ds = datasetFromText(XY_PAIRS_PASTE, 'Runs', 'd1');
@@ -67,6 +78,40 @@ describe('import reading', () => {
     // A count of 1 says nothing about replicates, so the table stays as read.
     const plain = 'Hours,WT,KO\n0,45,34\n6,56,58';
     expect(datasetFromText(plain, 'T', 'd4', null, { replicatesPerGroup: 1 }).format).toBe('prism');
+  });
+
+  it('reads a merged-header Grouped table without being told anything', () => {
+    const ds = datasetFromText(GROUPED_PASTE, 'Genotypes', 'd5');
+    expect(ds.format).toBe('grouped-replicates');
+    expect(ds.columnGroups?.map((g) => g.name)).toEqual(['Control', 'Drug A', 'Drug B']);
+    expect(toSeries(ds)).toHaveLength(9);
+  });
+
+  it('takes a stated column count as the statement that a table is grouped', () => {
+    /*
+     * The same table pasted without its group-title row. Detection sees labelled
+     * rows and nine numeric columns, which reads as one treatment measured nine
+     * times — a legitimate reading of that rectangle, and the wrong one here.
+     * Before this the author had to find "Grouped" in the layout dropdown before
+     * the control that takes the count would even appear.
+     */
+    const plain = GROUPED_PASTE.split('\n').slice(1).join('\n');
+    expect(datasetFromText(plain, 'Genotypes', 'd6').format).toBe('replicate');
+
+    const stated = datasetFromText(plain, 'Genotypes', 'd6', null, { replicatesPerGroup: 3 });
+    expect(stated.format).toBe('grouped-replicates');
+    const series = toSeries(stated);
+    expect(series).toHaveLength(9);
+    expect(series[0]!.category).toBe('Wild type');
+    // Named for what they are, not after the placeholder column letters B/E/H.
+    expect(stated.columnGroups?.map((g) => g.name)).toEqual(['Group 1', 'Group 2', 'Group 3']);
+  });
+
+  it('leaves a labelled replicate table alone when no count is stated', () => {
+    const plain = GROUPED_PASTE.split('\n').slice(1).join('\n');
+    const ds = datasetFromText(plain, 'Genotypes', 'd7', null, { replicatesPerGroup: 1 });
+    expect(ds.format).toBe('replicate');
+    expect(toSeries(ds)).toHaveLength(3);
   });
 });
 

@@ -613,6 +613,20 @@ export interface Series {
 export const compositeSeriesName = (category: string, group: string): string =>
   `${category} — ${group}`;
 
+/**
+ * Whether these series position their marks by two factors.
+ *
+ * The renderer decides which band scale to build on this, and the Inspector
+ * decides whether there is a within-group gap to offer. Spelling it twice is
+ * how the two come to disagree about what a grouped plot is, which would show
+ * up as a control that adjusts nothing.
+ */
+export function isTwoFactor(series: readonly Series[]): boolean {
+  return (
+    series.length > 0 && series.every((s) => s.category !== undefined && s.group !== undefined)
+  );
+}
+
 export const columnIndex = (ds: Dataset, name: string): number =>
   ds.columns.findIndex((c) => c.name === name);
 
@@ -868,16 +882,31 @@ export function dataBlocks(ds: Dataset): ColumnGroup[] {
  * knows their six columns are two groups of three can say so. Names come from
  * the first column of each block, which is what a spreadsheet user would have
  * called it anyway.
+ *
+ * Unless the parser invented those names. A table pasted with no header row at
+ * all has columns called `A`, `B`, `C`, and naming the blocks after them puts a
+ * legend reading "B, E, H" on the figure — labels that name nothing in the
+ * author's data and read as though they did. `Group 1` at least says what it is.
+ * The test is that *every* column carries its positional name, which a real
+ * header cannot manage past the first column or two, so a spreadsheet with a
+ * column genuinely titled "B" keeps it.
  */
 export function blocksOfSize(ds: Dataset, size: number): ColumnGroup[] {
   const width = ds.columns.length;
   const first = ds.format === 'nested' ? 0 : 1;
   if (size < 1 || width <= first) return [];
 
+  const unnamed = ds.columns.every((c, i) => c.name === defaultColumnName(i));
+
   const out: ColumnGroup[] = [];
   for (let from = first; from < width; from += size) {
     const to = Math.min(from + size - 1, width - 1);
-    out.push({ name: ds.columns[from]?.name ?? `Group ${out.length + 1}`, from, to });
+    const header = ds.columns[from]?.name;
+    out.push({
+      name: !unnamed && header !== undefined ? header : `Group ${out.length + 1}`,
+      from,
+      to,
+    });
   }
   return out;
 }

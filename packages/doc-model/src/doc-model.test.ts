@@ -278,6 +278,19 @@ const XY_REPLICATES_PASTE = [
   '72\t97\t110\t115\t78\t87\t60',
 ].join('\n');
 
+/**
+ * `TestFiles/grouped data example.prism` — three genotypes down the rows, three
+ * treatments across the columns, three replicates in each cell. Its group titles
+ * are merged cells too, and the row-title column has no title of its own, so the
+ * header row opens with a *blank* before the first block name.
+ */
+const GROUPED_PASTE = [
+  '\tControl\t\t\tDrug A\t\t\tDrug B\t\t',
+  'Wild type\t23\t21\t19\t67\t79\t98\t88\t86\t89',
+  'Knock-out A\t24\t23\t15\t29\t31\t32\t90\t91\t92',
+  'Knock-out B\t21\t25\t27\t65\t69\t71\t65\t66\t63',
+].join('\n');
+
 function dataset(text: string, id = 'd1'): Dataset {
   const parsed = parseDelimited(text);
   return {
@@ -511,6 +524,73 @@ describe('series extraction', () => {
     expect(series[3]!.category).toBe('Q331K');
     expect(series[3]!.group).toBe('Group B');
     expect(series[3]!.values).toEqual([-0.59, -0.66]);
+  });
+
+  it('reads a Grouped table declared in one merged header row', () => {
+    /*
+     * The spreadsheet form of the same declaration: one header row with the
+     * group titles spread across their blocks, and — unlike the XY shape — a
+     * *blank* leading cell, because the row-title column carries no title.
+     */
+    const table = parseDelimited(GROUPED_PASTE);
+    expect(table.headerRows).toBe(1);
+    expect(table.columnGroups).toEqual([
+      { name: 'Control', from: 1, to: 3 },
+      { name: 'Drug A', from: 4, to: 6 },
+      { name: 'Drug B', from: 7, to: 9 },
+    ]);
+
+    const format = inferFormat(table.columns, { columnGroups: table.columnGroups });
+    expect(format).toBe('grouped-replicates');
+
+    const series = toSeries({
+      ...dataset('placeholder,1\n'),
+      format,
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    });
+
+    // Three genotypes × three treatments, over three category labels.
+    expect(series).toHaveLength(9);
+    expect(series[0]).toEqual({
+      name: 'Wild type — Control',
+      values: [23, 21, 19],
+      category: 'Wild type',
+      group: 'Control',
+    });
+    expect(new Set(series.map((s) => s.category)).size).toBe(3);
+    expect(new Set(series.map((s) => s.group)).size).toBe(3);
+  });
+
+  it('drops a blank replicate rather than shifting the row', () => {
+    const table = parseDelimited(GROUPED_PASTE.replace('23\t21\t19', '23\t\t19'));
+    const series = toSeries({
+      ...dataset('placeholder,1\n'),
+      format: 'grouped-replicates',
+      columns: table.columns,
+      rows: table.rows,
+      columnGroups: table.columnGroups,
+    });
+    // Two replicates, not three with a neighbour's value pulled in — the note
+    // in the Prism file makes a point of the table carrying a missing value.
+    expect(series[0]!.values).toEqual([23, 19]);
+    expect(series[1]!.values).toEqual([67, 79, 98]);
+  });
+
+  it('names blocks generically when the columns have no names of their own', () => {
+    // A header-less paste columns as A, B, C…; a legend reading "B, E, H" names
+    // nothing in the author's data while looking exactly as though it did.
+    const headerless = GROUPED_PASTE.split('\n').slice(1).join('\n');
+    const ds: Dataset = { ...dataset(headerless), format: 'grouped-replicates' };
+    expect(blocksOfSize(ds, 3).map((b) => b.name)).toEqual(['Group 1', 'Group 2', 'Group 3']);
+
+    // A table that does name its columns keeps those names.
+    const named: Dataset = {
+      ...dataset('Hours,C1,C2,C3,T1,T2,T3\n0,45,34,20,34,31,29\n6,56,58,61,41,43,42'),
+      format: 'xy-replicates',
+    };
+    expect(blocksOfSize(named, 3).map((b) => b.name)).toEqual(['C1', 'T1']);
   });
 
   it('reads Prism’s XY-with-replicates as one series per group, x repeated', () => {
