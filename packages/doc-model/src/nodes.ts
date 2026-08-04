@@ -110,18 +110,30 @@ export type PlotType =
   | 'beeswarm'
   | 'histogram'
   | 'volcano'
-  | 'heatmap';
+  | 'heatmap'
+  | 'survival';
 
 /**
  * The plot types whose x axis is a numeric scale rather than a band of
  * categories. Kept here beside the union so the renderer, the model defaults and
  * the UI cannot drift on which is which.
+ *
+ * `survival` belongs here on the same grounds as `volcano`: time is a real
+ * numeric axis with ticks to draw, even though — like volcano's differential
+ * data — its geometry is built through a dedicated path
+ * (`toSurvivalGroups`/`kaplanMeier`) rather than the generic `toSeries`+
+ * `xyMarks` route `continuousGeometry` uses for scatter/line/histogram.
+ * Membership here is what gives it numeric x ticks by default (`addPlot`) and
+ * what blocks ordinary group-comparison tests in the Stats tab in favour of
+ * the log-rank allow-list, for free, through the same mechanism volcano
+ * already relies on.
  */
 export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
   'scatter',
   'line',
   'histogram',
   'volcano',
+  'survival',
 ]);
 
 /**
@@ -356,6 +368,20 @@ export interface PlotNode extends NodeBase {
    * small to hold the text legibly rather than overprinting it.
    */
   showCellValues?: boolean;
+  /**
+   * Draw a tick at each censored subject's point on the curve. Absent is
+   * `true` — the opposite default from `showCellValues`/`showReplicates`,
+   * since a censoring mark is what makes a Kaplan–Meier curve honest about
+   * follow-up loss rather than a source of clutter to opt into. Survival only.
+   */
+  showCensorMarks?: boolean;
+  /**
+   * Draw a shaded confidence band around each survival curve. Absent is
+   * `false` — with three or more arms, overlapping bands read as clutter
+   * before they read as data, the same opt-in stance `showReplicates` takes.
+   * Survival only.
+   */
+  showSurvivalCI?: boolean;
 }
 
 export interface ImageNode extends NodeBase {

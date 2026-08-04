@@ -531,6 +531,88 @@ describe('adapter parity', () => {
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
 
+  it('draws a survival curve identically through both adapters, censoring ticks and all', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Time,Event,Arm\n5,1,A\n8,0,B\n12,1,A\n3,1,B');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-survival',
+        name: 'Cohort',
+        format: 'survival',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/survival.csv',
+        sourceFilename: 'survival.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Survival',
+        datasetId: dataset.id,
+        plotType: 'survival',
+      });
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'line')).toHaveLength(2); // one arm each
+    expect(collectByRole(scene, 'censor-mark')).toHaveLength(1); // arm B's t=8
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws a survival confidence band identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Time,Event\n1,1\n2,1\n2,0\n3,1\n5,1');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-survival-ci',
+        name: 'Cohort',
+        format: 'survival',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/survival-ci.csv',
+        sourceFilename: 'survival-ci.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Survival',
+        datasetId: dataset.id,
+        plotType: 'survival',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.showSurvivalCI = true;
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'error-bar')).toHaveLength(1); // one polygon, not per-point whiskers
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
   it('leaves a plot at or under MAX_VECTOR_POINTS on the ordinary vector path', () => {
     // Regression guard: the continuous-types fixture above already proves
     // this at five rows; this pins it explicitly against the boundary the

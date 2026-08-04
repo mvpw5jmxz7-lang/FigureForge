@@ -18,6 +18,8 @@ Reference values:
               not R, computes this test here
   tea tasting   Fisher (1935), via R's `?fisher.test` example
   convictions   Fisher (1962) twin study, via R's `?fisher.test` example
+  aml           Miller (1997), R's built-in `survival::aml` dataset, via
+              `survdiff(Surv(time, status) ~ x, data = aml)`
 """
 
 from __future__ import annotations
@@ -60,6 +62,14 @@ DRUG_RESPONSE = {
     "drug3": [16, 10, 18, 20, 14],
     "drug4": [34, 22, 30, 44, 30],
 }
+
+# --- R's built-in `survival::aml` dataset (Miller 1997), maintenance
+# chemotherapy in acute myelogenous leukaemia. status 1 = relapse/death,
+# 0 = censored. `survdiff(Surv(time, status) ~ x, data = aml)`.
+AML_MAINTAINED_TIME = [9, 13, 13, 18, 23, 28, 31, 34, 45, 48, 161]
+AML_MAINTAINED_STATUS = [1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0]
+AML_NONMAINTAINED_TIME = [5, 5, 8, 8, 12, 16, 23, 27, 30, 33, 43, 45]
+AML_NONMAINTAINED_STATUS = [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1]
 
 
 def only(outcome):
@@ -158,6 +168,77 @@ class TestRepeatedMeasuresAnova:
         # anova-rm's own dispatch branch is even reached.
         with pytest.raises(ValueError, match="At least two groups"):
             run_test("anova-rm", {"a": [1.0, 2.0, 3.0]})
+
+
+class TestLogRank:
+    """R's built-in `survival::aml` dataset (Miller 1997), Maintained (n=11,
+    7 events) vs Nonmaintained (n=12, 11 events) chemotherapy:
+
+        survdiff(Surv(time, status) ~ x, data = aml)
+        Chisq = 3.4  on 1 degrees of freedom, p = 0.07
+
+    SciPy has no log-rank implementation to call — this is a hand-implemented
+    Mantel-Haenszel statistic, so unlike a SciPy wrapper this test carries real
+    weight: it is what proves the formula is right, not just self-consistent.
+    """
+
+    def _outcome(self):
+        return run_test(
+            "log-rank",
+            {"Maintained": AML_MAINTAINED_TIME, "Nonmaintained": AML_NONMAINTAINED_TIME},
+            events={
+                "Maintained": AML_MAINTAINED_STATUS,
+                "Nonmaintained": AML_NONMAINTAINED_STATUS,
+            },
+        )
+
+    def test_omnibus_matches_r_survdiff(self):
+        outcome = self._outcome()
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.statistic == pytest.approx(3.396, abs=1e-2)
+        assert outcome.omnibus.df == [1.0]
+        assert outcome.omnibus.p == pytest.approx(0.0653, abs=1e-3)
+
+    def test_pairwise_comparison_matches_omnibus_for_two_groups(self):
+        # With exactly two groups the pairwise result and the omnibus are the
+        # same chi-square test — the K-group reduction and the two-group
+        # shortcut must agree.
+        outcome = self._outcome()
+        c = only(outcome)
+        assert outcome.omnibus is not None
+        assert c.statistic == pytest.approx(outcome.omnibus.statistic, abs=1e-9)
+        assert c.p == pytest.approx(outcome.omnibus.p, abs=1e-9)
+        assert c.n == [11, 12]
+
+    def test_reports_an_observed_expected_hazard_ratio(self):
+        # Peto & Peto's O/E approximation, not a Cox MLE — documented as such
+        # rather than presented as the thing it resembles, the same stance
+        # Fisher's odds ratio takes on its own documented divergence from R.
+        c = only(self._outcome())
+        assert c.effectSizeName == "Hazard ratio (O/E)"
+        assert c.effectSize is not None
+        assert c.effectSize < 1  # Maintained relapsed less than expected
+
+    def test_rejects_mismatched_group_names(self):
+        with pytest.raises(ValueError, match="event flag"):
+            run_test(
+                "log-rank",
+                {"A": [1.0, 2.0], "B": [3.0, 4.0]},
+                events={"A": [1, 0]},  # missing "B"
+            )
+
+    def test_rejects_length_mismatch(self):
+        with pytest.raises(ValueError, match="index-aligned"):
+            run_test(
+                "log-rank",
+                {"A": [1.0, 2.0], "B": [3.0, 4.0]},
+                events={"A": [1, 0], "B": [1]},
+            )
+
+    def test_no_assumption_warnings(self):
+        # A log-rank "group" is follow-up times, not a measurement sample —
+        # Shapiro/Levene have nothing meaningful to say about it.
+        assert self._outcome().warnings == []
 
 
 class TestCorrelation:

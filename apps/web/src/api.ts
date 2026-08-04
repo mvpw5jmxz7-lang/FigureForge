@@ -9,6 +9,8 @@ export interface AnalyzeRequest {
   groups: { name: string; values: number[] }[];
   /** Paired x-values, for correlating a single series against its own x axis. */
   x?: { name: string; values: number[] };
+  /** Per-subject 0/1 event flags, one entry per `groups` entry, matched by name — log-rank only. */
+  events?: { name: string; values: number[] }[];
   alternative?: Alternative;
   correction?: Correction;
   alpha?: number;

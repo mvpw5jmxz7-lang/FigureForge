@@ -33,6 +33,7 @@ import {
   toMm,
   toMatrix,
   toSeries,
+  toSurvivalGroups,
   xForHash,
   type Dataset,
 } from './index.js';
@@ -297,6 +298,62 @@ describe('delimited parsing', () => {
     const matrix = toMatrix(table);
     expect(matrix.rowLabels).toEqual(['TP53']);
     expect(matrix.cells).toEqual([[1.2]]);
+  });
+
+  it('never infers survival from a bare table shaped like one', () => {
+    // A text column followed by numeric columns is `replicate`'s own shape —
+    // nothing in the cells says whether the two numeric columns are repeated
+    // measurements or a time plus a 0/1 event flag.
+    expect(inferFormat(parseDelimited('Subject,Time,Event\nA,5,1\nB,8,0').columns)).toBe(
+      'replicate',
+    );
+    expect(inferFormat(parseDelimited('Time,Event,Group\n5,1,X\n8,0,Y').columns)).not.toBe(
+      'survival',
+    );
+  });
+
+  it('reads a survival table as one implicit group when no group column is given', () => {
+    const table: Dataset = {
+      ...dataset('Time,Event\n5,1\n8,1\n8,0\n12,1'),
+      format: 'survival',
+      name: 'Cohort',
+    };
+    const groups = toSurvivalGroups(table);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toEqual({
+      name: 'Cohort',
+      times: [5, 8, 8, 12],
+      events: [true, true, false, true],
+    });
+  });
+
+  it('groups survival rows by the third column, preserving row order within a group', () => {
+    const table: Dataset = {
+      ...dataset('Time,Event,Arm\n5,1,A\n8,0,B\n12,1,A\n3,1,B'),
+      format: 'survival',
+    };
+    const groups = toSurvivalGroups(table);
+    expect(groups).toEqual([
+      { name: 'A', times: [5, 12], events: [true, true] },
+      { name: 'B', times: [8, 3], events: [false, true] },
+    ]);
+  });
+
+  it('drops a survival row missing a numeric time or event flag', () => {
+    const table: Dataset = {
+      ...dataset('Time,Event,Arm\n5,1,A\n,1,A\n8,,A\nMYC,1,A'),
+      format: 'survival',
+    };
+    const groups = toSurvivalGroups(table);
+    expect(groups).toEqual([{ name: 'A', times: [5], events: [true] }]);
+  });
+
+  it('reads a non-zero event flag as an event, and exactly zero as censored', () => {
+    const table: Dataset = {
+      ...dataset('Time,Event\n5,1\n8,0\n12,2'),
+      format: 'survival',
+    };
+    expect(toSurvivalGroups(table)[0]!.events).toEqual([true, false, true]);
   });
 
   it('infers each supported layout', () => {
@@ -990,6 +1047,7 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('nested')).toBe('dot');
     expect(defaultPlotTypeFor('differential')).toBe('volcano');
     expect(defaultPlotTypeFor('matrix')).toBe('heatmap');
+    expect(defaultPlotTypeFor('survival')).toBe('survival');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -1787,6 +1845,39 @@ describe('.figureforge archive', () => {
         plotNode.heatmapStops = ['#111111', '#ffffff', '#333333'];
         plotNode.heatmapMissingColor = '#cccccc';
         plotNode.showCellValues = true;
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a survival plot with its new optional fields', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Time,Event,Arm\n5,1,A\n8,0,B', newId()),
+        format: 'survival',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Survival',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'survival';
+        plotNode.showCensorMarks = false;
+        plotNode.showSurvivalCI = true;
       }
     });
 

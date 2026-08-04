@@ -180,6 +180,10 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     // bars over its rows.
     case 'matrix':
       return 'heatmap';
+    // Subject-level time-to-event data exists to be drawn as a Kaplan–Meier
+    // curve, not pooled into bars over subjects.
+    case 'survival':
+      return 'survival';
     default:
       return 'bar-dot';
   }
@@ -287,6 +291,22 @@ export function addPlot(
     plot.plotType = 'heatmap';
     plot.errorBars = 'none';
     plot.showPoints = false;
+  }
+
+  /*
+   * A subject-level time-to-event table exists to be drawn as a stepped
+   * Kaplan–Meier curve, not pooled into bars over subjects or trended as an
+   * ordinary line — forced the same way matrix/differential are, so an
+   * explicit plot type passed by a caller can't leave a survival dataset
+   * drawn as something that reads its rows as replicates.
+   */
+  if (dataset && dataset.format === 'survival') {
+    plot.plotType = 'survival';
+    plot.errorBars = 'none';
+    plot.showPoints = false;
+    plot.x.showTicks = true;
+    if (plot.x.title === '') plot.x.title = 'Time';
+    if (plot.y.title === '') plot.y.title = 'Survival probability';
   }
 
   draft.nodes[id] = plot;

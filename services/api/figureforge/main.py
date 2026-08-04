@@ -86,6 +86,11 @@ class AnalyzeRequest(BaseModel):
     # or more named groups instead. `run_test` enforces which shape a given
     # test requires.
     x: Group | None = None
+    # Per-subject 0/1 event flags, one Group per times group in `groups`,
+    # matched by name — log-rank only. Mirrors `x`'s shape rather than adding
+    # a differently-structured field, since it is the same kind of thing: one
+    # more parallel value per subject.
+    events: list[Group] | None = None
     alternative: Literal["two-sided", "less", "greater"] = "two-sided"
     correction: Literal[
         "none", "bonferroni", "holm", "benjamini-hochberg", "tukey", "dunn"
@@ -149,6 +154,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             welch=request.welch,
             x=request.x.values if request.x else None,
             x_name=request.x.name if request.x else "x",
+            events={g.name: g.values for g in request.events} if request.events else None,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error

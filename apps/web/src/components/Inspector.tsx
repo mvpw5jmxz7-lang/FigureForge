@@ -65,6 +65,7 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'histogram', label: 'Histogram' },
   { id: 'volcano', label: 'Volcano' },
   { id: 'heatmap', label: 'Heatmap' },
+  { id: 'survival', label: 'Survival (Kaplan–Meier)' },
 ];
 
 /**
@@ -77,14 +78,17 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
  * gated on that data shape rather than on the format's name, the same way
  * scatter/line gate on "does `.x` exist" rather than on a format list. A
  * heatmap has no equivalent per-`Series` signal to key off — a dense matrix
- * bypasses `Series` entirely — so it is the one type gated on the dataset's
- * format directly. Offering a type the data cannot support is how the
- * unimplemented plot types shipped plausible-looking wrong output — so they
- * are withheld rather than approximated.
+ * bypasses `Series` entirely — so it is gated on the dataset's format
+ * directly, and survival is gated the same way for the same reason: a
+ * subject-level table bypasses `Series` too, reading through
+ * `toSurvivalGroups` instead. Offering a type the data cannot support is how
+ * the unimplemented plot types shipped plausible-looking wrong output — so
+ * they are withheld rather than approximated.
  */
 function typesFor(
   series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[],
   hasMatrix: boolean,
+  hasSurvival: boolean,
 ): {
   offered: typeof OFFERED_PLOT_TYPES;
   reason: string | null;
@@ -98,6 +102,7 @@ function typesFor(
   if (!single) blocked.push('Histogram needs a single group');
   if (!hasLabels) blocked.push('Volcano needs a dataset with a label, fold change and p-value per row');
   if (!hasMatrix) blocked.push('Heatmap needs a matrix dataset');
+  if (!hasSurvival) blocked.push('Survival needs a time/event dataset');
 
   return {
     offered: OFFERED_PLOT_TYPES.filter((t) => {
@@ -105,6 +110,7 @@ function typesFor(
       if (t.id === 'histogram') return single;
       if (t.id === 'volcano') return hasLabels;
       if (t.id === 'heatmap') return hasMatrix;
+      if (t.id === 'survival') return hasSurvival;
       return true;
     }),
     reason: blocked.length > 0 ? `${blocked.join('. ')}.` : null,
@@ -564,7 +570,11 @@ function PlotFields({
   const dataset = findDataset(doc, node.datasetId);
   const series = dataset ? toSeries(dataset) : [];
   const colors = paletteColors(node.palette, Math.max(1, series.length));
-  const { offered, reason } = typesFor(series, dataset?.format === 'matrix');
+  const { offered, reason } = typesFor(
+    series,
+    dataset?.format === 'matrix',
+    dataset?.format === 'survival',
+  );
 
   /*
    * Whether a continuous plot has anything to summarise.
@@ -657,7 +667,8 @@ function PlotFields({
    * legend. On a categorical plot each series has its own band and the axis
    * already names it.
    */
-  const perSeriesShapes = CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && series.length > 1;
+  const perSeriesShapes =
+    CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'survival' && series.length > 1;
 
   /*
    * Band spacing, and what to call it. Two factors put marks inside a category,
@@ -811,6 +822,34 @@ function PlotFields({
           A heatmap's cells are coloured by value, not summarised — there is no centre or error
           bar to set here. See the colour scale controls above.
         </p>
+      ) : node.plotType === 'survival' ? (
+        <>
+          <p className="hint">
+            A Kaplan–Meier curve is already a stepped estimate of survival probability, so there
+            is no centre or error bar to set here — see the confidence band toggle below.
+          </p>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.showCensorMarks ?? true}
+              onChange={(e) => setPlot('Toggle censor marks', { showCensorMarks: e.target.checked })}
+            />
+            Show censoring marks
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.showSurvivalCI ?? false}
+              onChange={(e) => setPlot('Toggle confidence band', { showSurvivalCI: e.target.checked })}
+            />
+            Show 95% confidence band
+          </label>
+          <p className="hint">
+            A tick marks where a subject left the curve without an event — what makes the curve
+            honest about follow-up loss. With three or more arms, overlapping bands can read as
+            clutter before they read as data, so the band is off by default.
+          </p>
+        </>
       ) : DISTRIBUTION_TYPES.has(node.plotType) ? (
         <p className="hint">
           A {node.plotType} already shows the full distribution, so the centre and error
@@ -918,7 +957,7 @@ function PlotFields({
         </>
       )}
 
-      {node.plotType !== 'heatmap' && (
+      {node.plotType !== 'heatmap' && node.plotType !== 'survival' && (
         <label className="check">
           <input
             type="checkbox"
@@ -960,7 +999,7 @@ function PlotFields({
         </>
       )}
 
-      {node.plotType !== 'heatmap' && (
+      {node.plotType !== 'heatmap' && node.plotType !== 'survival' && (
         <>
           <div className="field-row">
             <label className="field">
@@ -1037,7 +1076,7 @@ function PlotFields({
         label="Y"
         axis={node.y}
         seriesValues={series.flatMap((s) => s.values)}
-        numeric={node.plotType !== 'heatmap'}
+        numeric={node.plotType !== 'heatmap' && node.plotType !== 'survival'}
         onChange={(patch, label) => setPlot(label, { y: { ...node.y, ...patch } })}
       />
       <AxisFields
@@ -1049,7 +1088,9 @@ function PlotFields({
       />
 
       <h4>Second y axis</h4>
-      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'volcano' ? (
+      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
+      node.plotType !== 'volcano' &&
+      node.plotType !== 'survival' ? (
         <>
           <label className="check">
             <input

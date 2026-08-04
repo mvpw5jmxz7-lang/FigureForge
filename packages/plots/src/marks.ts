@@ -362,6 +362,14 @@ export interface XySeriesMarks {
    * path, the bracket clearance and the legend all read.
    */
   replicatePoints: PointGeometry[];
+  /**
+   * Where a censored subject leaves the curve, for a small tick mark at the
+   * curve's current height. Empty except on a survival plot — `xyMarks` never
+   * populates it; only `render-document.ts`'s dedicated survival geometry
+   * builder does, since censoring is a concept `xyMarks`'s generic pairing has
+   * no reason to know about.
+   */
+  censorPoints: PointGeometry[];
   /** What the band or the bars represent, e.g. "mean ± s.d.". */
   errorLabel: string;
   n: number;
@@ -537,6 +545,7 @@ export function xyMarks(
       // Only where they are not already the drawn points; `points` holds the
       // raw pairs when nothing was summarised.
       replicatePoints: summarised && options.showReplicates ? points : [],
+      censorPoints: [],
       errorLabel,
       n: pairs.length,
       // y is inverted, so the visual top is the minimum.

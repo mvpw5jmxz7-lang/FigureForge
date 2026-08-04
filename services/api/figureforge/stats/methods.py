@@ -29,6 +29,7 @@ TEST_NAMES = {
     "pearson": "Pearson correlation",
     "spearman": "Spearman rank correlation",
     "linear-regression": "ordinary least-squares linear regression",
+    "log-rank": "log-rank (Mantel-Cox) test",
 }
 
 CORRECTION_NAMES = {
@@ -127,7 +128,7 @@ def _omnibus_clause(test: str, omnibus: Omnibus) -> str:
         )
     if test == "kruskal-wallis" and omnibus.df:
         return f"H({omnibus.df[0]:.0f}) = {omnibus.statistic:.2f}, {_format_p(omnibus.p)}."
-    if test == "chi-square" and omnibus.df:
+    if test in ("chi-square", "log-rank") and omnibus.df:
         return f"χ²({omnibus.df[0]:.0f}) = {omnibus.statistic:.2f}, {_format_p(omnibus.p)}."
     return f"Omnibus statistic = {omnibus.statistic:.2f}, {_format_p(omnibus.p)}."
 

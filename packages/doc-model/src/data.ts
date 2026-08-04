@@ -113,7 +113,20 @@ export type DataFormat =
    * to colour, and nothing in the cells says which reading is meant. Never
    * auto-inferred; the author states it.
    */
-  | 'matrix';
+  | 'matrix'
+  /**
+   * Time, Event, Group? — one row per subject: a time to an event or to
+   * censoring, a 1/0 event flag (1 = the event happened, 0 = the subject was
+   * censored — lost to follow-up, or still event-free when the study ended),
+   * and an optional treatment/arm column.
+   *
+   * Never auto-inferred, for the same reason `differential` and `matrix`
+   * never are: a bare three-numeric-column table reads just as plausibly as
+   * `replicate` (three repeated measurements) as it does as a survival time
+   * plus a 0/1 flag, and guessing wrong draws a Kaplan–Meier curve off
+   * numbers that were never a time-to-event at all. The author states it.
+   */
+  | 'survival';
 
 /**
  * Layouts whose columns are blocked into groups by a second header row.
@@ -892,6 +905,18 @@ export function toSeries(ds: Dataset): Series[] {
       return out;
     }
 
+    case 'survival': {
+      /*
+       * One series per group, times only — exists purely so generic UI that
+       * calls `toSeries` for display (the dataset list's "N series" count)
+       * reads sensibly. The plot itself reads through `toSurvivalGroups`,
+       * never this: a subject row is not a replicate to pool, and this shape
+       * has nowhere to carry the event/censoring flag `toSurvivalGroups`
+       * keeps.
+       */
+      return toSurvivalGroups(ds).map((g) => ({ name: g.name, values: g.times }));
+    }
+
     case 'simple-xy':
     default: {
       const first = dataColumnOffset(ds);
@@ -940,6 +965,52 @@ export function toMatrix(ds: Dataset): Matrix {
   }
 
   return { rowLabels, colLabels, cells };
+}
+
+/** One arm's subject-level follow-up data, ready for the Kaplan–Meier estimator. */
+export interface SurvivalGroup {
+  name: string;
+  times: number[];
+  /** `true` = the event happened at this subject's time; `false` = censored. */
+  events: boolean[];
+}
+
+/**
+ * Read a `'survival'` dataset as one or more arms, bypassing `Series` entirely.
+ *
+ * A subject row is not a replicate to pool — `Series.values`/`.category`/
+ * `.group` exist for pairwise band clustering and averaging, neither of which
+ * a time-to-event curve wants, and there is nowhere in `Series` to carry the
+ * event/censoring flag every KM point needs. A dedicated accessor keeps the
+ * subject-level shape instead of forcing it through machinery built for
+ * something else — the same call `toMatrix` made for heatmaps.
+ *
+ * Column 0 is time, column 1 is the 0/1 event flag, column 2 (if present) is
+ * the arm. Absent, every subject is one implicit group named for the dataset
+ * — `toSurvivalGroups` is what a single-arm curve and a multi-arm one both
+ * read through, so nothing downstream needs to special-case the ungrouped
+ * case.
+ */
+export function toSurvivalGroups(ds: Dataset): SurvivalGroup[] {
+  const hasGroupColumn = ds.columns.length >= 3;
+  const byGroup = new Map<string, { times: number[]; events: boolean[] }>();
+
+  for (const row of ds.rows) {
+    const time = row[0];
+    const eventFlag = row[1];
+    if (typeof time !== 'number' || typeof eventFlag !== 'number') continue;
+    const groupValue = hasGroupColumn ? row[2] : null;
+    const groupName = groupValue === null ? ds.name : String(groupValue);
+    let bucket = byGroup.get(groupName);
+    if (!bucket) {
+      bucket = { times: [], events: [] };
+      byGroup.set(groupName, bucket);
+    }
+    bucket.times.push(time);
+    bucket.events.push(eventFlag !== 0);
+  }
+
+  return [...byGroup.entries()].map(([name, g]) => ({ name, ...g }));
 }
 
 /**

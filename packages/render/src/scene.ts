@@ -82,7 +82,14 @@ export type SceneRole =
    * a role-count assertion for a discrete swatch list must not be silently
    * widened by dozens of ramp strips.
    */
-  | 'colorbar';
+  | 'colorbar'
+  /**
+   * A tick where a censored subject leaves a Kaplan–Meier curve. Kept
+   * distinct from 'threshold-line'/'error-bar' for the same reason
+   * 'point-cloud' is kept distinct from 'image' — a role-count assertion for
+   * one must not be silently widened by another.
+   */
+  | 'censor-mark';
 
 export const el = (
   tag: string,

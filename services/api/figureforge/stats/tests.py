@@ -257,6 +257,105 @@ def _pairwise(
     return out
 
 
+def _logrank_terms(
+    times_list: list[np.ndarray], events_list: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-group observed/expected event counts and the log-rank covariance matrix.
+
+    The standard Mantel-Haenszel construction — what R's `survival::survdiff`
+    computes. At every time any group has an event, that time's events are
+    allocated across groups in proportion to each group's share of the
+    combined risk set (`expected`), and the multivariate hypergeometric
+    variance at that time is accumulated into a full K x K covariance matrix
+    — the same "at risk" definition (a subject's own time, event or
+    censoring, is >= t) `packages/plots`'s `kaplanMeier` estimator uses.
+    """
+    k = len(times_list)
+    event_times = [t[e] for t, e in zip(times_list, events_list, strict=True) if np.any(e)]
+    all_times = np.unique(np.concatenate(event_times)) if event_times else np.array([])
+
+    observed = np.zeros(k)
+    expected = np.zeros(k)
+    cov = np.zeros((k, k))
+
+    for t in all_times:
+        at_risk = np.array([np.sum(times >= t) for times in times_list], dtype=float)
+        d_g = np.array(
+            [
+                np.sum((times == t) & events)
+                for times, events in zip(times_list, events_list, strict=True)
+            ],
+            dtype=float,
+        )
+        n = at_risk.sum()
+        d = d_g.sum()
+        if n <= 0:
+            continue
+        observed += d_g
+        expected += d * (at_risk / n)
+        # A single subject at risk contributes no variance (n - 1 = 0), and a
+        # time with no event contributes neither an expected share nor any
+        # variance — d = 0 makes the `factor` term vanish on its own.
+        if n > 1:
+            factor = d * (n - d) / (n - 1)
+            p = at_risk / n
+            cov += factor * (np.diag(p) - np.outer(p, p))
+
+    return observed, expected, cov
+
+
+def _logrank_chi2(
+    observed: np.ndarray, expected: np.ndarray, cov: np.ndarray
+) -> tuple[float, int, float]:
+    """Reduce K groups' observed/expected/covariance to a chi-square statistic.
+
+    `cov`'s rows and columns each sum to zero by construction (a fixed number
+    of events at each time is *reallocated*, not created), so it is singular
+    and one group is dropped before inverting — the standard reduction, and
+    what R's `survdiff` does. Singular even after dropping a group means the
+    groups' risk sets never genuinely overlap; refused rather than pseudo-
+    inverted into a number that would not mean what a chi-square usually means.
+    """
+    k = len(observed)
+    diff = (observed - expected)[:-1]
+    sub_cov = cov[:-1, :-1]
+    df = k - 1
+    try:
+        inv = np.linalg.inv(sub_cov)
+    except np.linalg.LinAlgError as err:
+        raise ValueError(
+            "Log-rank test: these groups' risk sets never overlap; nothing to compare."
+        ) from err
+    chi2 = float(diff @ inv @ diff)
+    p = float(sps.chi2.sf(chi2, df))
+    return chi2, df, p
+
+
+def _logrank_pairwise(
+    na: str, times_a: np.ndarray, events_a: np.ndarray,
+    nb: str, times_b: np.ndarray, events_b: np.ndarray,
+) -> Comparison:
+    observed, expected, cov = _logrank_terms([times_a, times_b], [events_a, events_b])
+    chi2, df, p = _logrank_chi2(observed, expected, cov)
+    # The observed/expected ratio hazard-ratio approximation (Peto & Peto
+    # 1972) — not a Cox-model MLE, but a standard, widely cited estimate built
+    # from the same quantities the log-rank statistic already computes.
+    # Documented as an approximation rather than presented as the thing it
+    # resembles, the same stance Fisher's odds ratio takes on its own
+    # documented divergence from R's conditional MLE.
+    hr = (
+        (observed[0] / expected[0]) / (observed[1] / expected[1])
+        if expected[0] > 0 and expected[1] > 0 and observed[1] > 0
+        else float("nan")
+    )
+    return Comparison(
+        na, nb, chi2, p, p, float(df), None,
+        float(hr) if np.isfinite(hr) else None,
+        "Hazard ratio (O/E)" if np.isfinite(hr) else None,
+        [len(times_a), len(times_b)],
+    )
+
+
 def run_test(
     test: str,
     groups: dict[str, Sequence[float]],
@@ -266,6 +365,7 @@ def run_test(
     welch: bool = True,
     x: Sequence[float] | None = None,
     x_name: str = "x",
+    events: dict[str, Sequence[float]] | None = None,
 ) -> TestOutcome:
     if x is not None:
         # A series correlated against its own x column (e.g. a scatter plot's
@@ -290,7 +390,34 @@ def run_test(
         mask = np.isfinite(xs) & np.isfinite(ys)
         groups = {x_name: xs[mask].tolist(), series_name: ys[mask].tolist()}
 
-    cleaned = {name: _clean(values) for name, values in groups.items()}
+    cleaned_events: dict[str, np.ndarray] | None = None
+    if test == "log-rank":
+        if events is None or set(events) != set(groups):
+            raise ValueError(
+                "Log-rank test needs a matching 0/1 event flag for every subject in "
+                "every group."
+            )
+        cleaned = {}
+        cleaned_events = {}
+        for name, times in groups.items():
+            flags = events[name]
+            if len(flags) != len(times):
+                raise ValueError(
+                    f'Group "{name}" has {len(times)} times but {len(flags)} event flags; '
+                    "they must be index-aligned and the same length."
+                )
+            # Times and their event flags are cleaned together, not
+            # independently — a NaN in either column must drop the whole
+            # pair, the same rule the `x`/`x_name` pairing follows above;
+            # cleaning each column on its own would shift a time onto the
+            # wrong flag.
+            times_arr = np.asarray(times, dtype=float)
+            flags_arr = np.asarray(flags, dtype=float)
+            mask = np.isfinite(times_arr) & np.isfinite(flags_arr)
+            cleaned[name] = times_arr[mask]
+            cleaned_events[name] = flags_arr[mask] != 0
+    else:
+        cleaned = {name: _clean(values) for name, values in groups.items()}
 
     if len(cleaned) < 2:
         raise ValueError("At least two groups are required.")
@@ -310,10 +437,12 @@ def run_test(
     # Assumption checks read each group as a sample of measurements. A
     # contingency row is a set of *category counts*, so "n = 2" would mean two
     # categories, not two observations — a warning that is simply about the
-    # wrong thing. The count tests carry their own validation instead.
+    # wrong thing. The count tests carry their own validation instead. A
+    # log-rank "group" is a set of follow-up times, not measurements either —
+    # Shapiro/Levene say nothing meaningful about a time-to-event sample.
     counts = test in ("chi-square", "fisher")
-    warnings = [] if counts else check_assumptions(cleaned, parametric)
-    outcome = _dispatch(test, cleaned, alternative, alpha, welch)
+    warnings = [] if (counts or test == "log-rank") else check_assumptions(cleaned, parametric)
+    outcome = _dispatch(test, cleaned, alternative, alpha, welch, cleaned_events)
     outcome.warnings = warnings + outcome.warnings
 
     adjusted = apply_correction([c.p for c in outcome.comparisons], correction, alpha)
@@ -331,6 +460,7 @@ def _dispatch(
     alternative: Alternative,
     alpha: float,
     welch: bool,
+    events: dict[str, np.ndarray] | None = None,
 ) -> TestOutcome:
     names = list(groups)
 
@@ -523,6 +653,18 @@ def _dispatch(
                 float(df), ci, float(fit.rvalue ** 2), "R²", [len(x), len(y)],
             )
         ])
+
+    if test == "log-rank":
+        assert events is not None  # run_test validates this before dispatch
+        times_list = [groups[n] for n in names]
+        events_list = [events[n] for n in names]
+        observed, expected, cov = _logrank_terms(times_list, events_list)
+        chi2, df, p = _logrank_chi2(observed, expected, cov)
+
+        def run(na, a, nb, b):
+            return _logrank_pairwise(na, a, events[na], nb, b, events[nb])
+
+        return TestOutcome(_pairwise(groups, run), Omnibus(chi2, p, [float(df)]))
 
     if test in ("chi-square", "fisher"):
         # Groups are rows of a contingency table.

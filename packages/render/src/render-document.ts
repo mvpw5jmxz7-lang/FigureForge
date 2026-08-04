@@ -25,6 +25,7 @@ import {
   scaleBarWidthMm,
   toMatrix,
   toSeries,
+  toSurvivalGroups,
   type ArrowNode,
   type AxisSpec,
   type BracketNode,
@@ -41,6 +42,7 @@ import {
   type ScaleBarNode,
   type ShapeNode,
   type Stroke,
+  type SurvivalGroup,
   type TextNode,
   type TextStyle,
   type VolcanoCategory,
@@ -53,6 +55,7 @@ import {
   formatTick,
   histogramBins,
   histogramMarks,
+  kaplanMeier,
   makeBandScale,
   makeGroupedBandScale,
   makeScale,
@@ -64,6 +67,9 @@ import {
   volcanoCategory,
   xyMarks,
   type NumericScale,
+  type PointGeometry,
+  type SurvivalStep,
+  type XySeriesMarks,
 } from '@figureforge/plots';
 import { el, group, round, text, translate, type SceneNode, type SceneRole } from './scene.js';
 import { estimateTextHeightMm, estimateTextWidthMm, truncateToWidth } from './text-width.js';
@@ -1566,6 +1572,186 @@ function requiredMargin(
   };
 }
 
+/**
+ * One arm's Kaplan–Meier curve, in the same `XySeriesMarks` shape every other
+ * continuous plot type's series already carries — built directly from
+ * `kaplanMeier`'s step output rather than through `xyMarks`, since a subject
+ * row is not a pair `xyMarks`'s generic filtering/pairing logic has any
+ * reason to know about.
+ */
+function survivalSeriesMarks(
+  name: string,
+  color: string,
+  steps: readonly SurvivalStep[],
+  xScale: NumericScale,
+  yScale: NumericScale,
+  showCI: boolean,
+): XySeriesMarks {
+  /*
+   * A step function as a bare polyline: hold at the previous survival until
+   * the new time, then drop — two vertices per step after the first, rather
+   * than any curve/interpolation logic in the renderer. `renderContinuousMarks`
+   * already builds every other line this way, from an ordered vertex array.
+   */
+  const linePath: { x: number; y: number }[] = [];
+  steps.forEach((step, i) => {
+    const x = xScale.scale(step.time);
+    if (!Number.isFinite(x)) return;
+    if (i > 0) {
+      const holdY = yScale.scale(steps[i - 1]!.survival);
+      if (Number.isFinite(holdY)) linePath.push({ x, y: holdY });
+    }
+    const y = yScale.scale(step.survival);
+    if (Number.isFinite(y)) linePath.push({ x, y });
+  });
+
+  /*
+   * One tick per censoring *time*, at the curve's height right after any
+   * event at that same time has already dropped it — not one per censored
+   * subject, which would draw indistinguishable overlapping ticks for
+   * simultaneous censorings.
+   */
+  const censorPoints: PointGeometry[] = steps
+    .filter((step) => step.censored > 0)
+    .map((step) => ({
+      x: xScale.scale(step.time),
+      y: yScale.scale(step.survival),
+      value: step.survival,
+    }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+  const band: XySeriesMarks['band'] = showCI
+    ? steps
+        .map((step) => ({
+          x: xScale.scale(step.time),
+          lowY: yScale.scale(step.lower),
+          highY: yScale.scale(step.upper),
+        }))
+        .filter(
+          (p) => Number.isFinite(p.x) && Number.isFinite(p.lowY) && Number.isFinite(p.highY),
+        )
+    : null;
+
+  return {
+    name,
+    color,
+    points: [],
+    linePath: linePath.length > 1 ? linePath : null,
+    band: band && band.length > 1 ? band : null,
+    capHalfWidthMm: 0,
+    replicatePoints: [],
+    censorPoints,
+    errorLabel: showCI ? '95% CI' : '',
+    n: steps.reduce((sum, s) => sum + s.events + s.censored, 0),
+    topMm: Math.min(
+      linePath.length > 0 ? Math.min(...linePath.map((p) => p.y)) : 0,
+      band && band.length > 0 ? Math.min(...band.map((p) => p.highY)) : Infinity,
+    ),
+  };
+}
+
+function survivalGeometryForMargin(
+  node: PlotNode,
+  groups: readonly SurvivalGroup[],
+  margin: PlotGeometryBase['margin'],
+): ContinuousPlotGeometry | null {
+  const plotWidth = Math.max(0, node.frame.width - margin.left - margin.right);
+  const plotHeight = Math.max(0, node.frame.height - margin.top - margin.bottom);
+  if (plotWidth <= 0 || plotHeight <= 0) return null;
+
+  const allTimes = groups.flatMap((g) => g.times).filter(Number.isFinite);
+  if (allTimes.length === 0) return null;
+
+  const xScale = makeScale({
+    domain: resolveDomain(allTimes, {
+      min: node.x.min,
+      max: node.x.max,
+      includeZero: true,
+      padFraction: 0.08,
+      kind: node.x.scale,
+    }),
+    rangeMm: [0, plotWidth],
+    tickStep: node.x.tickStep,
+    kind: node.x.scale,
+    ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+  });
+
+  /*
+   * A survival probability cannot exceed 1 or fall below 0 — the y domain is
+   * a hard construction choice, not a default, and ignores `node.y.min/max`
+   * and `node.y.scale` entirely. The Inspector hides those controls for this
+   * plot type for the same reason.
+   */
+  const yScale = makeScale({
+    domain: { min: 0, max: 1 },
+    rangeMm: [plotHeight, 0],
+    tickStep: node.y.tickStep,
+    kind: 'linear',
+  });
+
+  const colors = paletteColors(node.palette, groups.length);
+  const showCI = node.showSurvivalCI === true;
+  const series = groups.map((g, i) =>
+    survivalSeriesMarks(
+      g.name,
+      colors[i % Math.max(1, colors.length)] ?? '#000000',
+      kaplanMeier(g.times, g.events),
+      xScale,
+      yScale,
+      showCI,
+    ),
+  );
+
+  return { kind: 'continuous', margin, plotWidth, plotHeight, xScale, yScale, series, bins: [] };
+}
+
+/**
+ * Geometry for a Kaplan–Meier plot.
+ *
+ * A subject row is not a replicate to pool or a group to compare, so this
+ * never goes through `toSeries` — it reads the dataset via
+ * `toSurvivalGroups` and builds its series directly from `kaplanMeier`'s step
+ * output. It still returns an ordinary `kind: 'continuous'` geometry: a time
+ * axis and a probability axis are exactly what `ContinuousPlotGeometry`
+ * already models, unlike a heatmap's axis-less grid, so `renderAxes`,
+ * `requiredMargin` and the legend all apply completely unmodified.
+ *
+ * Its own two-pass margin growth, mirroring `computePlotGeometry`'s own loop
+ * rather than sharing it, since that loop calls `toSeries` before this
+ * function is ever reached.
+ */
+function survivalGeometry(
+  node: PlotNode,
+  dataset: Dataset,
+  theme: Theme,
+): ContinuousPlotGeometry | null {
+  const groups = toSurvivalGroups(dataset);
+  if (groups.length === 0) return null;
+
+  const themeMargin = theme.spacing.plotMarginMm;
+  const first = survivalGeometryForMargin(node, groups, themeMargin);
+  if (!first) return null;
+
+  const needed = requiredMargin(node, theme, first);
+  if (
+    needed.left <= themeMargin.left + 0.01 &&
+    needed.bottom <= themeMargin.bottom + 0.01 &&
+    needed.right <= themeMargin.right + 0.01 &&
+    needed.top <= themeMargin.top + 0.01
+  ) {
+    return first;
+  }
+
+  const grown = {
+    ...themeMargin,
+    left: Math.max(themeMargin.left, needed.left),
+    bottom: Math.max(themeMargin.bottom, needed.bottom),
+    right: Math.max(themeMargin.right, needed.right),
+    top: Math.max(themeMargin.top, needed.top),
+  };
+  return survivalGeometryForMargin(node, groups, grown) ?? first;
+}
+
 function computePlotGeometry(
   node: PlotNode,
   doc: FigureDocument,
@@ -1582,6 +1768,17 @@ function computePlotGeometry(
    */
   if (GRID_PLOT_TYPES.has(node.plotType)) {
     return heatmapGeometry(node, dataset, theme);
+  }
+
+  /*
+   * A survival curve never goes through `toSeries` either — a subject row is
+   * not a replicate to pool, and `toSeries`'s minimal `'survival'` case
+   * carries no event/censoring flag at all. Unlike a heatmap this still
+   * returns an ordinary `kind: 'continuous'` geometry, since a time axis and
+   * a probability axis are exactly what that shape already models.
+   */
+  if (node.plotType === 'survival') {
+    return survivalGeometry(node, dataset, theme);
   }
 
   const series = toSeries(dataset);
@@ -2465,7 +2662,7 @@ function renderContinuousMarks(
      * them. Only `'band'` fills; anything else, including an absent setting,
      * draws capped bars, which is what the Inspector has always said it would.
      */
-    if (s.band && s.band.length > 1 && node.errorDisplay === 'band') {
+    if (s.band && s.band.length > 1 && (node.errorDisplay === 'band' || node.plotType === 'survival')) {
       /*
        * One closed polygon — up the upper edge and back along the lower —
        * rather than a ribbon per segment: two adjacent translucent shapes would
@@ -2553,6 +2750,29 @@ function renderContinuousMarks(
             ...(shape ? { shape } : {}),
             ...(point.label !== undefined ? { label: point.label } : {}),
           }),
+        );
+      }
+    }
+
+    /*
+     * A short tick where a subject left the curve without an event — what
+     * makes a Kaplan–Meier curve honest about follow-up loss. Absent is
+     * `true`, the opposite default from `showReplicates`/`showCellValues`:
+     * this is what the mark exists to disclose, not clutter to opt into.
+     */
+    if (node.plotType === 'survival' && node.showCensorMarks !== false) {
+      const halfHeightMm = node.pointSizeMm / 2;
+      for (const point of s.censorPoints) {
+        markChildren.push(
+          el('path', {
+            d:
+              `M${round(point.x)} ${round(point.y - halfHeightMm)} ` +
+              `L${round(point.x)} ${round(point.y + halfHeightMm)}`,
+            fill: 'none',
+            stroke: s.color,
+            'stroke-width': theme.stroke.dataMm,
+            'stroke-linecap': 'round',
+          }, undefined, { role: 'censor-mark' }),
         );
       }
     }

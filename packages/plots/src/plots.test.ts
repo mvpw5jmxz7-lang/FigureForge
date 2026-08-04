@@ -12,6 +12,7 @@ import {
   makeGroupedBandScale,
   makeScale,
   mulberry32,
+  kaplanMeier,
   negLog10,
   normalizeCellValue,
   resolveDomain,
@@ -681,5 +682,88 @@ describe('point layout', () => {
 
   it('leaves well-separated points on the centre line', () => {
     expect(beeswarmOffsets([0, 50, 100], 1)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('Kaplan-Meier estimator', () => {
+  /*
+   * A small, hand-worked example — 5 subjects, one censored at t=2 alongside
+   * an event, chosen to exercise a tie between an event and a censoring at
+   * the same time (the case that decides "events before censoring" ordering)
+   * and a final time that exhausts the risk set (survival hits exactly 0).
+   *
+   *   t=1: 1/5 at risk have the event  -> S = 1 * 4/5        = 0.8
+   *   t=2: 1 event + 1 censored of 4   -> S = 0.8 * 3/4      = 0.6
+   *   t=3: 1/2 at risk have the event  -> S = 0.6 * 1/2      = 0.3
+   *   t=5: the last subject's event    -> S = 0.3 * 0/1      = 0
+   */
+  const TIMES = [1, 2, 2, 3, 5];
+  const EVENTS = [true, true, false, true, true];
+
+  it('starts at a synthetic (0, 1) anchor', () => {
+    const steps = kaplanMeier(TIMES, EVENTS);
+    expect(steps[0]).toEqual({
+      time: 0,
+      survival: 1,
+      lower: 1,
+      upper: 1,
+      atRisk: 5,
+      events: 0,
+      censored: 0,
+      censoringOnly: false,
+    });
+  });
+
+  it('computes the product-limit survival estimate at each distinct time', () => {
+    const steps = kaplanMeier(TIMES, EVENTS);
+    expect(steps.map((s) => s.time)).toEqual([0, 1, 2, 3, 5]);
+    expect(steps.map((s) => s.survival)).toEqual([1, 0.8, 0.6000000000000001, 0.30000000000000004, 0]);
+  });
+
+  it('groups a tied event and censoring into one row, and shrinks the risk set by both', () => {
+    const steps = kaplanMeier(TIMES, EVENTS);
+    const atTwo = steps.find((s) => s.time === 2)!;
+    expect(atTwo.atRisk).toBe(4); // still at risk just before t=2
+    expect(atTwo.events).toBe(1);
+    expect(atTwo.censored).toBe(1);
+    expect(atTwo.censoringOnly).toBe(false); // an event also occurred here
+    const atThree = steps.find((s) => s.time === 3)!;
+    expect(atThree.atRisk).toBe(2); // 4 - (1 event + 1 censored) at t=2
+  });
+
+  it('flags a time with only censoring, and leaves the curve unchanged there', () => {
+    const steps = kaplanMeier([1, 4], [true, false]);
+    const atFour = steps.find((s) => s.time === 4)!;
+    expect(atFour.censoringOnly).toBe(true);
+    expect(atFour.survival).toBeCloseTo(steps.find((s) => s.time === 1)!.survival, 12);
+  });
+
+  it('matches a hand-computed Greenwood log-transform 95% CI', () => {
+    const steps = kaplanMeier(TIMES, EVENTS);
+    const atOne = steps.find((s) => s.time === 1)!;
+    expect(atOne.lower).toBeCloseTo(0.516125760342172, 9);
+    expect(atOne.upper).toBe(1); // clamped: the raw upper bound exceeds 1
+    const atTwo = steps.find((s) => s.time === 2)!;
+    expect(atTwo.lower).toBeCloseTo(0.2933164316383264, 9);
+    const atThree = steps.find((s) => s.time === 3)!;
+    expect(atThree.lower).toBeCloseTo(0.06305448425513632, 9);
+  });
+
+  it('collapses the CI to [0, 0] once the curve reaches zero', () => {
+    const steps = kaplanMeier(TIMES, EVENTS);
+    const last = steps[steps.length - 1]!;
+    expect(last.survival).toBe(0);
+    expect(last.lower).toBe(0);
+    expect(last.upper).toBe(0);
+  });
+
+  it('is unaffected by subject order — grouping is by time, not row position', () => {
+    const shuffled = kaplanMeier([5, 3, 2, 2, 1], [true, true, false, true, true]);
+    const original = kaplanMeier(TIMES, EVENTS);
+    expect(shuffled).toEqual(original);
+  });
+
+  it('returns an empty step list for no subjects', () => {
+    expect(kaplanMeier([], [])).toEqual([]);
   });
 });

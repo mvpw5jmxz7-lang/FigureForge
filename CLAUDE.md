@@ -10,8 +10,8 @@ Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
 could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of
 reported fixes, the DOM-volume mechanism phase 7 needed first, and phase 7's
-first two chart types (volcano plots, heatmaps); PCA, UMAP and survival are
-not, nor is phase 8 or 9.**
+first three chart types (volcano plots, heatmaps, survival curves); PCA and
+UMAP are not, nor is phase 8 or 9.**
 
 ---
 
@@ -195,6 +195,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 7 stage 3 (survival curves):** 447 TypeScript tests,
+111 Python tests, typecheck and lint clean, 46-check acceptance run
+unaffected — see "Phase 7, Stage 3 — survival curves" below.
 
 **Verified after phase 7 stage 2 (heatmaps):** 423 TypeScript tests, 105
 Python tests, typecheck and lint clean, 46-check acceptance run unaffected —
@@ -1526,6 +1530,175 @@ disclosure), 105 Python tests unchanged, typecheck and lint clean, 46-check
 acceptance run unaffected (no existing fixture uses the new format or plot
 type).
 
+### Phase 7, Stage 3 — survival curves
+
+Phase 7's own roadmap (written during stage 1's planning) assumed survival
+would need "a new `PlotGeometry` kind (step function + censoring)," the same
+treatment heatmap needed. Research before implementation showed that
+assumption was wrong: a Kaplan–Meier curve has a numeric x (time) and a
+numeric y (survival probability) — exactly `ContinuousPlotGeometry`'s shape —
+so this stage is architecturally closer to volcano's "extend, don't replace"
+pattern than to heatmap's new-geometry-kind one. What genuinely was new: a
+subject-level `DataFormat` with no existing positional-column precedent, the
+Kaplan–Meier estimator itself (pure `packages/plots` math, no server
+compute), and a log-rank test — the one addition in this app with **no SciPy
+implementation to call at all**, hand-implemented and verified the same way
+every other test here is.
+
+- **`DataFormat` gained `'survival'`: `Time, Event, Group?`** — one row per
+  subject, `Event` a 1/0 flag, `Group` optional. Never auto-inferred, for the
+  same reason `differential`/`matrix` never are: a bare three-numeric-column
+  table reads exactly as plausibly as `replicate` (three repeated
+  measurements). The optional trailing `Group` column has no direct
+  precedent in this file — every existing format is fixed-position/
+  fixed-count or a repeated-meaning block — so `toSurvivalGroups` checks
+  `columns.length >= 3` for it directly rather than reusing `hasRowNames`'s
+  boolean-flag shape, which reinterprets column 0 rather than adding a role.
+  A dedicated accessor bypasses `Series` entirely, the same call `toMatrix`
+  made for heatmaps: a subject row is not a replicate to pool, and `Series`
+  has nowhere to carry an event/censoring flag.
+- **No new `PlotGeometry` kind — `survivalGeometry` returns an ordinary
+  `kind: 'continuous'`.** `renderContinuousMarks` already builds its
+  connecting line from a bare, ordered vertex array with no curve logic, so a
+  step function needed only a geometry-builder that emits two vertices per
+  step (hold at the previous survival, then drop) — `survivalSeriesMarks` in
+  `render-document.ts`, called from a new `computePlotGeometry` early branch
+  (before `toSeries`, mirroring heatmap's `GRID_PLOT_TYPES` branch) that reads
+  `toSurvivalGroups` + a new `packages/plots/src/survival.ts::kaplanMeier`
+  instead. Because the result is an ordinary continuous geometry,
+  `requiredMargin`, `renderAxes`, `renderNumericXTicks` and the per-series
+  legend all apply **completely unmodified** — heatmap needed its own
+  `requiredHeatmapMargin` because a `GridPlotGeometry` doesn't satisfy
+  `requiredMargin`'s type; a survival plot's geometry does, so
+  `survivalGeometry` reuses the real function, not a parallel one, for its
+  own two-pass margin growth.
+- **The y domain is hardcoded at `[0, 1]`, never `resolveDomain`-derived and
+  never reading `node.y.min/max`.** A survival probability cannot exceed 1 or
+  fall below 0 — the same "hard construction choice, not a default" stance
+  the histogram/volcano zero-anchoring already takes, just absolute rather
+  than one-sided. The Inspector hides the Y-axis numeric controls for
+  survival with the same `numeric={node.plotType !== 'heatmap' &&
+  node.plotType !== 'survival'}` pattern heatmap's own gap in `AxisFields`
+  established.
+- **`XySeriesMarks` gained `censorPoints`, always present and empty except on
+  a survival plot** — the same "inert until populated" shape
+  `replicatePoints` already has. One tick per censoring *time*, not per
+  censored subject: two subjects censored at the same time would draw two
+  indistinguishable overlapping ticks, so `survivalSeriesMarks` groups by
+  time the same way `kaplanMeier` itself does. `node.showCensorMarks`
+  defaults to **`true`** — the opposite default from `showReplicates`/
+  `showCellValues` — because a censoring tick is what makes a curve honest
+  about follow-up loss, not a clutter risk to opt into. New `SceneRole:
+  'censor-mark'`, kept distinct for the same role-count-isolation reason
+  `'threshold-line'`/`'point-cloud'` are.
+- **The confidence band reuses the existing `band`/error-interval polygon
+  machinery outright**, computed via a Greenwood log-transform CI in
+  `kaplanMeier` (matching R's `survfit` default `conf.type = "log"`, not the
+  plain linear form, which can run outside `[0, 1]`) and drawn through one
+  small change to `renderContinuousMarks`'s existing band-vs-whiskers
+  condition: `node.errorDisplay === 'band' || node.plotType === 'survival'`
+  — survival's CI is always a polygon, never capped whiskers, since a whisker
+  every few millimetres along a continuous curve reads as noise, not a
+  measurement. `node.showSurvivalCI` defaults to **`false`**: with three or
+  more arms, overlapping bands read as clutter before they read as data, the
+  same opt-in stance `showReplicates` takes.
+- **The ordinary per-series Colours/palette block is kept, not replaced.**
+  Unlike volcano and heatmap, a survival curve's colour is exactly a named
+  series colour — each arm is a group, coloured the ordinary way — so there
+  is nothing computed to key a dedicated control off. `'survival'` joined
+  `CONTINUOUS_X_PLOT_TYPES` for this same reason: that registry is not only
+  "does this type read `Series.x`" (survival bypasses `Series` entirely) but
+  also drives numeric x-axis ticks by default (`addPlot`) and blocks ordinary
+  group-comparison tests in the Stats tab in favour of the log-rank
+  allow-list — both correct for a real numeric time axis, and both free once
+  survival is in the set, the same way volcano already relies on it.
+- **Marker shape/size/fill/border, bar-width/gap and the ordinary
+  error-bars/centre section are all hidden for survival** — none of them
+  read for a stepped line with no per-point markers, the same "a control
+  that visibly does nothing is a defect" stance volcano/heatmap established.
+  The second-y-axis checkbox is withheld too: comparing two curves against
+  different probability scales would defeat the entire point of a comparison
+  plot, a sharper version of the reasoning already documented for
+  categorical plots.
+- **A "number at risk" table under the x-axis — a real, common convention
+  for published KM figures — is deliberately deferred**, the same restraint
+  heatmap's stage showed toward its import-preview group-block
+  visualization. It is a genuinely new layout problem (a small grid of
+  counts keyed to x-axis tick positions), and not needed to make the curve
+  itself correct.
+
+#### The log-rank test
+
+- **Hand-implemented Mantel–Haenszel, general K-group** (matching what R's
+  `survival::survdiff` computes), not a 2-group-only restriction: observed
+  vs. expected events per group at each combined event time, reduced via a
+  full covariance matrix to a chi-square statistic through `scipy.stats.chi2`
+  — only the log-rank *statistic* has no SciPy implementation, not the
+  reference distribution. Adding `lifelines` as a dependency was the real
+  alternative here and was rejected: the formula is closed-form and
+  well-published, not something that needs approximating, and the project
+  already prefers pinned, minimal images over speculative dependencies.
+- **`run_test`/`_dispatch` gained one more additive-only optional
+  parameter, `events`**, the same shape `x`/`x_name` were added in phase 5 —
+  the existing call shapes must keep behaving exactly as before. Cleaned in
+  `run_test` by pairing each group's times with its event flags and dropping
+  a row if either is non-finite, the same "clean pairs together" rule the
+  `x`/`x_name` path already follows, not two independent per-column cleans
+  that could drift out of alignment.
+- **Verified against R's built-in `survival::aml` dataset** (Miller 1997,
+  Maintained vs. Nonmaintained chemotherapy) — `survdiff(Surv(time, status) ~
+  x, data = aml)` reports Chisq = 3.4 on 1 df, P = 0.07; this implementation
+  computes 3.396, P = 0.0653. Because SciPy has nothing to wrap here, unlike
+  every other test in this app, this comparison is not a wrapper-correctness
+  check — it is what proves the hand-written formula is right at all, not
+  merely self-consistent.
+- **Response shape follows `anova-rm`'s "omnibus plus pairwise" precedent
+  exactly**: the K-group chi-square as `Omnibus`, a 2-group log-rank between
+  every pair as `Comparison`s, both returned together from the same
+  `TestOutcome` shape every other test already uses. Each pairwise
+  `Comparison` also reports a hazard-ratio approximation (`Hazard ratio
+  (O/E)`, Peto & Peto 1972) built from the same observed/expected quantities
+  the statistic already computes — not a Cox-model MLE, and documented as an
+  approximation rather than presented as the thing it resembles, the same
+  stance Fisher's odds ratio already takes on its own documented divergence
+  from R's conditional MLE.
+- **No brackets.** A Kaplan–Meier plot's x axis is continuous time, not
+  discrete category bands, the identical shape mismatch
+  `blockedByContinuousAxis` already encodes for scatter/line/histogram/
+  volcano. Follows the existing `xyCorrelation` precedent exactly: the
+  result is a p-value/methods-sentence annotation with no `addBracket` call.
+- **The Stats tab's gate is an allow-list, the inverse of
+  `nested`/`differential`/`matrix`'s refusal pattern**: log-rank is a
+  legitimate test here, so instead of adding a `survival` refusal flag,
+  `offeredTests` is extended so log-rank is offered *only* for a
+  `'survival'`-format dataset and every other test is withheld for one — the
+  same `COUNT_TESTS`-style gating chi-square/Fisher already use, inverted.
+  `StatTest` gained `'log-rank'`; `analysisInputHash` gained one more
+  additive-only optional parameter for event flags, the same discipline
+  `x` was held to in phase 5 — the 2- and 3-argument call sites must keep
+  hashing exactly as before.
+
+Driven in a real browser: a tab-separated `Time,Event,Arm` paste of the
+`aml` dataset was never auto-suggested as the layout (`Detect` stayed
+selected until "Time, event, group (survival)" was chosen explicitly), the
+panel opened as a Kaplan–Meier curve with the ordinary Colours block still
+in place, **2** stepped curves drawn (Maintained, Nonmaintained) with **5**
+censoring ticks, toggling the confidence band added **2** new shaded
+polygons (one per arm, no per-point whiskers), the Test dropdown
+auto-selected log-rank the moment the survival plot was selected — even
+before the Stats tab had ever been mounted this session, the specific case
+a naive "sync on change" echo would have missed — and running it produced
+"the result is in the table below... no bracket is drawn" with the bracket
+count on the panel unchanged. The exported PDF was a single page.
+
+**Verified:** 447 TypeScript tests (423 + 24 new: doc-model format/
+`toSurvivalGroups`/schema tests, a `kaplanMeier` suite in `packages/plots`
+verified against a hand-worked example, a new `survival.test.ts` geometry
+suite, and two parity fixtures — a two-arm curve with censoring ticks and a
+confidence band), 111 Python tests (105 + 6 new: the log-rank suite against
+the `aml` reference), typecheck and lint clean, 46-check acceptance run
+unaffected (no existing fixture uses the new format or plot type).
+
 ---
 
 ## What's next
@@ -1538,7 +1711,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | PCA, UMAP, survival — **volcano and heatmap are done**, stages 1–2 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, and heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, are patterns the remaining stages extend, not repeat — see "Phase 7, Stage 1" and "Phase 7, Stage 2" below. Survival needs the same new-geometry-kind treatment heatmap just proved; PCA/UMAP still need the unsolved "Analysis output becomes a new plottable Dataset" mechanism |
+| 7 | PCA, UMAP — **volcano, heatmap and survival are done**, stages 1–3 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, and survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, are patterns the remaining stages extend, not repeat — see "Phase 7, Stage 1", "Stage 2" and "Stage 3" below. PCA/UMAP still need the unsolved "Analysis output becomes a new plottable Dataset" mechanism |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1556,15 +1729,16 @@ Phases 5–9, with the actual entry points:
 
 ### Declared-but-missing things — check before trusting the types
 
-- **All 11 `PlotType` variants now render distinctly.** The dropdown is gated
+- **All 12 `PlotType` variants now render distinctly.** The dropdown is gated
   on what the *dataset* supports rather than on what is implemented (`typesFor`
   in `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
   supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
   series, since pooling groups invents a bimodal shape belonging to neither;
   volcano needs a single series carrying `Series.pointLabels`, which only the
-  `differential` format supplies; heatmap needs a `matrix`-format dataset,
-  the one type gated on the dataset's format directly rather than on a
-  `Series`-derivable shape, since a dense grid bypasses `Series` entirely.
+  `differential` format supplies; heatmap needs a `matrix`-format dataset and
+  survival needs a `survival`-format dataset, both gated on the dataset's
+  format directly rather than on a `Series`-derivable shape, since both bypass
+  `Series` entirely (`toMatrix`/`toSurvivalGroups`).
   `computePlotGeometry` returns null for an unsupported combination, so a
   type set some other way draws nothing rather than something wrong.
 
@@ -1578,7 +1752,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, and stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), and stage 2 by one more again (`matrix`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way twice, for the same reason — a `volcano` or `heatmap` node is unreadable by an older build, not unreadable by this one. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), and stage 3 by one more again (`survival`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times, for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

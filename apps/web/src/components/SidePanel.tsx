@@ -36,6 +36,7 @@ import {
   replaceAnalysisForPlot,
   repositionBrackets,
   toSeries,
+  toSurvivalGroups,
   xForHash,
   type Analysis,
   type Correction,
@@ -140,6 +141,11 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
     id: 'matrix',
     label: 'Matrix (rows × columns)',
     hint: 'Column 1 labels the rows, the header row labels the columns, one continuous value per cell — a gene-expression table, a correlation matrix, a distance matrix. Draws as a heatmap; not tested here, since there is no group comparison to run on a dense grid.',
+  },
+  {
+    id: 'survival',
+    label: 'Time, event, group (survival)',
+    hint: 'One row per subject: a time to event or censoring, a 1/0 event flag (1 = the event happened, 0 = censored), and an optional treatment/arm column. Draws as a Kaplan–Meier curve; the only test offered here is the log-rank test.',
   },
 ];
 
@@ -871,6 +877,7 @@ const TESTS: { id: StatTest; label: string }[] = [
   { id: 'pearson', label: 'Pearson correlation' },
   { id: 'spearman', label: 'Spearman correlation' },
   { id: 'linear-regression', label: 'Linear regression' },
+  { id: 'log-rank', label: 'Log-rank test' },
 ];
 
 const CORRECTIONS: { id: Correction; label: string }[] = [
@@ -956,18 +963,52 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     series.length === 1 &&
     series[0]?.x !== undefined &&
     !differential;
-  const blockedByContinuousAxis = continuousPlot && !xyCorrelation;
+  /*
+   * A survival curve's x is continuous time too, exactly the shape
+   * `blockedByContinuousAxis` exists to refuse group comparisons on — so
+   * log-rank needs the same carve-out `xyCorrelation` gets, for the same
+   * reason: it is the one test built for this axis shape, not a group
+   * comparison mistakenly allowed through it.
+   */
+  const survival = dataset?.format === 'survival';
+  const survivalLogRank = survival && test === 'log-rank';
+  const blockedByContinuousAxis = continuousPlot && !xyCorrelation && !survivalLogRank;
   const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
 
   // Counts and measurements take disjoint tests; see COUNT_TESTS.
   const counts = dataset !== undefined && isContingency(dataset);
-  const offeredTests = TESTS.filter((t) => COUNT_TESTS.has(t.id) === counts);
+  /*
+   * Log-rank is the only test that reads a subject's time and event flag
+   * together rather than treating a group as a plain sample of measurements
+   * — offered only for a survival-format dataset, and it is the only test
+   * offered there, the same two-way gate `COUNT_TESTS` already runs for a
+   * contingency table.
+   */
+  const offeredTests = TESTS.filter((t) => {
+    if (t.id === 'log-rank') return survival;
+    if (survival) return false;
+    return COUNT_TESTS.has(t.id) === counts;
+  });
 
   // Keep the dropdown honest when the selected plot's dataset changes kind.
   const [testEcho, setTestEcho] = useState(counts);
   if (testEcho !== counts) {
     setTestEcho(counts);
     if (COUNT_TESTS.has(test) !== counts) setTest(counts ? 'chi-square' : 'ttest-welch');
+  }
+  /*
+   * `null`, not `survival`, so the correction below always runs on this
+   * component's first render — `StatsTab` mounts fresh every time the Stats
+   * tab is opened (`{tab === 'stats' && <StatsTab .../>}`), so a survival
+   * plot can already be selected before this component exists at all, and
+   * `useState(survival)` would start "in sync" and never correct the
+   * hardcoded `'ttest-welch'` default.
+   */
+  const [survivalEcho, setSurvivalEcho] = useState<boolean | null>(null);
+  if (survivalEcho !== survival) {
+    setSurvivalEcho(survival);
+    if (survival && test !== 'log-rank') setTest('log-rank');
+    if (!survival && test === 'log-rank') setTest('ttest-welch');
   }
 
   /*
@@ -1016,6 +1057,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       );
       return;
     }
+    if (survival && !survivalLogRank) {
+      onError(
+        'A survival dataset supports only the log-rank test — every other test compares ' +
+          'measurements, and a follow-up time is not one.',
+      );
+      return;
+    }
     if (blockedByContinuousAxis) {
       onError('Group comparisons need a categorical plot; this one has a numeric x axis.');
       return;
@@ -1032,17 +1080,27 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     const options = { ...defaultAnalysisOptions(), correction };
 
     try {
+      // A subject row is not a replicate to pool, so log-rank reads through
+      // `toSurvivalGroups`, not `toSeries` — `series` here carries only the
+      // times (`toSeries`'s minimal `'survival'` case), with nowhere to
+      // carry the event flag every log-rank term needs.
+      const survivalGroups = survivalLogRank ? toSurvivalGroups(dataset) : [];
+
       const groupsPayload = xyCorrelation
         ? [{ name: series[0]!.name, values: series[0]!.values }]
         : series.map((s) => ({ name: s.name, values: s.values }));
       const xPayload = xyCorrelation
         ? { name: dataset.columns[0]?.name ?? 'x', values: series[0]!.x! }
         : undefined;
+      const eventsPayload = survivalLogRank
+        ? survivalGroups.map((g) => ({ name: g.name, values: g.events.map((e) => (e ? 1 : 0)) }))
+        : undefined;
 
       const result = await analyze({
         test,
         groups: groupsPayload,
         x: xPayload,
+        events: eventsPayload,
         alternative: options.alternative,
         correction,
         alpha: options.alpha,
@@ -1061,6 +1119,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
           { test, correction },
           series.map((s) => s.values),
           xForHash(series),
+          survivalLogRank ? survivalGroups.map((g) => g.events) : undefined,
         ),
         result,
         computedAt: new Date().toISOString(),
@@ -1089,7 +1148,9 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 
           // A correlation has no two categories to span, so there is nothing to
           // bracket — the result belongs in the table and the methods sentence.
-          if (!xyCorrelation) {
+          // A Kaplan–Meier plot's x axis is continuous time for the same
+          // reason: there is no categorical band for a bracket to anchor to.
+          if (!xyCorrelation && !survivalLogRank) {
             result.comparisons.forEach((comparison, index) => {
               if (comparison.pAdjusted > options.alpha) return;
               // Placed provisionally; the stacking is settled below, once every
@@ -1125,6 +1186,11 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         setNotice(
           `Correlation on ${panelName}: the result is in the table below. A numeric x axis has no ` +
             'categories to span, so no bracket is drawn.',
+        );
+      } else if (survivalLogRank) {
+        setNotice(
+          `Log-rank test on ${panelName}: the result is in the table below. A Kaplan–Meier ` +
+            "curve's x axis is continuous time, not discrete categories, so no bracket is drawn.",
         );
       } else if (unplaceable > 0) {
         setNotice(
@@ -1205,6 +1271,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
           This dataset is a contingency table, so only the count tests are offered — a
           t-test here would compare means of frequencies. Its categories are{' '}
           {contingencyCategories(dataset!).join(', ')}.
+        </p>
+      )}
+
+      {survival && (
+        <p className="hint">
+          This dataset is subject-level time-to-event data, so only the log-rank test is
+          offered — every other test compares measurements, and a follow-up time is not one.
         </p>
       )}
 

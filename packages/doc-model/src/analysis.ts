@@ -25,7 +25,8 @@ export type StatTest =
   | 'fisher'
   | 'pearson'
   | 'spearman'
-  | 'linear-regression';
+  | 'linear-regression'
+  | 'log-rank';
 
 export type Alternative = 'two-sided' | 'less' | 'greater';
 
@@ -175,11 +176,17 @@ export function analysisInputHash(
   options: { test: StatTest; correction: Correction },
   values: readonly (readonly number[])[],
   x?: readonly number[],
+  /**
+   * Per-subject 0/1 event flags, parallel to `values` — log-rank only, added
+   * the same additive-only way `x` was in phase 5: a 2- or 3-argument call
+   * must keep hashing exactly as before, since every already-saved project's
+   * `inputHash` was computed that way.
+   */
+  events?: readonly (readonly boolean[])[],
 ): string {
-  // The 2-argument form must keep hashing exactly as before: every already-
-  // saved project's inputHash was computed that way, and passing a 3rd
-  // argument only when x is undefined would flip every existing analysis to
-  // "stale" the moment a project is reopened.
+  if (events !== undefined) {
+    return hashInputs({ test: options.test, correction: options.correction }, values, x, events);
+  }
   return x === undefined
     ? hashInputs({ test: options.test, correction: options.correction }, values)
     : hashInputs({ test: options.test, correction: options.correction }, values, x);

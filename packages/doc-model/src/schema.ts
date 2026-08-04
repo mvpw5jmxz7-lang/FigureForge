@@ -117,6 +117,7 @@ const plotSchema = z.object({
     'histogram',
     'volcano',
     'heatmap',
+    'survival',
   ]),
   datasetId: z.string(),
   encoding: z.object({
@@ -164,6 +165,9 @@ const plotSchema = z.object({
   heatmapStops: z.array(z.string()).optional(),
   heatmapMissingColor: z.string().optional(),
   showCellValues: z.boolean().optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  showCensorMarks: z.boolean().optional(),
+  showSurvivalCI: z.boolean().optional(),
 });
 
 const imageSchema = z.object({
@@ -291,6 +295,7 @@ const datasetSchema = z.object({
     'nested',
     'differential',
     'matrix',
+    'survival',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
