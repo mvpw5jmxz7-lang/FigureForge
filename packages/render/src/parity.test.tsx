@@ -164,6 +164,23 @@ describe('adapter parity', () => {
     expect(() => renderToStaticMarkup(toReact(withHandles))).not.toThrow();
   });
 
+  it('draws grab handles dark enough to see on the page', () => {
+    // The page is white in both themes — it is paper — so a white handle with a
+    // sub-pixel border was invisible exactly where it is needed. Dark fill,
+    // light ring, which also survives a handle sitting on a dark micrograph.
+    const selected = Object.values(doc.nodes).find((n) => n.type === 'panel')!.id;
+    const handles = collectByRole(
+      renderDocument(doc, { theme: NATURE_THEME, chrome: { selectedIds: [selected] } }),
+      'resize-handle',
+    );
+
+    expect(handles).toHaveLength(8);
+    for (const handle of handles) {
+      expect(handle.attrs?.fill).toBe('#111318');
+      expect(handle.attrs?.stroke).toBe('#ffffff');
+    }
+  });
+
   it('draws box and violin marks through both adapters identically', () => {
     // The distribution types were declared in `PlotType` long before they
     // rendered, and fell through to the categorical dot path in the meantime.
@@ -405,12 +422,63 @@ describe('image and annotation nodes', () => {
       const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
       setImageCrop(draft, image.id, { x: 0.25, y: 0, width: 0.5, height: 1 });
     });
-    const image = Object.values(cropped.nodes).find((n) => n.type === 'image')!;
     const svg = toSvgString(renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }));
 
     expect(svg).toContain('clipPath');
-    // Half the source spans the frame, so the image is drawn at twice its width.
-    expect(svg).toContain(`width="${image.frame.width / 0.5}"`);
+    // No `scale`, no resampled raster: the source is placed and then clipped.
+    expect(svg).not.toContain('scale(');
+  });
+
+  it('shows the region that was cropped, and only that region', () => {
+    /*
+     * The crop halves the width of an aspect-locked 50 × 40 image, so what is
+     * kept is 25 × 40 and it is centred — an aspect-preserving image cannot
+     * fill a frame of a different shape without stretching, and stretching a
+     * micrograph misstates every distance measured on it.
+     *
+     * This is the case `preserveAspectRatio="xMidYMid meet"` used to get wrong.
+     * It centres inside the *element box*, which for a crop is the oversized
+     * one, so `meet` undid the offset exactly and the whole picture was drawn:
+     * cropping to half the width changed nothing on the page. The same
+     * arithmetic put every montage-tile crop somewhere other than its outline.
+     */
+    const cropped = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      setImageCrop(draft, image.id, { x: 0.25, y: 0, width: 0.5, height: 1 });
+    });
+    const svg = toSvgString(renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }));
+
+    expect(svg).toContain('<rect x="12.5" y="0" width="25" height="40"/>');
+    // The source is drawn at frame size and read through that window, so the
+    // visible pixels are source x ∈ [0.25, 0.75] — the outlined half.
+    expect(svg).toContain('x="0" y="0" width="50" height="40" preserveAspectRatio="none"');
+  });
+
+  it('crops a montage tile where the outline is, not where the tile is', () => {
+    /*
+     * The reported case. A montage panel sets `aspectLock: null` on purpose —
+     * several differently shaped micrographs have no one honest ratio — so a
+     * tile's frame comes from `gridCells` and its shape has nothing to do with
+     * the picture in it. That is the configuration in which the old centring
+     * was always wrong, and it is why cropping "didn't crop where the boundary
+     * is set" for several images in one panel and looked fine for one.
+     *
+     * Square tile, 1000 × 800 source, bottom-right quadrant kept.
+     */
+    const montage = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      image.frame = { x: 0, y: 0, width: 40, height: 40 };
+      setImageCrop(draft, image.id, { x: 0.5, y: 0.5, width: 0.5, height: 0.5 });
+    });
+    const svg = toSvgString(renderDocument(montage, { theme: NATURE_THEME, resolveAsset }));
+
+    // 1.25 fitted into a square letterboxes to 40 × 32, 4 mm down.
+    expect(svg).toContain('<rect x="0" y="4" width="40" height="32"/>');
+    // Drawn at 2× so the kept quadrant fills that window: source (0.5, 0.5)
+    // lands at (0, 4) — the window's own corner. `meet` used to put it at
+    // (0, 0), a quarter of the tile out of place, with the discarded half of
+    // the micrograph still on the page beside it.
+    expect(svg).toContain('x="-40" y="-28" width="80" height="64"');
   });
 
   it('draws the scale bar at its calibrated length', () => {

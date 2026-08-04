@@ -389,6 +389,16 @@ export function Canvas({
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      /*
+       * Nor when the focus is in the side panel at all.
+       *
+       * The tag test above was the whole guard, and a data-grid cell is a
+       * `<button>` — so Ctrl+V while a cell was selected fell through to the
+       * paste branch below and duplicated figure elements onto the canvas,
+       * instead of pasting the author's spreadsheet block into the table.
+       * Canvas shortcuts belong to the canvas.
+       */
+      if (target?.closest('.side-panel')) return;
 
       // Step back out of a container. Checked before the selection guard, since
       // leaving one is meaningful even with nothing selected.

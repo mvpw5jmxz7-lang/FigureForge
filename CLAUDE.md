@@ -185,14 +185,16 @@ Each guards against a specific, common reporting error:
 
 ## Current state
 
-Phases 1–6 are on `master`, plus **four** rounds of reported bugs and requests.
+Phases 1–6 are on `master`, plus **six** rounds of reported bugs and requests.
 Round 4 (crop, brackets, the Prism table shapes, the data grid, multi-image
-panels) is done — see "Round 4" below. **Round 5 is in progress on
-`feat/round-5-*`**: the import surface, one reported item at a time — stage 1
-(xy pairs), stage 2 (a shared x with replicate y), stage 3 (a symbol per
-series) and stage 4 (grouped data and its bar spacing) are merged. Run
-`git status` and `git branch` before assuming the tree is clean or which branch
-you're on.
+panels) is done — see "Round 4" below. Round 5 covered the import surface in
+four merged stages. **Round 6** is six reported bugs across the legend, the
+Data tab, the data grid, montage cropping and the selection chrome — all
+merged. Run `git status` and `git branch` before assuming the tree is clean or
+which branch you're on.
+
+**Verified after round 6:** 366 TypeScript tests, 105 Python tests, typecheck
+and lint clean, 46-check acceptance run.
 
 **Verified after round 5 stage 4:** 357 TypeScript tests, 105 Python tests,
 typecheck and lint clean, 46-check acceptance run.
@@ -1074,6 +1076,112 @@ Row names* is still offered on a grouped table where it does nothing —
 `inferFormat` short-circuits on declared blocks and `toSeries` hardcodes column 0
 as the row label.
 
+### Round 6 — six reported bugs
+
+Two of the six were *silent*: the figure looked plausible and was wrong. Four of
+the six turned out to be one arithmetic mistake each, in code that had never
+been exercised in the configuration that exposes it.
+
+- **A legend and a secondary axis were reserved with `Math.max`, then drawn in
+  the same millimetres.** `requiredMargin` took the wider of the two reserves,
+  and `renderLegend` put its origin at `margin.left + plotWidth + gap` — which
+  is exactly where the y2 ticks, labels and title start. `y2WidthMm` is now the
+  one composition of "how far the right-hand furniture reaches", read by the
+  reserve *and* by the legend origin, the same rule `scaleBarWidthMm` and
+  `analysisInputHash` exist under. The reserve stacks (`y2 + gap + legend`)
+  rather than choosing. It also fixes a second, quieter error in the same
+  arithmetic: the y2 labels are drawn at `tickLen + gap` whether or not a tick
+  is drawn there, so a tick-less or inward-ticked axis was under-reserved by
+  exactly `tickLengthMm`. There was **no y2 test coverage at all** before this.
+- **A legend below the plot advanced by the wrong quantity.** The x of entry *i*
+  was `i * width(entry_i)` — that entry's own width, not the sum of the ones
+  before it — so any key whose labels differ in length stacked later entries on
+  top of earlier ones. A long name followed by a short one printed as a smudge.
+  `legendRowLayout` is a running sum, and it wraps at the panel edge rather than
+  running off it, with `requiredMargin` reserving a row per row *it* computes.
+  The two agree because both measure against the same width: the reserve
+  repeats `computePlotGeometry`'s own `max(theme, clamped)` for `margin.left`,
+  which is what the final geometry will carry in both the grown and the
+  early-return branch. The row count depends only on `left`, never on `bottom`,
+  so it still terminates by construction.
+- **A crop centred itself against the wrong rectangle.**
+  `preserveAspectRatio="xMidYMid meet"` was applied to the *oversized* box —
+  the frame scaled by `1/crop.width, 1/crop.height` — so `meet` letterboxed the
+  source against a rectangle whose aspect the crop had already changed. Two
+  consequences, both silent: cropping an aspect-locked image to half its width
+  moved **nothing at all** (the offset and the re-centring cancelled exactly),
+  and on a montage tile every crop landed somewhere other than its outline.
+  A montage is the case that cannot avoid it — `addPanelWithImages` sets
+  `aspectLock: null` on purpose, so a tile's frame comes from `gridCells` and
+  never matches the micrograph. `renderImage` now fits the *cropped* aspect to
+  the frame itself and emits `preserveAspectRatio="none"`; the box it builds
+  already carries the source's own aspect, so nothing can stretch — the `none`
+  only stops a second centring rule from moving what the first one placed. The
+  image is clipped to the kept region and the overlays to the frame, and they
+  differ only when the crop letterboxes: clipping the picture at the frame would
+  show the source either side of what was kept, and clipping an annotation to
+  the picture would delete an arrow placed in the margin.
+  **The crop overlay was never wrong.** It draws the whole uncropped picture
+  letterboxed through `fitAspect` and outlines in source space, which is
+  correct; the renderer was the half that disagreed.
+- **`flattenCropsForExport` stopped refusing the letterboxed case.** Its aspect
+  bail-out existed precisely because the nominal crop was not what got drawn.
+  Now it is, and the baked form draws identically — an uncropped image of the
+  kept pixels letterboxes into the very same rectangle `renderImage` computes
+  for the unbaked one. So the guard and `ASPECT_TOLERANCE` are gone, and a
+  montage tile's crop no longer ships its discarded pixels to the exporter.
+- **The dataset name field collapsed to nothing.** `.rename` carried `flex: 1`
+  *and* `min-width: 0`, beside an unstyled `<select>` whose widest option
+  (`X1, Y1, X2, Y2, … (own x per series)`) is most of a 340 px panel — and a
+  `<select>` cannot shrink below its longest label, so the whole deficit came
+  out of the name. The CSS comment beside it already recorded this happening
+  once. The layout control moved to the action row, and `.rename` has a floor
+  instead of a zero: on a wrapping row a floor grows a line, which is
+  recoverable, where `min-width: 0` silently hides the field. `.list li
+  .field-row` also never had `display: flex` — only `.inspector .field-row` did
+  — so its gap and alignment had been inert.
+- **The data grid's paste handler was on the in-cell editor alone**, so it only
+  fired once a cell had been opened by clicking it: the one state a user
+  arriving with a copied table is not in. Worse, a merely *focused* cell is a
+  `<button>`, and `Canvas`'s window-level shortcut guard tested only for
+  `INPUT|TEXTAREA|SELECT` — so Ctrl+V there fell through and duplicated figure
+  elements onto the canvas. The handler is now on the grid container (React's
+  synthetic paste bubbles out of the editor, so it is still one implementation),
+  the grid takes focus on open so Ctrl+V works before anything is clicked, an
+  `anchor` cell outlives the editor and is shown, and the canvas guard now
+  ignores anything focused inside `.side-panel`. `pasteBlock` itself was correct
+  and already tested — the affordance was the whole defect.
+- **Grab handles were white with a 0.2 px border**, on a page that is white by
+  definition in both themes, because `.canvas-page` is paper. Now a dark fill
+  with a light ring, which also survives the opposite case — a handle over a
+  dark micrograph. The arrow endpoint grips keep their blue fill: they are
+  visible already, and the difference marks them as a different kind of grip.
+
+Driven in a real browser, light **and** dark, 29 checks each: eight handles
+reading `#111318` on `#ffffff`; a right-hand axis and a key on one plot, the key
+starting 4.8 px past where the tick labels end rather than on top of them; three
+long group names below a plot in **3** rows with **0** overlapping pairs and
+every row inside the panel; a dataset name field **260 px** wide; and a
+9-column block pasted with no cell opened first, landing whole (`[1][1]=21`,
+`[2][3]=33`) and growing the table 7 → 11 columns, then a second block filling
+from the cell the author clicked.
+
+The montage crop was checked by **sampling pixels**, since the failure mode is
+that the picture looks fine and shows the wrong region. A 200 × 100 source with
+four solid quadrants, tiled with a second image: before cropping, all four
+quadrants present in roughly equal measure (3367 / 3345 / 3444 / 3425 px);
+cropped to the bottom-right quarter, **13541 px of yellow and zero of the other
+three**, filling the same rectangle to within 0.3%. The exported PDF rasterised
+at 300 dpi says the same thing — 117855 yellow, zero red, green or blue — and
+its embedded raster is **100 × 50**, so the crop really was baked rather than
+shipped whole. Single page, exactly 183.0000 × 75.0000 mm, fonts embedded, the
+38-character legend label recoverable as text.
+
+**Not done, deliberately:** `.crop-window`'s own white outline and the white
+`.crop-grip` squares are unchanged — they sit on the dark `.crop-shade`, and the
+report was about panel handles. The `'auto'` legend still resolves to `'right'`
+and never picks `'bottom'` on its own.
+
 ---
 
 ## What's next
@@ -1127,7 +1235,7 @@ Phases 5–9, with the actual entry points:
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
 | **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
-| **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets, trivial crops, and the letterboxed `preserveAspectRatio` case. |
+| **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets and trivial crops. The letterboxed case was on that list until round 6, for a real reason: the drawn window was not the crop the document named, so baking the nominal rect changed the picture. `renderImage` now places the kept region itself, the two forms draw identically, and a montage tile's crop is baked like any other — measured, a 200×100 source cropped to a quadrant embeds as 100×50. |
 | **Opening a TIFF project needs the API** | The archive stores only the original bytes, so the PNG display proxy is regenerated on open. If the service is down the images render as placeholders and a message says why; everything else in the figure still works. Reversible with one optional field (`Asset.proxyPath?`) if the trade proves wrong. |
 | **16-bit micrographs export at 8 bits** | The archive keeps the 16-bit original verbatim, so reproducibility holds, but the figure ships the 8-bit proxy with the observed range mapped linearly. Correct for print, and reported in the UI rather than left to be discovered. |
 | **JPEG EXIF orientation is ignored** | A rotated JPEG displays in its stored orientation. Detecting *whether* a JPEG needs transposing requires client-side EXIF parsing, and routing every JPEG through the server for the 1% that need it is a bad trade. Not half-done on purpose. |

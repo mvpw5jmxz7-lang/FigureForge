@@ -259,6 +259,98 @@ describe('legend', () => {
   });
 });
 
+/**
+ * Where a legend below the plot puts its entries.
+ *
+ * The advance was `index * thisEntry.width` — this entry's width, not the sum
+ * of the ones before it — so any key whose labels differ in length stacked
+ * later entries back on top of earlier ones. Two long names then one short one
+ * is the common case and it printed as a single unreadable smudge.
+ */
+describe('a legend below the plot', () => {
+  /** The x of each legend text, in draw order. */
+  const labelXs = (doc: FigureDocument): { label: string; x: number }[] =>
+    collectByRole(scene(doc), 'legend')
+      .filter((n) => typeof n.text === 'string')
+      .map((n) => ({ label: String(n.text), x: Number(n.attrs?.x) }));
+
+  /** One long name then a short one — the shape that stacked them. */
+  const LOPSIDED = `,Wild type control measured at baseline,,B,
+Variant,A:Y1,A:Y2,B:Y1,B:Y2
+WT,1,1.2,3,3.2
+KO,2,2.2,4,4.2`;
+
+  /** Two long names, which cannot share an 80 mm panel. Same numbers as GROUPED. */
+  const WIDE = `,Wild type control measured at baseline,,Knock-out treated for twelve hours,
+Variant,A:Y1,A:Y2,B:Y1,B:Y2
+WT,1,1.2,3,3.2
+KO,2,2.2,4,4.2`;
+
+  it('advances by the entries before each one, not by the entry itself', () => {
+    const entries = labelXs(makeDocument(LOPSIDED, { plotType: 'bar', legend: 'bottom' }));
+    expect(entries).toHaveLength(2);
+
+    // The long name comes first, so the short one must start well past it. The
+    // old arithmetic gave the second entry `1 * width("B")` — a couple of
+    // millimetres, squarely inside the first label.
+    expect(entries[1]!.x).toBeGreaterThan(entries[0]!.x + 20);
+  });
+
+  it('wraps onto another row rather than running off the panel', () => {
+    const doc = makeDocument(WIDE, { plotType: 'bar', legend: 'bottom' });
+    const plot = plotOf(doc);
+    const entries = collectByRole(scene(doc), 'legend').filter((n) => typeof n.text === 'string');
+
+    // Two rows: the y of the second differs from the first, and neither starts
+    // past the panel edge.
+    expect(new Set(entries.map((n) => Number(n.attrs?.y))).size).toBe(2);
+    for (const entry of entries) {
+      expect(Number(entry.attrs?.x)).toBeLessThan(plot.frame.width);
+    }
+  });
+
+  /** Four groups, so the key needs four rows — past what the theme's 9 mm holds. */
+  const FOUR = (names: string[]): string => `,${names.join(',,')},
+Variant,A:Y1,A:Y2,B:Y1,B:Y2,C:Y1,C:Y2,D:Y1,D:Y2
+WT,1,1.2,3,3.2,5,5.2,7,7.2
+KO,2,2.2,4,4.2,6,6.2,8,8.2`;
+
+  const SHORT_NAMES = ['G1', 'G2', 'G3', 'G4'];
+  const LONG_NAMES = [
+    'Wild type control measured at baseline',
+    'Knock-out treated for twelve hours',
+    'Knock-out treated for twenty four hours',
+    'Wild type treated for twelve hours',
+  ];
+
+  it('reserves a row per row it draws', () => {
+    // Identical numbers, so the only thing that can move the bars is the gutter
+    // the key asked for. Four rows of key exceed the theme's own bottom margin,
+    // which one or two rows do not — which is why this needs four to show.
+    const tallest = (d: FigureDocument): number =>
+      Math.max(...collectByRole(scene(d), 'bar').map((n) => Number(n.attrs?.height)));
+
+    const oneRow = makeDocument(FOUR(SHORT_NAMES), { plotType: 'bar', legend: 'bottom' });
+    const fourRows = makeDocument(FOUR(LONG_NAMES), { plotType: 'bar', legend: 'bottom' });
+    expect(tallest(fourRows)).toBeLessThan(tallest(oneRow));
+  });
+
+  it('keeps the last row inside the panel', () => {
+    // The property the reserve exists for. Without it the extra rows are drawn
+    // past the panel edge, onto the neighbouring panel and then the page.
+    const doc = makeDocument(FOUR(LONG_NAMES), { plotType: 'bar', legend: 'bottom' });
+    const svg = toSvgString(scene(doc));
+
+    const origin = [...svg.matchAll(/translate\([\d.]+ ([\d.]+)\)/g)].map((m) => Number(m[1]));
+    const lowest = Math.max(
+      ...collectByRole(scene(doc), 'legend')
+        .filter((n) => n.tag === 'text')
+        .map((n) => Number(n.attrs?.y)),
+    );
+    expect(Math.max(...origin) + lowest).toBeLessThanOrEqual(plotOf(doc).frame.height);
+  });
+});
+
 describe('error bands', () => {
   it('collapses replicates at one x and shades the interval', () => {
     const doc = makeDocument(XY_REPLICATES, {

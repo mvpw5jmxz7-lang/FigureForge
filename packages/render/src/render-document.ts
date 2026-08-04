@@ -16,6 +16,7 @@ import {
   findAsset,
   findDataset,
   findLayer,
+  fitAspect,
   isTwoFactor,
   ptToMm,
   repositionBrackets,
@@ -435,31 +436,84 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
   const crop = node.crop;
   const isCropped = crop.x !== 0 || crop.y !== 0 || crop.width !== 1 || crop.height !== 1;
 
+  if (!isCropped) {
+    const whole = el('image', {
+      href,
+      x: 0,
+      y: 0,
+      width,
+      height,
+      preserveAspectRatio: node.preserveAspect ? 'xMidYMid meet' : 'none',
+      // Micrographs must not be smoothed; interpolation invents detail.
+      'image-rendering': 'pixelated',
+    }, undefined, { role: 'image' });
+    // The wrapper carries no role: the <image> element inside already has it,
+    // and counting the role twice would make "how many images are there" wrong.
+    return overlays.length === 0 ? whole : group({}, [whole, ...overlays]);
+  }
+
+  /*
+   * Where the kept region lands inside the frame.
+   *
+   * `preserveAspectRatio="xMidYMid meet"` centres the source inside the element
+   * box — and the cropped box is the *oversized* one, whose aspect the crop has
+   * already changed. So `meet` letterboxed against the wrong rectangle and the
+   * region drawn was not the region outlined: cropping to half the width of an
+   * aspect-locked image moved nothing at all, and on a montage tile, whose
+   * frame comes from `gridCells` and has nothing to do with the micrograph's
+   * shape, every crop landed somewhere else.
+   *
+   * Fitting the *cropped* aspect to the frame here answers that directly, and
+   * the box built from it already carries the source's own aspect — so
+   * `preserveAspectRatio="none"` cannot stretch anything, it just stops a
+   * second centring rule from moving what this one placed.
+   */
+  const aspect = node.naturalPx.height > 0 ? node.naturalPx.width / node.naturalPx.height : 0;
+  const frameRect = { x: 0, y: 0, width, height };
+  const kept =
+    node.preserveAspect && aspect > 0
+      ? fitAspect(frameRect, (aspect * crop.width) / crop.height)
+      : frameRect;
+
   const image = el('image', {
     href,
-    x: isCropped ? -(crop.x / crop.width) * width : 0,
-    y: isCropped ? -(crop.y / crop.height) * height : 0,
-    width: isCropped ? width / crop.width : width,
-    height: isCropped ? height / crop.height : height,
-    preserveAspectRatio: node.preserveAspect ? 'xMidYMid meet' : 'none',
-    // Micrographs must not be smoothed; interpolation invents detail.
+    x: kept.x - (crop.x / crop.width) * kept.width,
+    y: kept.y - (crop.y / crop.height) * kept.height,
+    width: kept.width / crop.width,
+    height: kept.height / crop.height,
+    preserveAspectRatio: 'none',
     'image-rendering': 'pixelated',
   }, undefined, { role: 'image' });
 
-  // The wrapper carries no role: the <image> element inside already has it, and
-  // counting the role twice would make "how many images are there" wrong.
-  if (!isCropped) {
-    return overlays.length === 0 ? image : group({}, [image, ...overlays]);
-  }
-
   const clipId = `clip-${node.id}`;
-  // The clip is the image's own frame, so overlays sit inside it too — a scale
-  // bar that overhung the micrograph it measures would be nonsense.
+  const letterboxed = kept.width < width - 0.0001 || kept.height < height - 0.0001;
+
+  /*
+   * The image is clipped to the kept region and the overlays to the frame.
+   *
+   * They differ only when the crop letterboxes, and there they must: clipping
+   * the picture at the frame would show the source either side of the region
+   * the author kept, and clipping an *annotation* to the picture would delete
+   * an arrow the author placed in the margin. Emitted only when the two really
+   * differ, so an aspect-preserving crop — the case that already worked — keeps
+   * the markup it had.
+   */
+  const drawn = letterboxed
+    ? group({ 'clip-path': `url(#${clipId}-kept)` }, [image])
+    : image;
+
   return group({ 'clip-path': `url(#${clipId})` }, [
     el('defs', {}, [
       el('clipPath', { id: clipId }, [el('rect', { x: 0, y: 0, width, height })]),
+      ...(letterboxed
+        ? [
+            el('clipPath', { id: `${clipId}-kept` }, [
+              el('rect', { x: kept.x, y: kept.y, width: kept.width, height: kept.height }),
+            ]),
+          ]
+        : []),
     ]),
-    image,
+    drawn,
     ...overlays,
   ]);
 }
@@ -903,6 +957,25 @@ function requiredMargin(
   const legendRow =
     Math.max(LEGEND_SWATCH_MM, estimateTextHeightMm(theme.type.legendPt)) + LEGEND_ROW_GAP_MM;
 
+  /*
+   * The width a legend below has to lay itself out in.
+   *
+   * This must be the `margin.left` the final geometry will carry, not the one
+   * measured here, or the reserve budgets a different number of rows from the
+   * one drawn. `computePlotGeometry` takes `max(theme, clamped)` of what this
+   * function returns, in both the grown and the early-return branch, so
+   * repeating that arithmetic here is what makes the two agree.
+   */
+  const leftUsed = Math.max(
+    theme.spacing.plotMarginMm.left,
+    Math.min(left, node.frame.width * 0.6),
+  );
+  const legendRows =
+    placement === 'bottom'
+      ? legendRowLayout(legendEntries(geometry), theme, Math.max(0, node.frame.width - leftUsed))
+          .rows
+      : 0;
+
   const bottom =
     xTickGutter +
     theme.spacing.tickLabelGapMm +
@@ -910,33 +983,23 @@ function requiredMargin(
     (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
     // A legend below sits under the x title; without the reserve it would be
     // drawn past the panel edge onto whatever is beneath.
-    (placement === 'bottom' ? legendRow : 0);
+    legendRows * legendRow;
 
-  // A secondary axis puts the same furniture on the right, where the theme
-  // reserves 2 mm — enough for a label overhanging the last x tick and nothing
-  // more.
-  let right = theme.spacing.plotMarginMm.right;
-  if (placement === 'right') {
-    right = Math.max(
-      right,
-      theme.spacing.tickLabelGapMm + legendWidthMm(legendEntries(geometry), theme),
-    );
-  }
-  if (geometry.kind === 'continuous' && geometry.y2Scale && node.y2) {
-    const spec = node.y2;
-    const labels = spec.showLabels
-      ? geometry.y2Scale.ticks.reduce(
-          (max, t) => Math.max(max, estimateTextWidthMm(geometry.y2Scale!.format(t), theme.type.tickLabelPt)),
-          0,
-        )
-      : 0;
-    right = Math.max(
-      right,
-      (spec.showTicks && spec.tickDirection !== 'in' ? theme.spacing.tickLengthMm : 0) +
-        (spec.showLabels ? theme.spacing.tickLabelGapMm + labels : 0) +
-        (spec.title ? theme.spacing.axisTitleGapMm + titleHeight : 0),
-    );
-  }
+  /*
+   * A secondary axis puts the same furniture on the right, where the theme
+   * reserves 2 mm — enough for a label overhanging the last x tick and nothing
+   * more. A legend on that side stacks *beyond* it rather than sharing the
+   * room: these used to be combined with `Math.max`, so a plot with both drew
+   * the key straight over the right-hand tick labels.
+   */
+  const y2 = y2WidthMm(node, theme, geometry);
+  const right = Math.max(
+    theme.spacing.plotMarginMm.right,
+    y2 +
+      (placement === 'right'
+        ? theme.spacing.tickLabelGapMm + legendWidthMm(legendEntries(geometry), theme)
+        : 0),
+  );
 
   // Never take so much that nothing is left to plot in: on a panel too small
   // for its own labels, a crowded axis still reads where a zero-height plot
@@ -1176,6 +1239,84 @@ function legendWidthMm(
 }
 
 /**
+ * How far the secondary axis's furniture reaches to the right of the plot area.
+ *
+ * Composed here and nowhere else, for the same reason `scaleBarWidthMm` and
+ * `analysisInputHash` are: `requiredMargin` reserves this room and
+ * `renderLegend` steps past it, and a second derivation is how a legend comes
+ * to be drawn on top of the axis it was supposed to clear.
+ *
+ * Measured from where `renderSecondaryAxis` actually places things — labels sit
+ * at `tickLen + gap` whether or not a tick is drawn there, so the reserve
+ * counts the same, which the earlier arithmetic did not.
+ */
+function y2WidthMm(node: PlotNode, theme: Theme, geometry: PlotGeometry): number {
+  if (geometry.kind !== 'continuous' || !geometry.y2Scale || !node.y2) return 0;
+
+  const spec = node.y2;
+  const scale = geometry.y2Scale;
+  const tickLen = theme.spacing.tickLengthMm;
+  const gap = theme.spacing.tickLabelGapMm;
+
+  // Only the ticks that survive the range — an off-range value is never drawn,
+  // so reserving room for its label widens the gutter for nothing.
+  const widest = spec.showLabels
+    ? scale.ticks.reduce((max, tick) => {
+        const y = scale.scale(tick);
+        if (!Number.isFinite(y) || y < -0.01 || y > geometry.plotHeight + 0.01) return max;
+        return Math.max(max, estimateTextWidthMm(scale.format(tick), theme.type.tickLabelPt));
+      }, 0)
+    : 0;
+
+  const labelsEnd = spec.showLabels ? tickLen + gap + widest : 0;
+  const ticksEnd = spec.showTicks ? Math.max(0, tickOffset(spec, tickLen)) : 0;
+  const titleEnd = spec.title
+    ? tickLen +
+      gap +
+      widest +
+      theme.spacing.axisTitleGapMm +
+      estimateTextHeightMm(theme.type.axisTitlePt)
+    : 0;
+
+  return Math.max(ticksEnd, labelsEnd, titleEnd);
+}
+
+/**
+ * Where each entry sits when the legend runs under the plot, and how many rows
+ * that takes.
+ *
+ * The advance is the running sum of the entries *before* each one. It used to
+ * be `index * thisEntry.width`, which puts a short label after a long one back
+ * on top of it — a two-entry key reading "Control" then "n" drew the second
+ * over the first. Rows wrap at the panel edge rather than running off it, since
+ * a legend the reader cannot see is the same defect in a different direction.
+ */
+function legendRowLayout(
+  entries: readonly { label: string }[],
+  theme: Theme,
+  availableMm: number,
+): { rows: number; at: { x: number; row: number }[] } {
+  const gap = theme.spacing.axisTitleGapMm;
+  const at: { x: number; row: number }[] = [];
+  let x = 0;
+  let row = 0;
+
+  for (const entry of entries) {
+    const width = legendWidthMm([entry], theme);
+    // The first entry of a row never wraps: a label wider than the whole panel
+    // would otherwise wrap forever and still not fit.
+    if (x > 0 && x + width > availableMm) {
+      row += 1;
+      x = 0;
+    }
+    at.push({ x, row });
+    x += width + gap;
+  }
+
+  return { rows: row + 1, at };
+}
+
+/**
  * The series key.
  *
  * `'legend'` has been a declared `SceneRole` since phase 1 with nothing
@@ -1198,13 +1339,17 @@ function renderLegend(
   const pitch = rowHeight + LEGEND_ROW_GAP_MM;
   const gap = theme.spacing.tickLabelGapMm;
 
+  // The row layout is computed against the same width `requiredMargin`
+  // reserved for it, so the rows it budgeted are the rows drawn.
+  const below =
+    placement === 'bottom'
+      ? legendRowLayout(entries, theme, Math.max(0, node.frame.width - margin.left))
+      : null;
+
   const children: SceneNode[] = [];
   entries.forEach((entry, index) => {
-    const y = placement === 'right' ? index * pitch : 0;
-    const x =
-      placement === 'right'
-        ? 0
-        : index * (legendWidthMm([entry], theme) + theme.spacing.axisTitleGapMm);
+    const y = placement === 'right' ? index * pitch : (below?.at[index]?.row ?? 0) * pitch;
+    const x = placement === 'right' ? 0 : (below?.at[index]?.x ?? 0);
 
     /*
      * The swatch is the *marker* once any series carries its own shape, and a
@@ -1254,11 +1399,17 @@ function renderLegend(
   });
 
   // Beside the plot area, vertically centred on it; or beneath the x labels.
-  const originX = placement === 'right' ? margin.left + plotWidth + gap : margin.left;
+  // A secondary axis stands between the plot and the legend, so the legend
+  // starts past it — otherwise the key is drawn over the right-hand tick
+  // labels, which is exactly what the shared reserve now budgets for.
+  const originX =
+    placement === 'right'
+      ? margin.left + plotWidth + y2WidthMm(node, theme, geometry) + gap
+      : margin.left;
   const originY =
     placement === 'right'
       ? margin.top + Math.max(0, (plotHeight - entries.length * pitch) / 2)
-      : margin.top + plotHeight + margin.bottom - pitch;
+      : margin.top + plotHeight + margin.bottom - (below?.rows ?? 1) * pitch;
 
   return [group({ transform: translate(originX, originY) }, children)];
 }
@@ -2224,6 +2375,17 @@ const RESIZE_HANDLES: readonly { id: string; fx: number; fy: number }[] = [
 /** Half-width of a grab handle, in mm. Small enough not to swamp a panel. */
 const HANDLE_HALF_MM = 0.9;
 
+/*
+ * Handles are dark with a light ring, not the reverse.
+ *
+ * A white handle carrying a 0.2 px non-scaling border is invisible against the
+ * page, which is white by definition — `.canvas-page` is paper, in both themes.
+ * The ring survives the opposite case, a handle over a dark micrograph, so one
+ * pair of colours covers both backgrounds rather than either alone.
+ */
+const HANDLE_FILL = '#111318';
+const HANDLE_RING = '#ffffff';
+
 /**
  * Selection outline and resize handles.
  *
@@ -2263,9 +2425,9 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
             y: frame.y + frame.height * handle.fy - HANDLE_HALF_MM,
             width: HANDLE_HALF_MM * 2,
             height: HANDLE_HALF_MM * 2,
-            fill: '#ffffff',
-            stroke: '#0a84ff',
-            'stroke-width': 0.2,
+            fill: HANDLE_FILL,
+            stroke: HANDLE_RING,
+            'stroke-width': 1,
             'vector-effect': 'non-scaling-stroke',
             'data-handle': handle.id,
           },
