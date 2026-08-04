@@ -34,6 +34,7 @@ import {
   type FigureDocument,
   type AxisSpec,
   type FigureNode,
+  type HeatmapScaleMode,
   type NodeId,
   type PlotNode,
   type PlotType,
@@ -41,7 +42,12 @@ import {
   type TextStyle,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
-import { DEFAULT_VOLCANO_COLORS, reflowBrackets } from '@figureforge/render';
+import {
+  DEFAULT_HEATMAP_MISSING_COLOR,
+  DEFAULT_HEATMAP_STOPS,
+  DEFAULT_VOLCANO_COLORS,
+  reflowBrackets,
+} from '@figureforge/render';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
@@ -58,6 +64,7 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'line', label: 'Line' },
   { id: 'histogram', label: 'Histogram' },
   { id: 'volcano', label: 'Volcano' },
+  { id: 'heatmap', label: 'Heatmap' },
 ];
 
 /**
@@ -68,11 +75,17 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
  * several groups invents a bimodal shape belonging to neither; a volcano plot
  * needs a per-point identity, which only the `differential` format supplies —
  * gated on that data shape rather than on the format's name, the same way
- * scatter/line gate on "does `.x` exist" rather than on a format list. Offering
- * a type the data cannot support is how the unimplemented plot types shipped
- * plausible-looking wrong output — so they are withheld rather than approximated.
+ * scatter/line gate on "does `.x` exist" rather than on a format list. A
+ * heatmap has no equivalent per-`Series` signal to key off — a dense matrix
+ * bypasses `Series` entirely — so it is the one type gated on the dataset's
+ * format directly. Offering a type the data cannot support is how the
+ * unimplemented plot types shipped plausible-looking wrong output — so they
+ * are withheld rather than approximated.
  */
-function typesFor(series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[]): {
+function typesFor(
+  series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[],
+  hasMatrix: boolean,
+): {
   offered: typeof OFFERED_PLOT_TYPES;
   reason: string | null;
 } {
@@ -84,12 +97,14 @@ function typesFor(series: readonly { values: number[]; x?: number[]; pointLabels
   if (!hasX) blocked.push('Scatter and line need a dataset with an x column');
   if (!single) blocked.push('Histogram needs a single group');
   if (!hasLabels) blocked.push('Volcano needs a dataset with a label, fold change and p-value per row');
+  if (!hasMatrix) blocked.push('Heatmap needs a matrix dataset');
 
   return {
     offered: OFFERED_PLOT_TYPES.filter((t) => {
       if (t.id === 'scatter' || t.id === 'line') return hasX;
       if (t.id === 'histogram') return single;
       if (t.id === 'volcano') return hasLabels;
+      if (t.id === 'heatmap') return hasMatrix;
       return true;
     }),
     reason: blocked.length > 0 ? `${blocked.join('. ')}.` : null,
@@ -195,6 +210,99 @@ function VolcanoColorControls({
           {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
         </p>
       )}
+    </>
+  );
+}
+
+const HEATMAP_SCALE_LABELS: Record<HeatmapScaleMode, string> = {
+  sequential: 'Sequential (plain magnitude)',
+  diverging: 'Diverging (zero is meaningful)',
+};
+
+const HEATMAP_STOP_LABELS: Record<HeatmapScaleMode, string[]> = {
+  sequential: ['Low', 'High'],
+  diverging: ['Low', 'Mid', 'High'],
+};
+
+/**
+ * Scale mode, colour stops, the missing-cell colour and the cell-value
+ * toggle — in place of the ordinary per-series Colours block, for the same
+ * reason volcano's is replaced: a heatmap's cell colour comes from the value
+ * and the scale, never from a per-series palette, so palette swatches and
+ * "points use series colour" would visibly do nothing.
+ */
+function HeatmapColorControls({
+  node,
+  setPlot,
+}: {
+  node: PlotNode;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+}) {
+  const mode = node.heatmapScale ?? 'sequential';
+  const stops = node.heatmapStops ?? DEFAULT_HEATMAP_STOPS[mode];
+  const missingColor = node.heatmapMissingColor ?? DEFAULT_HEATMAP_MISSING_COLOR;
+
+  const setStop = (index: number, color: string): void => {
+    const next = [...stops];
+    next[index] = color;
+    setPlot('Change colour stop', { heatmapStops: next });
+  };
+
+  return (
+    <>
+      <h4>Colour scale</h4>
+      <label className="field block">
+        Scale
+        <select
+          value={mode}
+          onChange={(e) => {
+            const nextMode = e.target.value as HeatmapScaleMode;
+            // A stop array sized for the old mode would silently apply to the
+            // new one — two stops read as a two-point diverging scale with no
+            // midpoint, three read as sequential with an ignored middle stop.
+            setPlot('Change colour scale', { heatmapScale: nextMode, heatmapStops: undefined });
+          }}
+        >
+          {(Object.keys(HEATMAP_SCALE_LABELS) as HeatmapScaleMode[]).map((m) => (
+            <option key={m} value={m}>
+              {HEATMAP_SCALE_LABELS[m]}
+            </option>
+          ))}
+        </select>
+      </label>
+      {mode === 'diverging' && (
+        <p className="hint">
+          The domain is made symmetric around zero, so equal positive and negative values read as
+          equally saturated — the standard reading for a correlation or log-fold-change matrix.
+        </p>
+      )}
+
+      <div className="swatches">
+        {stops.map((color, index) => (
+          <label className="swatch" key={index} title={HEATMAP_STOP_LABELS[mode][index]}>
+            <input type="color" value={color} onChange={(e) => setStop(index, e.target.value)} />
+            <span>{HEATMAP_STOP_LABELS[mode][index]}</span>
+          </label>
+        ))}
+      </div>
+
+      <label className="field block">
+        No-data colour
+        <input
+          type="color"
+          value={missingColor}
+          onChange={(e) => setPlot('Change missing-cell colour', { heatmapMissingColor: e.target.value })}
+        />
+      </label>
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={node.showCellValues ?? false}
+          onChange={(e) => setPlot('Toggle cell values', { showCellValues: e.target.checked })}
+        />
+        Show cell values
+      </label>
     </>
   );
 }
@@ -456,7 +564,7 @@ function PlotFields({
   const dataset = findDataset(doc, node.datasetId);
   const series = dataset ? toSeries(dataset) : [];
   const colors = paletteColors(node.palette, Math.max(1, series.length));
-  const { offered, reason } = typesFor(series);
+  const { offered, reason } = typesFor(series, dataset?.format === 'matrix');
 
   /*
    * Whether a continuous plot has anything to summarise.
@@ -591,6 +699,8 @@ function PlotFields({
 
       {node.plotType === 'volcano' ? (
         <VolcanoColorControls node={node} setPlot={setPlot} />
+      ) : node.plotType === 'heatmap' ? (
+        <HeatmapColorControls node={node} setPlot={setPlot} />
       ) : (
         <>
           <h4>Colours</h4>
@@ -696,7 +806,12 @@ function PlotFields({
       </label>
       {reason && <p className="hint">{reason}</p>}
 
-      {DISTRIBUTION_TYPES.has(node.plotType) ? (
+      {node.plotType === 'heatmap' ? (
+        <p className="hint">
+          A heatmap's cells are coloured by value, not summarised — there is no centre or error
+          bar to set here. See the colour scale controls above.
+        </p>
+      ) : DISTRIBUTION_TYPES.has(node.plotType) ? (
         <p className="hint">
           A {node.plotType} already shows the full distribution, so the centre and error
           bars are not drawn. Switch to a bar or dot plot to set them.
@@ -803,16 +918,18 @@ function PlotFields({
         </>
       )}
 
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={node.showPoints}
-          onChange={(e) => setPlot('Toggle points', { showPoints: e.target.checked })}
-        />
-        {node.plotType === 'box' ? 'Overlay all points' : 'Show replicate points'}
-      </label>
+      {node.plotType !== 'heatmap' && (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={node.showPoints}
+            onChange={(e) => setPlot('Toggle points', { showPoints: e.target.checked })}
+          />
+          {node.plotType === 'box' ? 'Overlay all points' : 'Show replicate points'}
+        </label>
+      )}
 
-      {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && (
+      {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'heatmap' && (
         <>
           <div className="field-row">
             {percentField(
@@ -843,72 +960,76 @@ function PlotFields({
         </>
       )}
 
-      <div className="field-row">
-        <label className="field">
-          Marker
-          <select
-            value={node.pointShape ?? 'circle'}
-            onChange={(e) =>
-              setPlot('Change marker shape', { pointShape: e.target.value as PointShape })
-            }
-          >
-            {POINT_SHAPES.map((shape) => (
-              <option key={shape} value={shape}>
-                {shape[0]!.toUpperCase() + shape.slice(1)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          Size (mm)
-          <input
-            type="number"
-            min={0.1}
-            max={5}
-            step={0.1}
-            value={node.pointSizeMm}
-            onChange={(e) => {
-              const value = Number(e.target.value);
-              if (Number.isFinite(value) && value > 0) {
-                setPlot('Change marker size', { pointSizeMm: value });
-              }
-            }}
-          />
-        </label>
-      </div>
+      {node.plotType !== 'heatmap' && (
+        <>
+          <div className="field-row">
+            <label className="field">
+              Marker
+              <select
+                value={node.pointShape ?? 'circle'}
+                onChange={(e) =>
+                  setPlot('Change marker shape', { pointShape: e.target.value as PointShape })
+                }
+              >
+                {POINT_SHAPES.map((shape) => (
+                  <option key={shape} value={shape}>
+                    {shape[0]!.toUpperCase() + shape.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              Size (mm)
+              <input
+                type="number"
+                min={0.1}
+                max={5}
+                step={0.1}
+                value={node.pointSizeMm}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  if (Number.isFinite(value) && value > 0) {
+                    setPlot('Change marker size', { pointSizeMm: value });
+                  }
+                }}
+              />
+            </label>
+          </div>
 
-      <div className="field-row">
-        <label className="field">
-          Marker fill
-          <input
-            type="color"
-            // Blank means "follow the series", which is the existing rule and
-            // what every figure made before this control looked like.
-            value={node.pointFill ?? '#000000'}
-            onChange={(e) => setPlot('Change marker fill', { pointFill: e.target.value })}
-          />
-        </label>
-        <label className="field">
-          Marker border
-          <input
-            type="color"
-            value={node.pointStroke?.color ?? '#000000'}
-            onChange={(e) =>
-              setPlot('Change marker border', {
-                pointStroke: { color: e.target.value, widthMm: node.pointStroke?.widthMm ?? 0.15 },
-              })
-            }
-          />
-        </label>
-      </div>
-      {(node.pointFill !== undefined || node.pointStroke !== undefined) && (
-        <button
-          onClick={() =>
-            setPlot('Reset marker colours', { pointFill: undefined, pointStroke: undefined })
-          }
-        >
-          Follow the series colour
-        </button>
+          <div className="field-row">
+            <label className="field">
+              Marker fill
+              <input
+                type="color"
+                // Blank means "follow the series", which is the existing rule and
+                // what every figure made before this control looked like.
+                value={node.pointFill ?? '#000000'}
+                onChange={(e) => setPlot('Change marker fill', { pointFill: e.target.value })}
+              />
+            </label>
+            <label className="field">
+              Marker border
+              <input
+                type="color"
+                value={node.pointStroke?.color ?? '#000000'}
+                onChange={(e) =>
+                  setPlot('Change marker border', {
+                    pointStroke: { color: e.target.value, widthMm: node.pointStroke?.widthMm ?? 0.15 },
+                  })
+                }
+              />
+            </label>
+          </div>
+          {(node.pointFill !== undefined || node.pointStroke !== undefined) && (
+            <button
+              onClick={() =>
+                setPlot('Reset marker colours', { pointFill: undefined, pointStroke: undefined })
+              }
+            >
+              Follow the series colour
+            </button>
+          )}
+        </>
       )}
 
       <h4>Axes</h4>
@@ -916,6 +1037,7 @@ function PlotFields({
         label="Y"
         axis={node.y}
         seriesValues={series.flatMap((s) => s.values)}
+        numeric={node.plotType !== 'heatmap'}
         onChange={(patch, label) => setPlot(label, { y: { ...node.y, ...patch } })}
       />
       <AxisFields

@@ -109,7 +109,8 @@ export type PlotType =
   | 'violin'
   | 'beeswarm'
   | 'histogram'
-  | 'volcano';
+  | 'volcano'
+  | 'heatmap';
 
 /**
  * The plot types whose x axis is a numeric scale rather than a band of
@@ -122,6 +123,15 @@ export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(
   'histogram',
   'volcano',
 ]);
+
+/**
+ * The plot types drawn as a dense row×column grid rather than marks against
+ * an axis — neither dimension is a value axis, so these are excluded from
+ * `CONTINUOUS_X_PLOT_TYPES` and from the categorical band-scale path both.
+ * Kept as its own registry for the same reason `CONTINUOUS_X_PLOT_TYPES` is:
+ * one place that says which types are which.
+ */
+export const GRID_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(['heatmap']);
 
 /** Which side of a significance threshold a volcano point falls on. */
 export type VolcanoCategory = 'up' | 'down' | 'ns';
@@ -141,6 +151,19 @@ export interface VolcanoThresholds {
  * second copy.
  */
 export const DEFAULT_VOLCANO_THRESHOLDS: VolcanoThresholds = { foldChange: 1, pValue: 0.05 };
+
+/**
+ * Whether a heatmap's colour domain is the raw `[min, max]` of its cells, or
+ * symmetric around zero (`[-max(|min|,|max|), max(|min|,|max|)]`) — the
+ * standard reading for a correlation matrix or a log-fold-change matrix,
+ * where zero is a meaningful midpoint rather than an arbitrary one.
+ *
+ * `'sequential'` is the default: it is the safer reading when the author
+ * hasn't said whether zero means anything, the same reasoning that leaves
+ * every other optional on/off field in this file defaulting to the more
+ * literal behaviour.
+ */
+export type HeatmapScaleMode = 'sequential' | 'diverging';
 
 export type ErrorBarKind = 'none' | 'sd' | 'sem' | 'ci95' | 'range' | 'iqr';
 
@@ -318,6 +341,21 @@ export interface PlotNode extends NodeBase {
    * no optional boolean here defaults to `true` when absent.
    */
   volcanoThresholdLines?: 'show' | 'hide';
+  /** How a heatmap's colour domain is built. Absent is `'sequential'`. Heatmap only. */
+  heatmapScale?: HeatmapScaleMode;
+  /**
+   * Colour stops the domain interpolates between: two for `'sequential'`
+   * (low, high), three for `'diverging'` (low, mid, high). Absent uses the
+   * renderer's themed default for the chosen mode.
+   */
+  heatmapStops?: readonly string[];
+  /** Fill for a cell whose value is missing. Absent is a themed neutral grey. */
+  heatmapMissingColor?: string;
+  /**
+   * Draw each cell's value centred in it. Skipped where the cell is too
+   * small to hold the text legibly rather than overprinting it.
+   */
+  showCellValues?: boolean;
 }
 
 export interface ImageNode extends NodeBase {

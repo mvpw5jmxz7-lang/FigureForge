@@ -10,8 +10,8 @@ Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
 could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of
 reported fixes, the DOM-volume mechanism phase 7 needed first, and phase 7's
-first chart type (volcano plots); heatmap, PCA, UMAP and survival are not,
-nor is phase 8 or 9.**
+first two chart types (volcano plots, heatmaps); PCA, UMAP and survival are
+not, nor is phase 8 or 9.**
 
 ---
 
@@ -195,6 +195,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 7 stage 2 (heatmaps):** 423 TypeScript tests, 105
+Python tests, typecheck and lint clean, 46-check acceptance run unaffected —
+see "Phase 7, Stage 2 — heatmaps" below.
 
 **Verified after phase 7 stage 1 (volcano plots):** 395 TypeScript tests, 105
 Python tests, typecheck and lint clean, 46-check acceptance run unaffected —
@@ -1394,6 +1398,134 @@ disclosure), 105 Python tests unchanged, typecheck and lint clean, 46-check
 acceptance run unaffected (no existing fixture uses the new format or plot
 type).
 
+### Phase 7, Stage 2 — heatmaps
+
+Heatmap went second because, unlike volcano, it forces the harder
+architectural question phase 7's roadmap flagged: `PlotGeometryBase`
+required every geometry to carry a numeric `yScale`, and a heatmap has no
+numeric axis on either side — both dimensions are categorical row/column
+labels. Getting that split right here means survival (stage 3, also a new
+geometry kind) does not have to re-litigate it. No server compute, matching
+the roadmap's own read of this stage.
+
+- **`PlotGeometryBase` narrowed to `{margin, plotWidth, plotHeight}`**;
+  `yScale: NumericScale` moved onto `CategoricalPlotGeometry` and
+  `ContinuousPlotGeometry` individually — a mechanical split, not a semantic
+  one, so every existing figure is unaffected. New `GridPlotGeometry` arm
+  (`kind: 'grid'`) carries `rowScale`/`colScale` (two independent
+  `BandScale`s, not the inner/outer nesting `makeGroupedBandScale` uses for
+  a two-factor bar chart) and a flat `cells` array. `renderAxisBreaks`/
+  `breakMarks`/`renderAxes`/`requiredMargin`/`yTickLayout`/`xLabelLayout` are
+  now typed against `CategoricalPlotGeometry | ContinuousPlotGeometry`
+  specifically — a heatmap has no axis breaks and draws its own row/column
+  labels in a dedicated `renderHeatmapPlot`, so passing one to any of these
+  is now a compile error rather than a latent one.
+- **`computePlotGeometry` branches to a wholly separate `heatmapGeometry`
+  before `toSeries` is ever called** — a heatmap cell is not a replicate to
+  pool or a group to compare, so the grid path never depends on the
+  `Series`-shaped machinery the categorical/continuous paths share.
+  `heatmapGeometry` runs its own two-pass margin growth
+  (`heatmapGeometryForMargin`/`requiredHeatmapMargin`), mirroring
+  `geometryForMargin`/`requiredMargin`'s "build once against the theme
+  margin, measure, rebuild once against the answer" pattern rather than
+  sharing it — row/column label widths and colourbar extent are a different
+  measurement problem than tick counts and a discrete legend.
+- **`DataFormat` gained `'matrix'`**: `RowLabel,Col1,Col2,…`, one continuous
+  value per cell — structurally identical to `'contingency'`'s parsing shape,
+  deliberately a separate member for the same reason `'differential'` is
+  separate from `'replicate'`: nothing in the cells says whether a number is
+  a count to test or a value to colour. Never auto-inferred.
+- **A dedicated `toMatrix` accessor bypasses `Series` entirely** —
+  `{rowLabels, colLabels, cells: (number | null)[][]}` — rather than reusing
+  `'contingency'`'s one-series-per-cell `toSeries` case, which exists for
+  pairwise group comparison (`category`/`group`/legend/bracket join keys)
+  that a dense grid has no use for. `toSeries` still gets a minimal
+  `'matrix'` case, purely so generic UI that calls it for display (the
+  dataset list's "N series" count) shows something sensible — the geometry
+  itself never reads it. Unlike every per-cell `toSeries` case, which
+  silently drops a blank/non-numeric cell, `toMatrix` keeps every (row, col)
+  position and makes a missing cell an explicit `null` — a position with no
+  data is still a position, and a reader has to be able to tell it apart
+  from one that was never looked at.
+- **Colour resolution splits the same way volcano's did**: `packages/plots`
+  computes a normalized `t`, `packages/render` turns `t` into a colour.
+  `resolveHeatmapDomain` (`packages/plots/src/heatmap.ts`) supports two
+  modes — `'sequential'` (raw `[min, max]`, the default) and `'diverging'`
+  (symmetric around zero, `max(|min|, |max|)` on both sides) — built now
+  rather than deferred, since it only changes the domain computation and a
+  correlation matrix or log-fold-change matrix (both common in this app's
+  domain) genuinely needs zero to sit at the ramp's visual midpoint, not
+  wherever the data's mean happens to fall. `interpolateColor` in
+  `render-document.ts` is plain sRGB lerp between stop colours, not a
+  perceptual (Lab-space) ramp — `packages/theme` has `toLab`/`deltaE2000` but
+  no inverse Lab→RGB, and building one is real added complexity this first
+  heatmap does not need. Called from both the per-cell fill and the
+  colourbar, so they cannot disagree on what a given `t` looks like. A `null`
+  cell is a themed flat colour, never a point on the ramp.
+- **The colourbar is a strip of ~64 discrete rects, not an SVG
+  `linearGradient`.** A true gradient needs a `<defs>` block and a
+  per-node-unique id for `url(#...)` referencing — untested territory in this
+  render pipeline, with a real risk of two heatmaps on one page colliding on
+  gradient ids. A rect strip has direct precedent (the fixed-stop
+  `viridis-discrete` palette) and needs no new markup shape at all — both
+  adapters draw it identically with zero changes. `colorbarExtentMm` is
+  composed once and read by both the margin reservation and the drawing
+  function, the same discipline `y2WidthMm`/`scaleBarWidthMm` already
+  follow. New `SceneRole`s `'heatmap-cell'`/`'colorbar'`, kept distinct for
+  the same reason `'point-cloud'`/`'threshold-line'` are.
+- **Column labels reuse `xLabelLayout`'s tilt-then-truncate reasoning without
+  reusing the function itself** — `heatmapColumnLabelLayout` takes a plain
+  label array and band pitch rather than a `CategoricalPlotGeometry`, since a
+  heatmap's column band has no `axisBand`/`axisCategories` to read. Same two
+  tier 45°/90° budget, same `translate` + `rotate(-angle)` + anchor-end
+  idiom the categorical x axis renders with.
+- **`checkColorAccessibility` was not extended to heatmap cells.** That rule
+  does an O(n²) pairwise ΔE comparison meant for a handful of *discrete*
+  series colours; hundreds of adjacent ramp strips are *supposed* to be
+  close together, so pairwise-comparing all of them would be both
+  semantically wrong and a performance problem. A new `checkHeatmapColorContrast`
+  instead samples only the ramp's own rendered endpoints (read straight off
+  the colourbar's first/last strip, so it can never disagree with what was
+  actually drawn) and simulates CVD on just those — `severity: 'info'`, the
+  same disclosure stance as `checkPointCloudRasterization`, never costing
+  score.
+- **The Colours block and several categorical-only Marks controls are
+  replaced or hidden for a heatmap**, the same "a control that visibly does
+  nothing is a defect" stance volcano's stage established: `HeatmapColorControls`
+  (scale mode, colour stops, no-data colour, cell-value toggle) replaces the
+  palette block; Error bars/Centre, marker shape/size/fill/border and bar
+  width are all hidden, since none of them read for a grid geometry. The Y
+  `AxisFields` call now passes `numeric={node.plotType !== 'heatmap'}` — it
+  previously always showed numeric min/max/log-scale controls for a grid
+  that has no numeric y at all, a gap volcano's own Inspector work had not
+  had reason to surface since every prior type was either purely categorical
+  or purely continuous. The generic "Legend" placement field is reused as-is
+  for colourbar placement — `'auto'` reads as `'right'`, `'bottom'` and
+  `'none'` behave the same as they already do for a discrete legend, so no
+  new control was needed there.
+- **The Stats tab explicitly refuses a `'matrix'` dataset.** `toSeries`'s
+  minimal per-cell case would otherwise leave `minGroupsMet` seeing plenty
+  of "groups" — one per cell — and let an ordinary test run comparing
+  single-value cells against each other, which compares nothing meaningful.
+  Refused outright, mirroring `nested`/`differential`'s stance exactly.
+
+Driven in a real browser: a tab-separated matrix was never auto-suggested as
+the layout (`Detect` stayed selected until "Matrix (rows × columns)" was
+chosen explicitly), the panel opened as a heatmap with the Colour-scale
+controls in place of the ordinary palette block, **9** cells rendered (3×3)
+in **6** distinct colours including the default `#e0e0e0` no-data grey for
+the one blank cell in the table, a **64**-strip colourbar was drawn, the
+Stats tab's Run button was disabled with a stated reason, and the exported
+PDF was a single page.
+
+**Verified:** 423 TypeScript tests (395 + 28 new: doc-model format/matrix/
+schema tests, `packages/plots` domain/normalization tests, a new
+`heatmap.test.ts` geometry suite, two parity fixtures — an ordinary grid and
+a missing-cell case — and quality-rule tests for the CVD-contrast
+disclosure), 105 Python tests unchanged, typecheck and lint clean, 46-check
+acceptance run unaffected (no existing fixture uses the new format or plot
+type).
+
 ---
 
 ## What's next
@@ -1406,7 +1538,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | heatmap, PCA, UMAP, survival — **volcano is done**, stage 1 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution are the pattern the remaining stages extend, not repeat — see "Phase 7, Stage 1" below |
+| 7 | PCA, UMAP, survival — **volcano and heatmap are done**, stages 1–2 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, and heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, are patterns the remaining stages extend, not repeat — see "Phase 7, Stage 1" and "Phase 7, Stage 2" below. Survival needs the same new-geometry-kind treatment heatmap just proved; PCA/UMAP still need the unsolved "Analysis output becomes a new plottable Dataset" mechanism |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1424,15 +1556,17 @@ Phases 5–9, with the actual entry points:
 
 ### Declared-but-missing things — check before trusting the types
 
-- **All 10 `PlotType` variants now render distinctly.** The dropdown is gated
+- **All 11 `PlotType` variants now render distinctly.** The dropdown is gated
   on what the *dataset* supports rather than on what is implemented (`typesFor`
   in `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
   supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
   series, since pooling groups invents a bimodal shape belonging to neither;
   volcano needs a single series carrying `Series.pointLabels`, which only the
-  `differential` format supplies. `computePlotGeometry` returns null for an
-  unsupported combination, so a type set some other way draws nothing rather
-  than something wrong.
+  `differential` format supplies; heatmap needs a `matrix`-format dataset,
+  the one type gated on the dataset's format directly rather than on a
+  `Series`-derivable shape, since a dense grid bypasses `Series` entirely.
+  `computePlotGeometry` returns null for an unsupported combination, so a
+  type set some other way draws nothing rather than something wrong.
 
 ---
 
@@ -1444,7 +1578,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, and phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members and phase 7 stage 1 by one more (`differential`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way, for the same reason — a `volcano` node is unreadable by an older build, not unreadable by this one. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, and stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), and stage 2 by one more again (`matrix`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way twice, for the same reason — a `volcano` or `heatmap` node is unreadable by an older build, not unreadable by this one. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

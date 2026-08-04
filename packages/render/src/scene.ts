@@ -73,7 +73,16 @@ export type SceneRole =
    * distinct from 'image' — a role-count assertion for one must not be
    * silently widened by another.
    */
-  | 'threshold-line';
+  | 'threshold-line'
+  /** One heatmap cell. */
+  | 'heatmap-cell'
+  /**
+   * One strip of a heatmap's colour-scale legend — a ramp drawn as adjacent
+   * rects, not a single gradient primitive. Kept distinct from 'legend' since
+   * a role-count assertion for a discrete swatch list must not be silently
+   * widened by dozens of ramp strips.
+   */
+  | 'colorbar';
 
 export const el = (
   tag: string,

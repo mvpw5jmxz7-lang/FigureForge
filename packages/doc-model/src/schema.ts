@@ -116,6 +116,7 @@ const plotSchema = z.object({
     'beeswarm',
     'histogram',
     'volcano',
+    'heatmap',
   ]),
   datasetId: z.string(),
   encoding: z.object({
@@ -158,6 +159,11 @@ const plotSchema = z.object({
     .object({ down: z.string(), ns: z.string(), up: z.string() })
     .optional(),
   volcanoThresholdLines: z.enum(['show', 'hide']).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  heatmapScale: z.enum(['sequential', 'diverging']).optional(),
+  heatmapStops: z.array(z.string()).optional(),
+  heatmapMissingColor: z.string().optional(),
+  showCellValues: z.boolean().optional(),
 });
 
 const imageSchema = z.object({
@@ -284,6 +290,7 @@ const datasetSchema = z.object({
     'xy-replicates',
     'nested',
     'differential',
+    'matrix',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),

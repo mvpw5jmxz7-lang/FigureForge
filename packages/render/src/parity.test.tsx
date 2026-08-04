@@ -450,6 +450,87 @@ describe('adapter parity', () => {
     expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
   });
 
+  it('draws a heatmap identically through both adapters, cells and colourbar alike', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Gene,S1,S2,S3\nTP53,0,5,10\nMYC,10,5,0');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-heatmap',
+        name: 'Matrix',
+        format: 'matrix',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/matrix.csv',
+        sourceFilename: 'matrix.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Heatmap',
+        datasetId: dataset.id,
+        plotType: 'heatmap',
+      });
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'heatmap-cell')).toHaveLength(6);
+    expect(collectByRole(scene, 'colorbar').length).toBeGreaterThan(1);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('gives a missing heatmap cell the same "no data" colour in both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Gene,S1,S2\nTP53,1,\nMYC,2,3');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-heatmap-missing',
+        name: 'Matrix',
+        format: 'matrix',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/matrix-missing.csv',
+        sourceFilename: 'matrix-missing.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Heatmap',
+        datasetId: dataset.id,
+        plotType: 'heatmap',
+      });
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    const fills = collectByRole(scene, 'heatmap-cell').map((c) => c.attrs?.['fill']);
+    expect(fills).toContain('#e0e0e0');
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
   it('leaves a plot at or under MAX_VECTOR_POINTS on the ordinary vector path', () => {
     // Regression guard: the continuous-types fixture above already proves
     // this at five rows; this pins it explicitly against the boundary the

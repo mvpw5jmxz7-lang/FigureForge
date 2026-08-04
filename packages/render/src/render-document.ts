@@ -11,6 +11,7 @@ import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_BRACKET_GAP_MM,
   DEFAULT_VOLCANO_THRESHOLDS,
+  GRID_PLOT_TYPES,
   absoluteFrame,
   isLocked,
   childrenOf,
@@ -22,13 +23,17 @@ import {
   ptToMm,
   repositionBrackets,
   scaleBarWidthMm,
+  toMatrix,
   toSeries,
   type ArrowNode,
   type AxisSpec,
   type BracketNode,
+  type Dataset,
   type FigureDocument,
   type FigureNode,
+  type HeatmapScaleMode,
   type ImageNode,
+  type Matrix,
   type PanelLabelNode,
   type PanelNode,
   type PlotNode,
@@ -40,18 +45,21 @@ import {
   type TextStyle,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
-import { paletteColors, type Theme } from '@figureforge/theme';
+import { paletteColors, parseHex, toHex, type Theme } from '@figureforge/theme';
 import {
   DEFAULT_BAR_GAP_FRACTION,
   DEFAULT_GROUP_GAP_FRACTION,
   categoricalMarks,
+  formatTick,
   histogramBins,
   histogramMarks,
   makeBandScale,
   makeGroupedBandScale,
   makeScale,
   negLog10,
+  normalizeCellValue,
   resolveDomain,
+  resolveHeatmapDomain,
   tickCountForLength,
   volcanoCategory,
   xyMarks,
@@ -621,12 +629,12 @@ interface PlotGeometryBase {
   margin: { top: number; right: number; bottom: number; left: number };
   plotWidth: number;
   plotHeight: number;
-  yScale: NumericScale;
 }
 
 /** Band-scaled x: bar, dot, bar-dot, beeswarm, box, violin. */
 export interface CategoricalPlotGeometry extends PlotGeometryBase {
   kind: 'categorical';
+  yScale: NumericScale;
   /**
    * One slot per *mark*, addressed by series name. On a two-factor table these
    * are sub-bands inside a category; on a single-factor one they are the
@@ -661,6 +669,7 @@ export interface CategoricalPlotGeometry extends PlotGeometryBase {
  */
 export interface ContinuousPlotGeometry extends PlotGeometryBase {
   kind: 'continuous';
+  yScale: NumericScale;
   xScale: NumericScale;
   series: ReturnType<typeof xyMarks>;
   bins: ReturnType<typeof histogramMarks>;
@@ -672,7 +681,25 @@ export interface ContinuousPlotGeometry extends PlotGeometryBase {
   y2Scale?: NumericScale;
 }
 
-export type PlotGeometry = CategoricalPlotGeometry | ContinuousPlotGeometry;
+/**
+ * A dense row×column grid: heatmap.
+ *
+ * No numeric axis on either side — both dimensions are categorical row/column
+ * labels — so this cannot honestly carry a `yScale: NumericScale` the way the
+ * other two arms do. `renderAxes`/`renderAxisBreaks` are typed against
+ * `CategoricalPlotGeometry | ContinuousPlotGeometry` rather than the full
+ * union for exactly this reason: a heatmap has no axis breaks and draws its
+ * own row/column labels rather than sharing either function.
+ */
+export interface GridPlotGeometry extends PlotGeometryBase {
+  kind: 'grid';
+  rowScale: ReturnType<typeof makeBandScale>;
+  colScale: ReturnType<typeof makeBandScale>;
+  cells: { row: string; col: string; value: number | null; color: string }[];
+  domain: { min: number; max: number; mode: HeatmapScaleMode };
+}
+
+export type PlotGeometry = CategoricalPlotGeometry | ContinuousPlotGeometry | GridPlotGeometry;
 
 
 /**
@@ -937,7 +964,7 @@ function geometryForMargin(
   node: PlotNode,
   series: ReturnType<typeof toSeries>,
   margin: PlotGeometryBase['margin'],
-): PlotGeometry | null {
+): CategoricalPlotGeometry | ContinuousPlotGeometry | null {
   const plotWidth = Math.max(0, node.frame.width - margin.left - margin.right);
   const plotHeight = Math.max(0, node.frame.height - margin.top - margin.bottom);
   if (plotWidth <= 0 || plotHeight <= 0) return null;
@@ -1045,6 +1072,408 @@ function geometryForMargin(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Heatmap
+// ---------------------------------------------------------------------------
+
+/**
+ * Sequential: light → dark, for plain-magnitude values with no meaningful
+ * zero. Diverging: blue → white → red, matching the blue/red down/up
+ * convention volcano plots already use in this codebase — kept consistent
+ * rather than introducing a second colour vocabulary for "negative/positive".
+ */
+export const DEFAULT_HEATMAP_STOPS: Record<HeatmapScaleMode, readonly string[]> = {
+  sequential: ['#f7fbff', '#08306b'],
+  diverging: ['#4575b4', '#ffffff', '#d73027'],
+};
+
+export const DEFAULT_HEATMAP_MISSING_COLOR = '#e0e0e0';
+
+/**
+ * Plain sRGB interpolation between the two stops nearest `t` — the standard
+ * baseline (what a naive `d3.interpolateRgb` does too), not a perceptual
+ * (Lab-space) ramp. `packages/theme` has no inverse Lab→RGB transform today,
+ * and building one is real added complexity this first heatmap does not need
+ * to take on.
+ */
+function interpolateColor(t: number, stops: readonly string[]): string {
+  if (stops.length === 0) return '#000000';
+  if (stops.length === 1) return stops[0]!;
+
+  const clamped = Math.max(0, Math.min(1, t));
+  const segment = clamped * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(segment));
+  const localT = segment - i;
+
+  const a = parseHex(stops[i]!);
+  const b = parseHex(stops[i + 1]!);
+  const lerp = (x: number, y: number) => x + (y - x) * localT;
+  return toHex({ r: lerp(a.r, b.r), g: lerp(a.g, b.g), b: lerp(a.b, b.b) });
+}
+
+/**
+ * A cell's colour from its normalized position — called from both the cell
+ * fill and the colourbar, in this one place, so they cannot disagree on what
+ * a given `t` looks like. `null` (a missing cell) is a themed flat colour,
+ * never a point on the ramp — it has no value to place there.
+ */
+function resolveHeatmapColor(node: PlotNode, t: number | null, mode: HeatmapScaleMode): string {
+  if (t === null) return node.heatmapMissingColor ?? DEFAULT_HEATMAP_MISSING_COLOR;
+  const stops = node.heatmapStops ?? DEFAULT_HEATMAP_STOPS[mode];
+  return interpolateColor(t, stops);
+}
+
+/**
+ * How a heatmap's column labels sit, mirroring `xLabelLayout`'s tilt-then-
+ * truncate choice — the same "angle the whole axis or none of it" reasoning
+ * and the same two-tier 45°/90° budget — computed directly from the column
+ * band's own pitch rather than through `xLabelLayout`, which is tied to
+ * `CategoricalPlotGeometry`'s axis-band shape.
+ */
+function heatmapColumnLabelLayout(
+  colLabels: readonly string[],
+  slot: number,
+  panelHeightMm: number,
+  theme: Theme,
+): { angle: 0 | 45 | 90; budget: number; depth: number } {
+  const tickLabelPt = theme.type.tickLabelPt;
+  const oneLine = estimateTextHeightMm(tickLabelPt);
+  if (colLabels.length === 0) return { angle: 0, budget: Infinity, depth: 0 };
+
+  const widest = colLabels.reduce(
+    (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
+    0,
+  );
+  const angle: 0 | 45 | 90 = widest > slot * Math.SQRT2 ? 90 : widest > slot ? 45 : 0;
+  if (angle === 0) return { angle, budget: slot, depth: oneLine };
+
+  const budget = angle === 90 ? Math.max(slot, panelHeightMm * 0.45) : slot * Math.SQRT2;
+  const longest = colLabels.reduce(
+    (max, name) =>
+      Math.max(max, estimateTextWidthMm(truncateToWidth(name, tickLabelPt, budget), tickLabelPt)),
+    0,
+  );
+  const sin = angle === 90 ? 1 : Math.SQRT1_2;
+  return { angle, budget, depth: longest * sin + oneLine };
+}
+
+/** Width the row labels need, at the tick-label size. */
+function heatmapRowLabelWidth(rowLabels: readonly string[], theme: Theme): number {
+  const tickLabelPt = theme.type.tickLabelPt;
+  return rowLabels.reduce((max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)), 0);
+}
+
+/** Thickness of the colourbar ramp itself, independent of its length or its tick labels. */
+const COLORBAR_THICKNESS_MM = 3;
+
+/**
+ * How far the colourbar's furniture reaches beyond the plot area, in the
+ * direction its placement grows — composed once and read by both the margin
+ * reservation and the drawing function, the same discipline `y2WidthMm`/
+ * `scaleBarWidthMm` already follow.
+ */
+function colorbarExtentMm(
+  domain: { min: number; max: number },
+  theme: Theme,
+  placement: 'right' | 'bottom',
+): number {
+  const gap = theme.spacing.tickLabelGapMm;
+  const tickLabelPt = theme.type.tickLabelPt;
+  if (placement === 'bottom') {
+    return COLORBAR_THICKNESS_MM + gap + estimateTextHeightMm(tickLabelPt);
+  }
+  const step = (domain.max - domain.min) / 4 || 1;
+  const labelWidth = Math.max(
+    estimateTextWidthMm(formatTick(domain.min, step), tickLabelPt),
+    estimateTextWidthMm(formatTick(domain.max, step), tickLabelPt),
+  );
+  return COLORBAR_THICKNESS_MM + gap + labelWidth;
+}
+
+/** Geometry for one candidate margin — the grid analogue of `geometryForMargin`. */
+function heatmapGeometryForMargin(
+  node: PlotNode,
+  matrix: Matrix,
+  domain: { min: number; max: number },
+  mode: HeatmapScaleMode,
+  margin: PlotGeometryBase['margin'],
+): GridPlotGeometry | null {
+  const plotWidth = Math.max(0, node.frame.width - margin.left - margin.right);
+  const plotHeight = Math.max(0, node.frame.height - margin.top - margin.bottom);
+  if (plotWidth <= 0 || plotHeight <= 0) return null;
+
+  // No padding: cells fill the grid edge to edge, the conventional heatmap
+  // look, unlike a bar chart's gap-by-default.
+  const rowScale = makeBandScale(matrix.rowLabels, [0, plotHeight], 0, 0);
+  const colScale = makeBandScale(matrix.colLabels, [0, plotWidth], 0, 0);
+
+  const cells: GridPlotGeometry['cells'] = [];
+  matrix.rowLabels.forEach((row, r) => {
+    matrix.colLabels.forEach((col, c) => {
+      const value = matrix.cells[r]?.[c] ?? null;
+      const t = normalizeCellValue(value, domain);
+      cells.push({ row, col, value, color: resolveHeatmapColor(node, t, mode) });
+    });
+  });
+
+  return { kind: 'grid', margin, plotWidth, plotHeight, rowScale, colScale, cells, domain: { ...domain, mode } };
+}
+
+/** How much gutter a heatmap's row/column labels and colourbar actually need. */
+function requiredHeatmapMargin(
+  node: PlotNode,
+  theme: Theme,
+  matrix: Matrix,
+  domain: { min: number; max: number },
+): { left: number; bottom: number; right: number; top: number } {
+  const themeMargin = theme.spacing.plotMarginMm;
+  const gap = theme.spacing.tickLabelGapMm;
+
+  const left = heatmapRowLabelWidth(matrix.rowLabels, theme) + gap;
+
+  // The column slot at the theme's own margin — same two-pass reasoning
+  // `computePlotGeometry` uses generally: measured once against a plausible
+  // width, not converged to.
+  const plotWidthGuess = Math.max(0, node.frame.width - left - themeMargin.right);
+  const slot = matrix.colLabels.length > 0 ? plotWidthGuess / matrix.colLabels.length : plotWidthGuess;
+  const { depth } = heatmapColumnLabelLayout(matrix.colLabels, slot, node.frame.height, theme);
+  const bottom = depth + gap;
+
+  const placement: 'right' | 'bottom' | 'none' =
+    node.legend === 'none' ? 'none' : node.legend === 'bottom' ? 'bottom' : 'right';
+  const right =
+    placement === 'right' ? gap + colorbarExtentMm(domain, theme, 'right') : themeMargin.right;
+  const bottomTotal =
+    placement === 'bottom' ? bottom + gap + colorbarExtentMm(domain, theme, 'bottom') : bottom;
+
+  return { left, bottom: bottomTotal, right, top: themeMargin.top };
+}
+
+/**
+ * Geometry for a heatmap. Runs its own two-pass margin growth rather than
+ * sharing `geometryForMargin`/`requiredMargin` — a dense grid measures
+ * row/column label widths and a colourbar, not tick counts and a discrete
+ * legend, so almost nothing in that machinery applies.
+ */
+function heatmapGeometry(node: PlotNode, dataset: Dataset, theme: Theme): GridPlotGeometry | null {
+  const matrix = toMatrix(dataset);
+  if (matrix.rowLabels.length === 0 || matrix.colLabels.length === 0) return null;
+
+  const mode = node.heatmapScale ?? 'sequential';
+  const domain = resolveHeatmapDomain(matrix.cells, mode);
+
+  const themeMargin = theme.spacing.plotMarginMm;
+  const first = heatmapGeometryForMargin(node, matrix, domain, mode, themeMargin);
+  if (!first) return null;
+
+  const needed = requiredHeatmapMargin(node, theme, matrix, domain);
+  if (
+    needed.left <= themeMargin.left + 0.01 &&
+    needed.bottom <= themeMargin.bottom + 0.01 &&
+    needed.right <= themeMargin.right + 0.01 &&
+    needed.top <= themeMargin.top + 0.01
+  ) {
+    return first;
+  }
+
+  const grown = {
+    left: Math.max(themeMargin.left, needed.left),
+    bottom: Math.max(themeMargin.bottom, needed.bottom),
+    right: Math.max(themeMargin.right, needed.right),
+    top: Math.max(themeMargin.top, needed.top),
+  };
+  return heatmapGeometryForMargin(node, matrix, domain, mode, grown) ?? first;
+}
+
+/** Cells, row labels and column labels — a heatmap's whole plot area. */
+function renderHeatmapPlot(node: PlotNode, theme: Theme, geometry: GridPlotGeometry): SceneNode[] {
+  const { rowScale, colScale, cells, plotHeight } = geometry;
+  const out: SceneNode[] = [];
+
+  for (const cell of cells) {
+    const x = colScale.center(cell.col) - colScale.bandwidth / 2;
+    const y = rowScale.center(cell.row) - rowScale.bandwidth / 2;
+    out.push(
+      el('rect', {
+        x: round(x),
+        y: round(y),
+        width: round(colScale.bandwidth),
+        height: round(rowScale.bandwidth),
+        fill: cell.color,
+        stroke: 'none',
+      }, undefined, { role: 'heatmap-cell' }),
+    );
+
+    if (node.showCellValues && cell.value !== null) {
+      const cellPt = theme.type.tickLabelPt;
+      // Skipped where the cell can't hold a line of text without overprinting
+      // its neighbours, rather than shrinking the text past legibility.
+      if (rowScale.bandwidth >= estimateTextHeightMm(cellPt) * 1.4) {
+        out.push(
+          text(formatTick(cell.value, (geometry.domain.max - geometry.domain.min) / 4 || 1), {
+            x: round(colScale.center(cell.col)),
+            y: round(rowScale.center(cell.row)),
+            'font-family': theme.fontFamily,
+            'font-size': ptToMm(cellPt),
+            fill: theme.foreground,
+            'text-anchor': 'middle',
+            'dominant-baseline': 'central',
+          }, { role: 'tick-label' }),
+        );
+      }
+    }
+  }
+
+  if (node.y.showLabels) {
+    const tickLabelPt = theme.type.tickLabelPt;
+    const gap = theme.spacing.tickLabelGapMm;
+    for (const row of rowScale.domain) {
+      out.push(
+        text(row, {
+          x: round(-gap),
+          y: round(rowScale.center(row)),
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(tickLabelPt),
+          fill: theme.foreground,
+          'text-anchor': 'end',
+          'dominant-baseline': 'central',
+        }, { role: 'tick-label' }),
+      );
+    }
+  }
+
+  if (node.x.showLabels) {
+    const tickLabelPt = theme.type.tickLabelPt;
+    const gap = theme.spacing.tickLabelGapMm;
+    // Same tilt-then-truncate idiom the categorical x axis renders with
+    // (`renderAxes`'s x-axis half): `translate` to the tick, `rotate(-angle)`
+    // about that local origin, anchor the text to end there.
+    const { angle, budget } = heatmapColumnLabelLayout(
+      colScale.domain,
+      colScale.step,
+      node.frame.height,
+      theme,
+    );
+    const y = plotHeight + gap;
+    for (const col of colScale.domain) {
+      const x = colScale.center(col);
+      if (angle !== 0) {
+        out.push(
+          text(truncateToWidth(col, tickLabelPt, budget), {
+            x: 0,
+            y: 0,
+            transform: `translate(${round(x)} ${round(y)}) rotate(${-angle})`,
+            'font-family': theme.fontFamily,
+            'font-size': ptToMm(tickLabelPt),
+            fill: theme.foreground,
+            'text-anchor': 'end',
+            'dominant-baseline': 'central',
+          }, { role: 'tick-label' }),
+        );
+      } else {
+        out.push(
+          text(col, {
+            x: round(x),
+            y: round(y),
+            'font-family': theme.fontFamily,
+            'font-size': ptToMm(tickLabelPt),
+            fill: theme.foreground,
+            'text-anchor': 'middle',
+            'dominant-baseline': 'hanging',
+          }, { role: 'tick-label' }),
+        );
+      }
+    }
+  }
+
+  return out;
+}
+
+/** The colour-scale legend: a strip of discrete rects approximating a ramp, plus a few tick labels. */
+function renderColorbar(
+  node: PlotNode,
+  theme: Theme,
+  geometry: GridPlotGeometry,
+  placement: 'right' | 'bottom',
+): SceneNode[] {
+  const { domain, margin, plotWidth, plotHeight } = geometry;
+  const mode = domain.mode;
+  const stops = node.heatmapStops ?? DEFAULT_HEATMAP_STOPS[mode];
+  const tickLabelPt = theme.type.tickLabelPt;
+  const gap = theme.spacing.tickLabelGapMm;
+
+  // A ramp of adjacent rects, not an SVG <linearGradient> — no <defs>, no
+  // per-node id to keep unique across several heatmaps on one page, and both
+  // adapters already draw plain rects identically with zero new markup shape.
+  const STEPS = 64;
+  const lengthMm = placement === 'right' ? plotHeight : plotWidth;
+  const stepLength = lengthMm / STEPS;
+
+  const children: SceneNode[] = [];
+  for (let i = 0; i < STEPS; i++) {
+    // t=0 is the domain minimum; the bar reads low→high top-to-bottom is
+    // backwards for a vertical bar (low should sit at the bottom, same
+    // convention the y axis itself already uses), so the right-hand ramp is
+    // built bottom-up.
+    const t = placement === 'right' ? 1 - i / (STEPS - 1) : i / (STEPS - 1);
+    const color = interpolateColor(t, stops);
+    if (placement === 'right') {
+      children.push(el('rect', {
+        x: 0,
+        y: round(i * stepLength),
+        width: COLORBAR_THICKNESS_MM,
+        height: round(stepLength + 0.5),
+        fill: color,
+        stroke: 'none',
+      }, undefined, { role: 'colorbar' }));
+    } else {
+      children.push(el('rect', {
+        x: round(i * stepLength),
+        y: 0,
+        width: round(stepLength + 0.5),
+        height: COLORBAR_THICKNESS_MM,
+        fill: color,
+        stroke: 'none',
+      }, undefined, { role: 'colorbar' }));
+    }
+  }
+
+  const step = (domain.max - domain.min) / 4 || 1;
+  const tickValues = [0, 0.25, 0.5, 0.75, 1].map((f) => domain.min + f * (domain.max - domain.min));
+  for (const value of tickValues) {
+    const label = formatTick(value, step);
+    if (placement === 'right') {
+      const f = (value - domain.min) / (domain.max - domain.min || 1);
+      const y = (1 - f) * lengthMm;
+      children.push(text(label, {
+        x: round(COLORBAR_THICKNESS_MM + gap),
+        y: round(y),
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(tickLabelPt),
+        fill: theme.foreground,
+        'text-anchor': 'start',
+        'dominant-baseline': 'central',
+      }, { role: 'tick-label' }));
+    } else {
+      const f = (value - domain.min) / (domain.max - domain.min || 1);
+      const x = f * lengthMm;
+      children.push(text(label, {
+        x: round(x),
+        y: round(COLORBAR_THICKNESS_MM + gap),
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(tickLabelPt),
+        fill: theme.foreground,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'hanging',
+      }, { role: 'tick-label' }));
+    }
+  }
+
+  const originX = placement === 'right' ? margin.left + plotWidth + gap : margin.left;
+  const originY = placement === 'right' ? margin.top : margin.top + plotHeight + gap;
+  return [group({ transform: translate(originX, originY) }, children)];
+}
+
 /**
  * How much gutter this plot's axis furniture actually needs, in millimetres.
  *
@@ -1057,7 +1486,7 @@ function geometryForMargin(
 function requiredMargin(
   node: PlotNode,
   theme: Theme,
-  geometry: PlotGeometry,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
   reserveTopMm = 0,
 ): { left: number; bottom: number; right: number; top: number } {
   const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
@@ -1144,6 +1573,16 @@ function computePlotGeometry(
 ): PlotGeometry | null {
   const dataset = findDataset(doc, node.datasetId);
   if (!dataset) return null;
+
+  /*
+   * A grid plot never goes through `series` at all — a heatmap cell is not a
+   * replicate to pool or a group to compare, so it reads the matrix directly
+   * and does its own two-pass margin growth, mirroring
+   * `geometryForMargin`/`requiredMargin`'s pattern rather than sharing it.
+   */
+  if (GRID_PLOT_TYPES.has(node.plotType)) {
+    return heatmapGeometry(node, dataset, theme);
+  }
 
   const series = toSeries(dataset);
   if (series.length === 0) return null;
@@ -1395,6 +1834,9 @@ const LEGEND_ROW_GAP_MM = 0.8;
 /** What the legend would list, in draw order. Empty means there is none. */
 function legendEntries(geometry: PlotGeometry): { label: string; color: string }[] {
   if (geometry.kind === 'categorical') return geometry.legend;
+  // A heatmap's colour key is the colourbar, drawn separately in
+  // `renderHeatmapPlot` — it has no discrete entries for this shape at all.
+  if (geometry.kind === 'grid') return [];
   // A continuous plot keys on the series themselves: two lines, two names.
   return geometry.series.length > 1
     ? geometry.series.map((s) => ({ label: s.name, color: s.color }))
@@ -1632,6 +2074,24 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
     // No wrapper without a legend: an extra <g> around every existing plot
     // would change markup that is asserted byte for byte.
     return legend.length === 0 ? area : group({}, [area, ...legend]);
+  }
+
+  if (geometry.kind === 'grid') {
+    // A heatmap draws its own row/column labels and colourbar rather than
+    // sharing `renderAxes`/`renderLegend` — neither axis is a value axis, and
+    // the colour key is a ramp, not a discrete swatch list. `legend`/`placement`
+    // above are always empty for a grid (`legendEntries` excludes it), so the
+    // colourbar is placed independently here.
+    const area = group(
+      { transform: translate(margin.left, margin.top) },
+      renderHeatmapPlot(node, theme, geometry),
+      { role: 'plot-area' },
+    );
+    const colorbarPlacement: 'right' | 'bottom' | 'none' =
+      node.legend === 'none' ? 'none' : node.legend === 'bottom' ? 'bottom' : 'right';
+    const colorbar =
+      colorbarPlacement === 'none' ? [] : renderColorbar(node, theme, geometry, colorbarPlacement);
+    return colorbar.length === 0 ? area : group({}, [area, ...colorbar]);
   }
 
   const { marks } = geometry;
@@ -2272,8 +2732,18 @@ function renderSecondaryAxis(
   return out;
 }
 
-/** Break marks for whichever of a plot's axes carry them. */
-function renderAxisBreaks(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
+/**
+ * Break marks for whichever of a plot's axes carry them.
+ *
+ * Typed against the two axis-bearing kinds, not the full `PlotGeometry`
+ * union: a heatmap has no numeric axis to break, and is never passed here —
+ * `renderPlot`'s grid branch calls `renderHeatmapPlot` instead.
+ */
+function renderAxisBreaks(
+  node: PlotNode,
+  theme: Theme,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
+): SceneNode[] {
   const out = breakMarks(geometry.yScale, theme, 'y', geometry.plotWidth);
   if (geometry.kind === 'continuous') {
     out.push(...breakMarks(geometry.xScale, theme, 'x', geometry.plotHeight));
@@ -2395,7 +2865,7 @@ function renderNumericXTicks(
 function yTickLayout(
   node: PlotNode,
   theme: Theme,
-  geometry: PlotGeometry,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
 ): { visibleTicks: number[]; stride: number; maxLabelWidth: number } {
   const { yScale, plotHeight } = geometry;
   const tickLabelPt = theme.type.tickLabelPt;
@@ -2430,7 +2900,7 @@ function yTickLayout(
 function xLabelLayout(
   node: PlotNode,
   theme: Theme,
-  geometry: PlotGeometry,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
 ): { angle: 0 | 45 | 90; budget: number; depth: number } {
   const tickLabelPt = theme.type.tickLabelPt;
   const oneLine = estimateTextHeightMm(tickLabelPt);
@@ -2490,7 +2960,17 @@ function xLabelLayout(
   return { angle, budget, depth: longest * sin + oneLine };
 }
 
-function renderAxes(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
+/**
+ * Typed against the two axis-bearing kinds, not the full `PlotGeometry`
+ * union — a heatmap draws its own row/column labels in `renderHeatmapPlot`
+ * rather than sharing this function, since it has no numeric axis on either
+ * side for this to draw ticks against.
+ */
+function renderAxes(
+  node: PlotNode,
+  theme: Theme,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
+): SceneNode[] {
   const { yScale, plotWidth, plotHeight } = geometry;
   const out: SceneNode[] = [];
   const tickLen = theme.spacing.tickLengthMm;

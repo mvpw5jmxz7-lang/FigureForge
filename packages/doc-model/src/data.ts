@@ -100,7 +100,20 @@ export type DataFormat =
    * tools the data grid already has, the same "reshape before declaring the
    * layout" convention every other format already follows.
    */
-  | 'differential';
+  | 'differential'
+  /**
+   * RowLabel,Col1,Col2,… — a dense matrix, one continuous numeric value per
+   * (row, column) cell: a gene-expression table, a correlation matrix, a
+   * distance matrix.
+   *
+   * Structurally identical to `contingency` — same header shape, same "text
+   * column then numbers" cells — and deliberately a separate member for the
+   * same reason `contingency` is separate from `replicate`: the numbers mean
+   * something different. A matrix cell is not a count to test, it is a value
+   * to colour, and nothing in the cells says which reading is meant. Never
+   * auto-inferred; the author states it.
+   */
+  | 'matrix';
 
 /**
  * Layouts whose columns are blocked into groups by a second header row.
@@ -851,6 +864,34 @@ export function toSeries(ds: Dataset): Series[] {
       return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
     }
 
+    case 'matrix': {
+      /*
+       * One series per cell, mirroring `contingency`'s reading — but this
+       * exists only so generic UI that calls `toSeries` for display (the
+       * dataset list's "N series" count) reads sensibly. The heatmap itself
+       * reads through `toMatrix`, never this: a dense grid has no use for
+       * `category`/`group` two-factor band clustering, and this shape would
+       * pull it into machinery built for pairwise group comparison.
+       */
+      const cols = ds.columns.slice(1);
+      const out: Series[] = [];
+      for (const row of ds.rows) {
+        const rowName = row[0] === null ? '' : String(row[0]);
+        if (rowName === '') continue;
+        cols.forEach((col, i) => {
+          const value = row[i + 1];
+          if (typeof value !== 'number') return;
+          out.push({
+            name: compositeSeriesName(rowName, col.name),
+            values: [value],
+            category: rowName,
+            group: col.name,
+          });
+        });
+      }
+      return out;
+    }
+
     case 'simple-xy':
     default: {
       const first = dataColumnOffset(ds);
@@ -858,6 +899,47 @@ export function toSeries(ds: Dataset): Series[] {
       return [{ name, ...numericPairsAt(ds, first, first + 1) }];
     }
   }
+}
+
+export interface Matrix {
+  rowLabels: string[];
+  colLabels: string[];
+  /** `cells[row][col]`. `null` is a distinct "no data" cell, not an absence. */
+  cells: (number | null)[][];
+}
+
+/**
+ * Read a `'matrix'` dataset as a dense grid, bypassing `Series` entirely.
+ *
+ * A heatmap cell is not a replicate to pool and not a group to compare —
+ * `Series.category`/`.group` exist for pairwise band clustering and a
+ * discrete legend, neither of which a dense N×M grid wants, and `Series.name`
+ * is a join key for brackets and stats this plot never uses. A dedicated
+ * accessor keeps the grid's own shape instead of forcing it through one built
+ * for something else.
+ *
+ * Every (row, col) position is kept, `null` where the cell was blank or
+ * non-numeric — `toSeries`'s per-cell formats silently drop such a cell
+ * instead, which is right for a bar (nothing to draw) and wrong for a grid
+ * (a position with no data is still a position; a reader has to be able to
+ * tell it apart from a cell that was never looked at).
+ */
+export function toMatrix(ds: Dataset): Matrix {
+  const colLabels = ds.columns.slice(1).map((c) => c.name);
+  const rowLabels: string[] = [];
+  const cells: (number | null)[][] = [];
+
+  for (const row of ds.rows) {
+    const rowName = row[0] === null ? '' : String(row[0]);
+    if (rowName === '') continue;
+    rowLabels.push(rowName);
+    cells.push(colLabels.map((_, i) => {
+      const value = row[i + 1];
+      return typeof value === 'number' ? value : null;
+    }));
+  }
+
+  return { rowLabels, colLabels, cells };
 }
 
 /**

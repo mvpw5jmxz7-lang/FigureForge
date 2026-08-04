@@ -23,7 +23,15 @@ import {
   type ImageNode,
   type ScaleBarNode,
 } from '@figureforge/doc-model';
-import { findColorConflicts, findPreset, type Theme } from '@figureforge/theme';
+import {
+  deltaE2000,
+  findColorConflicts,
+  findPreset,
+  MIN_SERIES_DELTA_E,
+  simulateCvd,
+  type CvdType,
+  type Theme,
+} from '@figureforge/theme';
 import {
   clampFontSize,
   dropFontOverrides,
@@ -802,6 +810,61 @@ const checkVolcanoDroppedPoints: Rule = ({ document }) => {
   return findings;
 };
 
+/**
+ * A heatmap's colour scale is hard to read once its two (or three, for a
+ * diverging scale) extremes fall too close together under a colour-vision
+ * simulation.
+ *
+ * Deliberately not an extension of `checkColorAccessibility`: that rule does
+ * an O(n²) pairwise comparison meant for a handful of *discrete* series
+ * colours, and hundreds of adjacent ramp strips are *supposed* to be close —
+ * pairwise-comparing all of them would be both semantically wrong and a
+ * performance problem. This samples only the ramp's own endpoints, read
+ * straight off the rendered colourbar so it can never disagree with what was
+ * actually drawn.
+ */
+const checkHeatmapColorContrast: Rule = ({ scene }) => {
+  const stripsByOwner = new Map<string, string[]>();
+  walkWithOwner(scene, (node, ownerId) => {
+    if (node.role !== 'colorbar' || !ownerId) return;
+    const fill = node.attrs?.['fill'];
+    if (typeof fill !== 'string' || !fill.startsWith('#')) return;
+    const strips = stripsByOwner.get(ownerId) ?? [];
+    strips.push(fill);
+    stripsByOwner.set(ownerId, strips);
+  });
+
+  const findings: Finding[] = [];
+  const conditions: CvdType[] = ['deuteranopia', 'protanopia', 'tritanopia'];
+
+  for (const [nodeId, strips] of stripsByOwner) {
+    const low = strips[0];
+    const high = strips[strips.length - 1];
+    if (!low || !high || low === high) continue;
+
+    const worst = conditions
+      .map((condition) => ({
+        condition,
+        deltaE: deltaE2000(simulateCvd(low, condition), simulateCvd(high, condition)),
+      }))
+      .sort((a, b) => a.deltaE - b.deltaE)[0]!;
+    if (worst.deltaE >= MIN_SERIES_DELTA_E) continue;
+
+    findings.push({
+      id: `heatmap-cvd-${nodeId}`,
+      severity: 'info',
+      title: `Colour scale is hard to read under ${worst.condition}`,
+      detail:
+        `The scale's low and high ends are close together for a reader with ${worst.condition} ` +
+        `(ΔE ${worst.deltaE.toFixed(1)} once simulated). A perceptually distinct sequential or ` +
+        `diverging ramp would keep the extremes tellable apart.`,
+      nodeIds: [nodeId],
+    });
+  }
+
+  return findings;
+};
+
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
@@ -816,6 +879,7 @@ const RULES: { category: string; rule: Rule }[] = [
   { category: 'Panel spacing', rule: checkPanelSpacing },
   { category: 'Point cloud rendering', rule: checkPointCloudRasterization },
   { category: 'Volcano plot coverage', rule: checkVolcanoDroppedPoints },
+  { category: 'Heatmap colour contrast', rule: checkHeatmapColorContrast },
 ];
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ import {
   saveArchive,
   significanceStars,
   toMm,
+  toMatrix,
   toSeries,
   xForHash,
   type Dataset,
@@ -252,6 +253,50 @@ describe('delimited parsing', () => {
     expect(series[0]!.pointLabels).toEqual(['TP53']);
     expect(series[0]!.x).toEqual([2.1]);
     expect(series[0]!.values).toEqual([0.001]);
+  });
+
+  it('never infers matrix from a bare row×column table', () => {
+    // Same shape as `contingency` — nothing in the cells says whether it's
+    // counts to test or continuous values to colour.
+    expect(inferFormat(parseDelimited('Gene,S1,S2\nA,1.2,3.4').columns)).toBe('replicate');
+  });
+
+  it('reads a matrix table as a dense grid, preserving row order', () => {
+    const table: Dataset = {
+      ...dataset('Gene,Sample1,Sample2,Sample3\nTP53,1.2,-0.5,0.8\nMYC,2.1,1.9,-1.1'),
+      format: 'matrix',
+    };
+    const matrix = toMatrix(table);
+    expect(matrix.rowLabels).toEqual(['TP53', 'MYC']);
+    expect(matrix.colLabels).toEqual(['Sample1', 'Sample2', 'Sample3']);
+    expect(matrix.cells).toEqual([
+      [1.2, -0.5, 0.8],
+      [2.1, 1.9, -1.1],
+    ]);
+  });
+
+  it('keeps a blank or non-numeric matrix cell as a distinct null, not dropped', () => {
+    const table: Dataset = {
+      ...dataset('Gene,Sample1,Sample2\nTP53,1.2,\nMYC,n/a,1.9'),
+      format: 'matrix',
+    };
+    const matrix = toMatrix(table);
+    // Position preserved — a missing cell is still a cell, not absent from
+    // the grid the way `toSeries`'s per-cell formats silently drop one.
+    expect(matrix.cells).toEqual([
+      [1.2, null],
+      [null, 1.9],
+    ]);
+  });
+
+  it('drops a matrix row with no row label entirely', () => {
+    const table: Dataset = {
+      ...dataset('Gene,Sample1\nTP53,1.2\n,3.4'),
+      format: 'matrix',
+    };
+    const matrix = toMatrix(table);
+    expect(matrix.rowLabels).toEqual(['TP53']);
+    expect(matrix.cells).toEqual([[1.2]]);
   });
 
   it('infers each supported layout', () => {
@@ -944,6 +989,7 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('contingency')).toBe('bar');
     expect(defaultPlotTypeFor('nested')).toBe('dot');
     expect(defaultPlotTypeFor('differential')).toBe('volcano');
+    expect(defaultPlotTypeFor('matrix')).toBe('heatmap');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -1706,6 +1752,41 @@ describe('.figureforge archive', () => {
         plotNode.volcanoThresholds = { foldChange: 1.5, pValue: 0.01 };
         plotNode.volcanoColors = { down: '#111111', ns: '#222222', up: '#333333' };
         plotNode.volcanoThresholdLines = 'hide';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a heatmap plot with its new optional fields', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,S1,S2\nTP53,1.2,-0.5\nMYC,2.1,1.9', newId()),
+        format: 'matrix',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Heatmap',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'heatmap';
+        plotNode.heatmapScale = 'diverging';
+        plotNode.heatmapStops = ['#111111', '#ffffff', '#333333'];
+        plotNode.heatmapMissingColor = '#cccccc';
+        plotNode.showCellValues = true;
       }
     });
 

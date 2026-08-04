@@ -136,6 +136,11 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
     label: 'Feature, log2 fold change, p-value',
     hint: 'Exactly three columns in this order: a feature name, an effect size and a significance value. A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran.',
   },
+  {
+    id: 'matrix',
+    label: 'Matrix (rows × columns)',
+    hint: 'Column 1 labels the rows, the header row labels the columns, one continuous value per cell — a gene-expression table, a correlation matrix, a distance matrix. Draws as a heatmap; not tested here, since there is no group comparison to run on a dense grid.',
+  },
 ];
 
 /**
@@ -978,7 +983,24 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    */
   const nested = dataset?.format === 'nested';
 
+  /*
+   * A dense matrix reads through `toSeries` as one series per cell, purely so
+   * generic UI (the dataset list's "N series" count) has something to show —
+   * `continuousPlot`/`minGroupsMet` above would otherwise see plenty of
+   * "groups" and let an ordinary test run comparing single-value cells
+   * against each other, which compares nothing meaningful. Refused outright,
+   * the same stance as `nested`/`differential`.
+   */
+  const matrix = dataset?.format === 'matrix';
+
   const run = async (): Promise<void> => {
+    if (matrix) {
+      onError(
+        'A heatmap has no groups to compare — each cell is its own value, not a group of ' +
+          'replicates. There is nothing to test on this table here.',
+      );
+      return;
+    }
     if (differential) {
       onError(
         'This table already holds computed significance values; there is nothing further to ' +
@@ -1212,10 +1234,17 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
+      {matrix && (
+        <p className="hint">
+          A heatmap's cells are values to colour, not groups to compare — there is no test to run
+          on this table here. The colour scale is set in the Inspector.
+        </p>
+      )}
+
       <button
         className="primary"
         onClick={() => void run()}
-        disabled={!minGroupsMet || blockedByContinuousAxis || nested || differential}
+        disabled={!minGroupsMet || blockedByContinuousAxis || nested || differential || matrix}
       >
         Run and annotate
       </button>

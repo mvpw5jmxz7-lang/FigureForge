@@ -176,6 +176,10 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     // volcano plot, not as a trend or a bar over features.
     case 'differential':
       return 'volcano';
+    // A dense matrix of values exists to be coloured, not to be pooled into
+    // bars over its rows.
+    case 'matrix':
+      return 'heatmap';
     default:
       return 'bar-dot';
   }
@@ -271,6 +275,18 @@ export function addPlot(
     if (plot.x.title === '') plot.x.title = 'log2 fold change';
     if (plot.y.title === '') plot.y.title = '-log10(p-value)';
     plot.volcanoThresholds = DEFAULT_VOLCANO_THRESHOLDS;
+  }
+
+  /*
+   * A dense matrix exists to be coloured, not pooled into bars — forced the
+   * same way contingency/differential are, so an explicit plot type passed by
+   * a caller can't leave a matrix dataset drawn as something that reads its
+   * cells as replicates or counts.
+   */
+  if (dataset && dataset.format === 'matrix') {
+    plot.plotType = 'heatmap';
+    plot.errorBars = 'none';
+    plot.showPoints = false;
   }
 
   draft.nodes[id] = plot;

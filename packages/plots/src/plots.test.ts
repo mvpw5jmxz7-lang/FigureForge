@@ -13,7 +13,9 @@ import {
   makeScale,
   mulberry32,
   negLog10,
+  normalizeCellValue,
   resolveDomain,
+  resolveHeatmapDomain,
   silvermanBandwidth,
   summarize,
   tCritical95,
@@ -560,6 +562,59 @@ describe('volcano classification', () => {
 
   it('reads a p of exactly zero as maximally significant, not invalid', () => {
     expect(volcanoCategory(2, negLog10(Number.MIN_VALUE), thresholds)).toBe('up');
+  });
+});
+
+describe('heatmap colour domain', () => {
+  it('uses the raw min/max for a sequential scale', () => {
+    expect(resolveHeatmapDomain([[1, 5], [3, null]], 'sequential')).toEqual({ min: 1, max: 5 });
+  });
+
+  it('is symmetric around zero for a diverging scale, even with an asymmetric range', () => {
+    // |min| > |max|, so the bound is set by the more extreme magnitude, not
+    // an average or the raw max — a +2 and a -8 must not read as equally
+    // saturated.
+    expect(resolveHeatmapDomain([[-8, 2]], 'diverging')).toEqual({ min: -8, max: 8 });
+    expect(resolveHeatmapDomain([[-1, 6]], 'diverging')).toEqual({ min: -6, max: 6 });
+  });
+
+  it('ignores null cells entirely', () => {
+    expect(resolveHeatmapDomain([[null, null], [null, 4]], 'sequential')).toEqual({ min: 4 - 0.4, max: 4 + 0.4 });
+  });
+
+  it('still returns a drawable domain for an empty or all-null matrix', () => {
+    expect(resolveHeatmapDomain([], 'sequential')).toEqual({ min: 0, max: 1 });
+    expect(resolveHeatmapDomain([[null]], 'diverging')).toEqual({ min: 0, max: 1 });
+  });
+
+  it('widens a flat matrix rather than dividing by zero', () => {
+    const domain = resolveHeatmapDomain([[5, 5, 5]], 'sequential');
+    expect(domain.min).toBeLessThan(5);
+    expect(domain.max).toBeGreaterThan(5);
+  });
+});
+
+describe('heatmap cell normalization', () => {
+  const domain = { min: 0, max: 10 };
+
+  it('maps the domain to 0..1', () => {
+    expect(normalizeCellValue(0, domain)).toBe(0);
+    expect(normalizeCellValue(10, domain)).toBe(1);
+    expect(normalizeCellValue(5, domain)).toBe(0.5);
+  });
+
+  it('clamps a value outside the domain rather than extrapolating', () => {
+    expect(normalizeCellValue(-5, domain)).toBe(0);
+    expect(normalizeCellValue(15, domain)).toBe(1);
+  });
+
+  it('passes null through as null, never as an edge position', () => {
+    expect(normalizeCellValue(null, domain)).toBeNull();
+    expect(normalizeCellValue(Number.NaN, domain)).toBeNull();
+  });
+
+  it('reads a flat domain as the midpoint rather than dividing by zero', () => {
+    expect(normalizeCellValue(5, { min: 5, max: 5 })).toBe(0.5);
   });
 });
 

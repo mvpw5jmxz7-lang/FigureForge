@@ -26,6 +26,7 @@ import {
   type CalibrationSource,
   type Dataset,
   type FigureDocument,
+  type PlotNode,
   type PlotType,
   type TextNode,
 } from '@figureforge/doc-model';
@@ -261,6 +262,71 @@ describe('volcano dropped points', () => {
       volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01'),
     ).score;
     expect(withDrops).toBe(clean);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Heatmap colour contrast
+// ---------------------------------------------------------------------------
+
+function heatmapDocument(patch: Partial<PlotNode> = {}): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    title: 'Heatmap figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited('Gene,S1,S2\nTP53,0,10\nMYC,10,0');
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Matrix',
+      format: 'matrix',
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/matrix.csv',
+      sourceFilename: 'matrix.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Heatmap',
+      datasetId: dataset.id,
+      plotType: 'heatmap',
+    });
+
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') Object.assign(node, patch);
+    }
+  });
+}
+
+describe('heatmap colour contrast', () => {
+  it('says nothing about the default sequential ramp', () => {
+    const findings = reportFor(heatmapDocument()).findings;
+    expect(findings.filter((f) => f.id.startsWith('heatmap-cvd-'))).toEqual([]);
+  });
+
+  it('discloses a ramp whose extremes are nearly indistinguishable', () => {
+    const findings = reportFor(
+      heatmapDocument({ heatmapStops: ['#4575b4', '#4a78b6'] }),
+    ).findings;
+    const finding = findings.find((f) => f.id.startsWith('heatmap-cvd-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.detail).toMatch(/ΔE/);
+  });
+
+  it('never costs the readiness score', () => {
+    const clean = reportFor(heatmapDocument()).score;
+    const closeRamp = reportFor(heatmapDocument({ heatmapStops: ['#4575b4', '#4a78b6'] })).score;
+    expect(closeRamp).toBe(clean);
   });
 });
 
