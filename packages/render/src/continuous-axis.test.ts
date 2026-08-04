@@ -320,6 +320,74 @@ describe('independent xy pairs', () => {
   });
 });
 
+/**
+ * A legend and a secondary axis on the same side of the plot.
+ *
+ * The reserve for the two was combined with `Math.max`, so whichever was wider
+ * won and the other was drawn in the same band of millimetres — a key printed
+ * straight over the right-hand tick labels, which is what was reported.
+ */
+describe('a legend beside a secondary axis', () => {
+  const withY2 = (patch: Partial<PlotNode> = {}): FigureDocument =>
+    makeDocument(XY_PAIRS, 'line', 80, {
+      legend: 'right',
+      y2: {
+        title: 'Second axis',
+        min: null,
+        max: null,
+        tickStep: null,
+        scale: 'linear',
+        showLine: true,
+        showTicks: true,
+        showLabels: true,
+        trimToData: false,
+      },
+      // Only the third series reads it, which is what makes the axis appear.
+      seriesAxis: ['y', 'y', 'y2'],
+      ...patch,
+    });
+
+  /** Every x a right-hand tick label is drawn at, in panel coordinates. */
+  const y2LabelXs = (doc: FigureDocument): number[] => {
+    const svg = toSvgString(scene(doc));
+    // The secondary axis is the only tick-label set anchored `start`.
+    return [...svg.matchAll(/<text x="([\d.]+)"[^>]*text-anchor="start"[^>]*>/g)].map((m) =>
+      Number(m[1]),
+    );
+  };
+
+  it('starts the key past the axis rather than on top of it', () => {
+    const doc = withY2();
+    const legendX = collectByRole(scene(doc), 'legend')
+      .filter((n) => n.tag === 'text')
+      .map((n) => Number(n.attrs?.x));
+    expect(legendX.length).toBeGreaterThan(0);
+
+    // Both are drawn in groups translated to their own origin, so compare the
+    // whole rendered strings: the legend group must be translated further right
+    // than the axis furniture reaches.
+    const svg = toSvgString(scene(doc));
+    const origins = [...svg.matchAll(/translate\(([\d.]+) [\d.]+\)/g)].map((m) => Number(m[1]));
+    const plotWidth = Math.max(...y2LabelXs(doc));
+    expect(Math.max(...origins)).toBeGreaterThan(plotWidth);
+  });
+
+  it('reserves room for both, not for the wider of the two', () => {
+    // Turning the key off must give the plot area back exactly the key's width;
+    // if the two shared a reserve, the axis alone would already have covered it
+    // and the width would not move.
+    const both = withY2();
+    const axisOnly = withY2({ legend: 'none' });
+
+    const widthOf = (d: FigureDocument): number => {
+      const bars = collectByRole(scene(d), 'axis').map((n) => String(n.attrs?.['d']));
+      // The secondary axis line is drawn at x = plotWidth, on both ends.
+      return Math.max(...bars.map((d2) => Number(/M([\d.]+)/.exec(d2)?.[1] ?? 0)));
+    };
+    expect(widthOf(both)).toBeLessThan(widthOf(axisOnly));
+  });
+});
+
 describe('bracket anchoring on a continuous plot', () => {
   it('measures no categories, so no bracket can be misplaced', () => {
     const doc = makeDocument(XY, 'scatter');

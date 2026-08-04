@@ -669,34 +669,40 @@ function DataTab({
               <input
                 className="rename"
                 value={dataset.name}
+                title={dataset.name}
                 onChange={(e) =>
                   commit('Rename dataset', (draft) =>
                     renameDataset(draft, dataset.id, e.target.value),
                   )
                 }
               />
-              {/* Fixable after the fact: a layout is a reading of the same rows,
-                  not a transformation of them, so changing it is lossless.
-                  `toSeries` is the only consumer and it reads this field. */}
-              <select
-                value={dataset.format}
-                title="How these columns are read"
-                onChange={(e) =>
-                  commit('Change data layout', (draft) =>
-                    setDatasetReading(draft, dataset.id, {
-                      format: e.target.value as DataFormat,
-                    }),
-                  )
-                }
-              >
-                {DATA_FORMATS.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label}
-                  </option>
-                ))}
-              </select>
               <span className="muted">{toSeries(dataset).length} series</span>
+              {/* The layout control sits on the action row rather than beside
+                  the name. Its widest option is most of a 340 px panel, and a
+                  <select> cannot shrink below its longest label — so all of the
+                  deficit came out of the name, which is the one field here an
+                  author has to be able to read. */}
               <div className="field-row">
+                {/* Fixable after the fact: a layout is a reading of the same
+                    rows, not a transformation of them, so changing it is
+                    lossless. `toSeries` is the only consumer of this field. */}
+                <select
+                  value={dataset.format}
+                  title="How these columns are read"
+                  onChange={(e) =>
+                    commit('Change data layout', (draft) =>
+                      setDatasetReading(draft, dataset.id, {
+                        format: e.target.value as DataFormat,
+                      }),
+                    )
+                  }
+                >
+                  {DATA_FORMATS.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.label}
+                    </option>
+                  ))}
+                </select>
                 <button onClick={() => setEditingId(dataset.id)}>Edit data…</button>
                 <label className="check" title="Column 1 labels the rows rather than holding data">
                   <input

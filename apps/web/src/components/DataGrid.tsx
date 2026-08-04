@@ -33,6 +33,9 @@ interface Cursor {
   col: number;
 }
 
+/** Top-left of the last cell touched, which is where a paste lands. */
+const ORIGIN: Cursor = { row: 0, col: 0 };
+
 const cellText = (value: CellValue): string => (value === null ? '' : String(value));
 
 export function DataGrid({
@@ -46,13 +49,30 @@ export function DataGrid({
 }) {
   const { commit } = api;
   const [cursor, setCursor] = useState<Cursor | null>(null);
+  /**
+   * The selected cell, which outlives the editor.
+   *
+   * A spreadsheet pastes into the cell you *clicked*, not the one you are
+   * mid-way through typing in, and `cursor` goes null the moment the editor
+   * closes. Keeping the two apart is what lets a paste land somewhere
+   * predictable when nothing is open.
+   */
+  const [anchor, setAnchor] = useState<Cursor>(ORIGIN);
   /** The text being typed, so a half-finished number is not parsed mid-keystroke. */
   const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (cursor) inputRef.current?.focus();
   }, [cursor]);
+
+  // Focus the grid itself on open, so Ctrl+V works before anything is clicked.
+  // A paste event is delivered to the focused element; with focus still on the
+  // page behind, the grid never sees it and the keystroke does nothing at all.
+  useEffect(() => {
+    rootRef.current?.focus();
+  }, []);
 
   const edit = (label: string, fn: (ds: Dataset) => Dataset): void => {
     commit(label, (d) => editDataset(d, dataset.id, fn));
@@ -60,6 +80,7 @@ export function DataGrid({
 
   const open = (row: number, col: number): void => {
     setCursor({ row, col });
+    setAnchor({ row, col });
     setDraft(cellText(dataset.rows[row]?.[col] ?? null));
   };
 
@@ -131,25 +152,33 @@ export function DataGrid({
   };
 
   /**
-   * A multi-cell paste.
+   * A multi-cell paste, handled for the whole grid rather than for one input.
    *
    * Excel puts tab-delimited text on the clipboard, so a block pasted into a
    * cell fills the block *from* that cell rather than dropping the whole thing
    * into it. A single value with no tab or newline is left to the input.
+   *
+   * This used to sit on the in-cell editor alone, which meant the paste only
+   * worked once a cell had been opened by clicking it — the one state a user
+   * arriving with a copied table is not in. Worse, a merely *focused* cell is a
+   * `<button>`, which `Canvas`'s window-level shortcut guard let through, so
+   * Ctrl+V there duplicated figure elements onto the canvas instead. One
+   * handler on the container catches both, since React's synthetic paste
+   * bubbles out of the editor too.
    */
-  const onPaste = (event: React.ClipboardEvent<HTMLInputElement>): void => {
-    if (!cursor) return;
+  const onPaste = (event: React.ClipboardEvent<HTMLElement>): void => {
     const text = event.clipboardData.getData('text/plain');
     if (!text.includes('\t') && !text.includes('\n')) return;
 
     event.preventDefault();
-    const { row, col } = cursor;
+    const { row, col } = cursor ?? anchor;
     edit('Paste cells', (ds) => pasteBlock(ds, row, col, text));
     setCursor(null);
+    setAnchor({ row, col });
   };
 
   return (
-    <div className="data-grid">
+    <div className="data-grid" ref={rootRef} tabIndex={-1} onPaste={onPaste}>
       <div className="field-row">
         <strong>{dataset.name}</strong>
         <span className="muted">
@@ -228,11 +257,16 @@ export function DataGrid({
                           value={draft}
                           onChange={(e) => setDraft(e.target.value)}
                           onKeyDown={onKeyDown}
-                          onPaste={onPaste}
                           onBlur={() => commitCell(null)}
                         />
                       ) : (
-                        <button className="cell" onClick={() => open(r, c)}>
+                        <button
+                          className={
+                            anchor.row === r && anchor.col === c ? 'cell selected' : 'cell'
+                          }
+                          onClick={() => open(r, c)}
+                          onFocus={() => setAnchor({ row: r, col: c })}
+                        >
                           {cellText(row[c] ?? null) || ' '}
                         </button>
                       )}
@@ -250,6 +284,10 @@ export function DataGrid({
         <button onClick={() => edit('Add row', (ds) => insertRow(ds, ds.rows.length))}>
           Add row
         </button>
+        <span className="muted">
+          Paste from Excel with Ctrl/Cmd+V — the block fills from the selected cell, adding rows
+          and columns to fit.
+        </span>
         {dataset.editedAt && (
           <span className="muted">
             Edited since import. The project file still holds the original data as it arrived;

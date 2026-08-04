@@ -282,7 +282,10 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .provenance { color: var(--muted); font-size: 10px; font-style: normal; }
 .rename {
   flex: 1;
-  min-width: 0;
+  /* A floor, not zero. `min-width: 0` let the row's other controls take every
+     pixel and leave the name a sliver — twice now — and on a wrapping row a
+     floor makes the row grow a line instead, which is recoverable. */
+  min-width: 9rem;
   font: inherit;
   font-weight: 600;
   padding: 2px 4px;
@@ -298,7 +301,11 @@ h4 { margin: 0 0 6px; font-size: 13px; }
    list it is: the dataset rows grew a second line too, and without this the
    name input collapsed to 10 px — present, correct, and invisible. */
 .list li:has(.field-row) { flex-wrap: wrap; }
-.list li .field-row { flex-basis: 100%; gap: 6px; align-items: center; }
+/* `display: flex` was only ever declared on `.inspector .field-row`, so the gap
+   and alignment here did nothing and the controls ran together. Wrapping,
+   because the layout <select> is nearly a panel wide on its own. */
+.list li .field-row { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.list li .field-row select { max-width: 100%; }
 .list.assets li .rename { cursor: default; font-weight: 600; }
 .list.assets .warning { display: inline; margin: 0; }
 
@@ -515,6 +522,10 @@ h4 { margin: 0 0 6px; font-size: 13px; }
   cursor: text;
 }
 .grid td.editing { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The selected cell outlives the editor, because that is where a paste lands.
+   Shown, or an author has no way to know which cell a block will fill from. */
+.grid td .cell.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+.data-grid:focus { outline: none; }
 .grid td input {
   width: 100%;
   min-width: 76px;

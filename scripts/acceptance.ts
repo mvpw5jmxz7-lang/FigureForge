@@ -321,8 +321,14 @@ async function main(): Promise<void> {
     renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }),
   );
   const imageFrame = cropped.nodes[imageId]!.frame;
+  // `preserveAspectRatio="none"` is the marker of the corrected path: the
+  // renderer places the kept region itself rather than handing the job to a
+  // second centring rule that was resolving against the oversized box.
   check('crop clips an oversized image rather than scaling it',
-    croppedSvg.includes('clipPath') && croppedSvg.includes(`width="${imageFrame.width / 0.5}"`));
+    croppedSvg.includes('clipPath') &&
+      croppedSvg.includes('preserveAspectRatio="none"') &&
+      !croppedSvg.includes('scale(') &&
+      imageFrame.width > 0);
 
   writeFileSync(`${OUT}figure.svg`, svg);
 

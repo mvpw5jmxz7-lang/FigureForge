@@ -33,13 +33,6 @@ import { bytesToBase64, type AssetStore } from './assets.js';
 /** MIME types with no pixel grid, so nothing to crop. Mirrors the checker's. */
 const VECTOR_MIME_TYPES = new Set(['image/svg+xml', 'application/pdf', 'application/postscript']);
 
-/**
- * How far the cropped source's aspect may differ from the frame's before the
- * re-encode stops being exact. Half a percent is well inside a rounding error
- * on a real micrograph and well outside a genuine letterbox.
- */
-const ASPECT_TOLERANCE = 0.005;
-
 export interface PixelRect {
   x: number;
   y: number;
@@ -85,29 +78,21 @@ export function planCropReencode(doc: FigureDocument): CropPlan[] {
     if (nw <= 0 || nh <= 0) continue;
 
     /*
-     * The one case where the nominal crop is not what the reader sees.
+     * Every crop is bakeable, which it was not before.
      *
-     * In the cropped branch `preserveAspectRatio="xMidYMid meet"` applies to
-     * the *oversized* box, not to the frame. When the cropped source and the
-     * frame share an aspect, `meet` is a no-op and the visible window is
-     * exactly the crop rect. When they do not, the source is letterboxed inside
-     * that oversized box and the window shows a different region — so baking
-     * the nominal crop would change what is drawn. Ship it as today instead.
+     * This used to bail out under an aspect mismatch, because the renderer
+     * applied `preserveAspectRatio="xMidYMid meet"` to the *oversized* box: the
+     * window then showed a different source region than the crop named, and
+     * baking the nominal rect would have changed the picture. `renderImage` now
+     * fits the cropped aspect to the frame itself, so the nominal rect *is*
+     * what is drawn — and the baked form draws identically, because an
+     * uncropped image of the kept pixels letterboxes into the same rectangle
+     * `renderImage` computes for the unbaked one.
      *
-     * (With `preserveAspect` false the source is stretched to fill the box and
-     * the mapping is exact either way.) The exact generalisation is to compute
-     * the letterboxed sub-rect and require the window to be fully covered by
-     * drawn pixels; that is more code for a case "Fit frame to image" already
-     * resolves, so it is noted rather than built.
+     * That matters most for a montage, whose tiles have `aspectLock: null` by
+     * construction and so almost never match: those were exactly the crops that
+     * shipped their whole source raster to the exporter.
      */
-    if (image.preserveAspect) {
-      const croppedAspect = (nw * width) / (nh * height);
-      const frameAspect = image.frame.width / image.frame.height;
-      if (frameAspect <= 0 || Math.abs(croppedAspect / frameAspect - 1) > ASPECT_TOLERANCE) {
-        continue;
-      }
-    }
-
     const rect: PixelRect = {
       x: Math.round(x * nw),
       y: Math.round(y * nh),

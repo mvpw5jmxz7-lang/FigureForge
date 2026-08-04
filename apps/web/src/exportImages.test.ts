@@ -99,22 +99,30 @@ describe('choosing which crops to bake in', () => {
     expect(planCropReencode(doc)).toEqual([]);
   });
 
-  it('skips a letterboxed crop, where the nominal rect is not what is drawn', () => {
-    // `preserveAspectRatio="xMidYMid meet"` applies to the *oversized* box in
-    // the cropped branch, so under an aspect mismatch the visible window shows
-    // a different source region than the crop names. Baking the nominal rect
-    // would change the picture.
+  it('bakes a letterboxed crop, which it used to refuse', () => {
+    /*
+     * This was skipped while `renderImage` centred the source inside the
+     * *oversized* box: under an aspect mismatch the drawn window was not the
+     * crop the document named, so baking the nominal rect would have changed
+     * the picture. The renderer now fits the cropped aspect to the frame, and
+     * the baked form — an uncropped image of just those pixels — letterboxes
+     * into the very same rectangle. Same picture, without shipping the
+     * discarded pixels.
+     *
+     * A montage tile is this case by construction: `addPanelWithImages` sets
+     * `aspectLock: null`, so its cells never match the micrograph.
+     */
     const doc = makeDocument({
       crop: { width: 0.5, height: 0.5 },
       preserveAspect: true,
       frame: { width: 50, height: 10 },
     });
-    expect(planCropReencode(doc)).toEqual([]);
+    expect(planCropReencode(doc)).toHaveLength(1);
   });
 
-  it('bakes a mismatched aspect anyway when the image is stretched to fit', () => {
-    // With `preserveAspect: false` the source is scaled to fill the box, so the
-    // window is exactly the crop rect whatever the aspects are.
+  it('bakes a stretched image too', () => {
+    // With `preserveAspect: false` the source fills the box, so the window is
+    // exactly the crop rect whatever the aspects are.
     const doc = makeDocument({
       crop: { width: 0.5, height: 0.5 },
       preserveAspect: false,
