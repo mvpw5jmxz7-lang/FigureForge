@@ -218,6 +218,42 @@ describe('delimited parsing', () => {
     expect(isContingency(dataset('Group,Value\nA,1'))).toBe(false);
   });
 
+  it('never infers differential from a bare label+2-numeric table', () => {
+    // Same shape as `replicate` — nothing in the cells says whether the two
+    // numeric columns are replicates or an effect size and a p-value, so the
+    // ambiguity is handed to the author instead of guessed.
+    expect(inferFormat(parseDelimited('Gene,log2FC,p\nTP53,1.2,0.01').columns)).toBe('replicate');
+  });
+
+  it('reads a differential table as one series with per-point labels', () => {
+    const table: Dataset = {
+      ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02\nEGFR,0.1,0.5'),
+      format: 'differential',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    expect(series[0]).toEqual({
+      name: 'Test',
+      values: [0.001, 0.02, 0.5],
+      x: [2.1, -1.8, 0.1],
+      pointLabels: ['TP53', 'MYC', 'EGFR'],
+    });
+  });
+
+  it('drops a differential row missing any of label, fold change or p-value', () => {
+    const table: Dataset = {
+      ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01\nMYC,n/a,0.02\nEGFR,0.1,'),
+      format: 'differential',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    // Every incomplete row is gone, not just the bad cell — the same rule
+    // `numericPairsAt` already applies to every other xy layout.
+    expect(series[0]!.pointLabels).toEqual(['TP53']);
+    expect(series[0]!.x).toEqual([2.1]);
+    expect(series[0]!.values).toEqual([0.001]);
+  });
+
   it('infers each supported layout', () => {
     expect(inferFormat(parseDelimited('X,Y\n1,2').columns)).toBe('simple-xy');
     expect(inferFormat(parseDelimited('Group,Value\nA,1').columns)).toBe('grouped');
@@ -907,6 +943,7 @@ describe('operations', () => {
     expect(defaultPlotTypeFor(undefined)).toBe('bar-dot');
     expect(defaultPlotTypeFor('contingency')).toBe('bar');
     expect(defaultPlotTypeFor('nested')).toBe('dot');
+    expect(defaultPlotTypeFor('differential')).toBe('volcano');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -1641,6 +1678,40 @@ describe('.figureforge archive', () => {
 
     expect(loaded.document).toEqual(doc);
     expect(loaded.manifest.format).toBe('figureforge');
+  });
+
+  it('round-trips a volcano plot with its new optional fields', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'volcano';
+        plotNode.volcanoThresholds = { foldChange: 1.5, pValue: 0.01 };
+        plotNode.volcanoColors = { down: '#111111', ns: '#222222', up: '#333333' };
+        plotNode.volcanoThresholdLines = 'hide';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
   });
 
   it('stores the verbatim source data alongside the model', () => {

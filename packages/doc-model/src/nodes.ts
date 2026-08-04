@@ -108,7 +108,8 @@ export type PlotType =
   | 'box'
   | 'violin'
   | 'beeswarm'
-  | 'histogram';
+  | 'histogram'
+  | 'volcano';
 
 /**
  * The plot types whose x axis is a numeric scale rather than a band of
@@ -119,7 +120,27 @@ export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(
   'scatter',
   'line',
   'histogram',
+  'volcano',
 ]);
+
+/** Which side of a significance threshold a volcano point falls on. */
+export type VolcanoCategory = 'up' | 'down' | 'ns';
+
+export interface VolcanoThresholds {
+  /** |log2 fold change| at or above which a point counts as up/down. */
+  foldChange: number;
+  /** p-value at or below which a point counts as significant. */
+  pValue: number;
+}
+
+/**
+ * Declared here, beside the type, rather than in `packages/plots`: `doc-model`
+ * imports nothing internal, so `operations.ts`'s `addPlot` — which sets this as
+ * a new volcano plot's starting point — cannot reach across to `plots` for it.
+ * `packages/plots/src/volcano.ts` imports this one rather than declaring a
+ * second copy.
+ */
+export const DEFAULT_VOLCANO_THRESHOLDS: VolcanoThresholds = { foldChange: 1, pValue: 0.05 };
 
 export type ErrorBarKind = 'none' | 'sd' | 'sem' | 'ci95' | 'range' | 'iqr';
 
@@ -280,6 +301,23 @@ export interface PlotNode extends NodeBase {
    * passes rather than converged to.
    */
   groupGapFraction?: number;
+  /**
+   * Fold-change and p-value cutoffs a volcano plot classifies points against.
+   *
+   * Absent is `DEFAULT_VOLCANO_THRESHOLDS` (see `packages/plots`). Volcano
+   * only — every other plot type ignores it.
+   */
+  volcanoThresholds?: VolcanoThresholds;
+  /** Colour per significance category. Absent falls back to the renderer's default. */
+  volcanoColors?: Record<VolcanoCategory, string>;
+  /**
+   * Whether the fold-change/p-value cutoff lines are drawn.
+   *
+   * Absent is `'show'` — a string enum rather than a boolean, matching every
+   * other optional on/off field on this node (`errorDisplay`, `legend`), since
+   * no optional boolean here defaults to `true` when absent.
+   */
+  volcanoThresholdLines?: 'show' | 'hide';
 }
 
 export interface ImageNode extends NodeBase {

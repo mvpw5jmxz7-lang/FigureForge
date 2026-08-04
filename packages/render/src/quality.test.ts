@@ -199,6 +199,72 @@ describe('point cloud rasterization', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Volcano dropped points
+// ---------------------------------------------------------------------------
+
+function volcanoDocument(csv: string): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    title: 'Volcano figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited(csv);
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Differential expression',
+      format: 'differential',
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/volcano.csv',
+      sourceFilename: 'volcano.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Volcano',
+      datasetId: dataset.id,
+      plotType: 'volcano',
+    });
+  });
+}
+
+describe('volcano dropped points', () => {
+  it('says nothing when every row plots', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02'),
+    ).findings;
+    expect(findings.filter((f) => f.id.startsWith('volcano-dropped-'))).toEqual([]);
+  });
+
+  it('discloses rows dropped for a missing or invalid cell', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01\nMYC,n/a,0.02'),
+    ).findings;
+    const finding = findings.find((f) => f.id.startsWith('volcano-dropped-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.title).toContain('2');
+    expect(finding?.detail).toMatch(/2 of 3 rows/);
+  });
+
+  it('never costs the readiness score', () => {
+    const clean = reportFor(volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001')).score;
+    const withDrops = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01'),
+    ).score;
+    expect(withDrops).toBe(clean);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Image resolution
 // ---------------------------------------------------------------------------
 

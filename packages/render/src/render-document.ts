@@ -10,6 +10,7 @@ import {
   BRACKET_HEIGHT_MM,
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_BRACKET_GAP_MM,
+  DEFAULT_VOLCANO_THRESHOLDS,
   absoluteFrame,
   isLocked,
   childrenOf,
@@ -37,6 +38,7 @@ import {
   type Stroke,
   type TextNode,
   type TextStyle,
+  type VolcanoCategory,
 } from '@figureforge/doc-model';
 import { paletteColors, type Theme } from '@figureforge/theme';
 import {
@@ -48,8 +50,10 @@ import {
   makeBandScale,
   makeGroupedBandScale,
   makeScale,
+  negLog10,
   resolveDomain,
   tickCountForLength,
+  volcanoCategory,
   xyMarks,
   type NumericScale,
 } from '@figureforge/plots';
@@ -744,6 +748,84 @@ function continuousGeometry(
     };
   }
 
+  if (node.plotType === 'volcano') {
+    // One set of (feature, fold change, p-value) triples — pooling several
+    // groups would mix significance calls that were never computed together.
+    if (series.length !== 1) return null;
+    const raw = series[0]!;
+    if (!raw.x || raw.x.length === 0 || !raw.pointLabels || raw.pointLabels.length === 0) {
+      return null;
+    }
+
+    const thresholds = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
+    /*
+     * The y axis is -log10(p), not the raw p-value read from the table —
+     * transformed here, once, before geometry or classification sees it, so
+     * both are built from the same numbers the axis actually shows.
+     *
+     * A p of exactly 0 is a floating-point underflow in the upstream test,
+     * not a claim of infinite significance, and -log10(0) is Infinity — a y
+     * position no finite axis can place. Substituting the smallest
+     * representable positive double keeps the point on the chart, at its
+     * extreme top, rather than silently dropping the most significant row in
+     * the table.
+     */
+    const transformed = {
+      ...raw,
+      values: raw.values.map((p) => negLog10(p > 0 ? p : Number.MIN_VALUE)),
+    };
+
+    const xScale = makeScale({
+      domain: resolveDomain(transformed.x ?? [], {
+        min: node.x.min,
+        max: node.x.max,
+        includeZero: false,
+        padFraction: 0.08,
+        kind: node.x.scale,
+      }),
+      rangeMm: [0, plotWidth],
+      tickStep: node.x.tickStep,
+      kind: node.x.scale,
+      ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+    });
+
+    const yScale = makeScale({
+      domain: resolveDomain(transformed.values, {
+        min: node.y.min,
+        max: node.y.max,
+        // -log10(p) is a magnitude — more significant is further from zero —
+        // so a truncated baseline would misread the same way a count axis's
+        // would.
+        includeZero: true,
+        padFraction: 0.08,
+        kind: node.y.scale,
+      }),
+      rangeMm: [plotHeight, 0],
+      tickStep: node.y.tickStep,
+      kind: node.y.scale,
+      ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+    });
+
+    return {
+      kind: 'continuous',
+      margin,
+      plotWidth,
+      plotHeight,
+      xScale,
+      yScale,
+      series: xyMarks([transformed], {
+        x: xScale,
+        y: yScale,
+        showLine: false,
+        showPoints: true,
+        pointSizeMm: node.pointSizeMm,
+        colors,
+        classify: (xValue, yValue) => volcanoCategory(xValue, yValue, thresholds),
+      }),
+      bins: [],
+    };
+  }
+
   // scatter and line: every series must carry its own paired x values.
   const xValues = series.flatMap((s) => [...(s.x ?? [])]).filter(Number.isFinite);
   if (xValues.length === 0) return null;
@@ -1106,7 +1188,12 @@ export interface PointCloudSeries {
   shape: PointShape;
   sizeMm: number;
   stroke?: Stroke;
-  points: { x: number; y: number }[];
+  /**
+   * `color` overrides `series.color` per point when set — a volcano plot's
+   * significance category, resolved once here rather than a second time in
+   * `apps/web`'s `drawPoint`.
+   */
+  points: { x: number; y: number; color?: string }[];
 }
 
 export interface PointCloudPlan {
@@ -1154,7 +1241,10 @@ export function planPointClouds(doc: FigureDocument, theme: Theme): PointCloudPl
         shape: shapeForSeries(node, index) ?? node.pointShape ?? 'circle',
         sizeMm: node.pointSizeMm,
         stroke: node.pointStroke,
-        points: s.points.map((p) => ({ x: p.x, y: p.y })),
+        points: s.points.map((p) => {
+          const color = resolveVolcanoColor(node, p.category);
+          return { x: p.x, y: p.y, ...(color ? { color } : {}) };
+        }),
       })),
     });
   }
@@ -1531,6 +1621,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       { transform: translate(margin.left, margin.top) },
       [
         ...renderAxes(node, theme, geometry),
+        ...renderVolcanoThresholds(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
         // Break marks last: the gap is painted in the page colour, so it has to
         // land over the marks it interrupts rather than under them.
@@ -1701,6 +1792,80 @@ function shapeForSeries(node: PlotNode, index: number): PointShape | undefined {
   return node.pointShapes?.[index] ?? undefined;
 }
 
+/**
+ * Chosen to survive both greyscale print and the common red-green colour-vision
+ * deficiency — the classic up/down convention is exactly the classic failure
+ * case, so the default deliberately isn't red/green.
+ */
+export const DEFAULT_VOLCANO_COLORS: Record<VolcanoCategory, string> = {
+  down: '#4575b4',
+  ns: '#999999',
+  up: '#d73027',
+};
+
+/**
+ * A volcano point's colour, from its significance category — called from both
+ * the vector path (`renderContinuousMarks`) and the raster path
+ * (`planPointClouds`), in this one place, so the two cannot drift on what
+ * colour a point gets. Only the resolved hex string crosses into `apps/web`'s
+ * `pointRasters.ts`, as plain data on `PointCloudSeries.points[].color` — no
+ * volcano-specific logic needs to live outside `packages/render`.
+ */
+function resolveVolcanoColor(node: PlotNode, category: string | undefined): string | undefined {
+  if (category !== 'up' && category !== 'down' && category !== 'ns') return undefined;
+  return { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors }[category];
+}
+
+/**
+ * The conventional dashed fold-change/p-value cutoff lines. In scope because
+ * the cutoffs are already mandatory `PlotNode` state — needed for colouring
+ * regardless — so drawing them is cheap, and it is what makes a coloured
+ * scatter actually read as a volcano plot.
+ */
+function renderVolcanoThresholds(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+): SceneNode[] {
+  if (node.plotType !== 'volcano' || geometry.kind !== 'continuous') return [];
+  if (node.volcanoThresholdLines === 'hide') return [];
+  const t = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
+
+  const dashAttrs = {
+    fill: 'none',
+    stroke: theme.foreground,
+    'stroke-width': theme.stroke.hairlineMinMm,
+    'stroke-dasharray': '1.5 1',
+    'stroke-opacity': 0.5,
+  };
+
+  const lines: SceneNode[] = [];
+  for (const fc of [-t.foldChange, t.foldChange]) {
+    const x = geometry.xScale.scale(fc);
+    if (!Number.isFinite(x)) continue;
+    lines.push(
+      el(
+        'path',
+        { d: `M${round(x)} 0 L${round(x)} ${round(geometry.plotHeight)}`, ...dashAttrs },
+        undefined,
+        { role: 'threshold-line' },
+      ),
+    );
+  }
+  const yCut = geometry.yScale.scale(negLog10(t.pValue));
+  if (Number.isFinite(yCut)) {
+    lines.push(
+      el(
+        'path',
+        { d: `M0 ${round(yCut)} L${round(geometry.plotWidth)} ${round(yCut)}`, ...dashAttrs },
+        undefined,
+        { role: 'threshold-line' },
+      ),
+    );
+  }
+  return lines;
+}
+
 function markerNode(
   node: PlotNode,
   theme: Theme,
@@ -1727,6 +1892,14 @@ function markerNode(
      * which must not be counted as a data point by anything reading roles.
      */
     role?: SceneRole;
+    /**
+     * Point identity, e.g. a gene name — drawn as a native SVG `<title>` child
+     * rather than any app-level tooltip mechanism, so it costs nothing on
+     * export and needs no DOM/interaction code in `packages/render`. Only
+     * meaningful below `MAX_VECTOR_POINTS`: past it, points bake into one
+     * raster with no per-point node to attach a title to.
+     */
+    label?: string;
   },
 ): SceneNode {
   const r = (style.sizeMm ?? node.pointSizeMm) / 2;
@@ -1741,6 +1914,8 @@ function markerNode(
   };
 
   const role: SceneRole = style.role ?? 'point';
+  const titleChildren: SceneNode[] | undefined =
+    style.label !== undefined ? [{ tag: 'title', text: style.label }] : undefined;
 
   switch (style.shape ?? node.pointShape ?? 'circle') {
     case 'square': {
@@ -1757,7 +1932,7 @@ function markerNode(
           height: round(side),
           ...common,
         },
-        undefined,
+        titleChildren,
         { role },
       );
     }
@@ -1769,17 +1944,17 @@ function markerNode(
         `M${round(cx)} ${round(cy - (2 / 3) * height)} ` +
         `L${round(cx + side / 2)} ${round(cy + height / 3)} ` +
         `L${round(cx - side / 2)} ${round(cy + height / 3)} Z`;
-      return el('path', { d, ...common }, undefined, { role });
+      return el('path', { d, ...common }, titleChildren, { role });
     }
     case 'diamond': {
       const half = r * Math.sqrt(Math.PI / 2);
       const d =
         `M${round(cx)} ${round(cy - half)} L${round(cx + half)} ${round(cy)} ` +
         `L${round(cx)} ${round(cy + half)} L${round(cx - half)} ${round(cy)} Z`;
-      return el('path', { d, ...common }, undefined, { role });
+      return el('path', { d, ...common }, titleChildren, { role });
     }
     default:
-      return el('circle', { cx, cy, r, ...common }, undefined, { role });
+      return el('circle', { cx, cy, r, ...common }, titleChildren, { role });
   }
 }
 
@@ -1914,8 +2089,9 @@ function renderContinuousMarks(
       for (const point of s.points) {
         markChildren.push(
           markerNode(node, theme, point.x, point.y, {
-            fill: node.pointFill ?? s.color,
+            fill: node.pointFill ?? resolveVolcanoColor(node, point.category) ?? s.color,
             ...(shape ? { shape } : {}),
+            ...(point.label !== undefined ? { label: point.label } : {}),
           }),
         );
       }

@@ -131,6 +131,11 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
     label: 'Nested — subjects within groups (Prism)',
     hint: 'Every column is a subject, blocked into groups. Points cluster by subject and colour by group. Plotted but not tested — a nested design needs a hierarchical model.',
   },
+  {
+    id: 'differential',
+    label: 'Feature, log2 fold change, p-value',
+    hint: 'Exactly three columns in this order: a feature name, an effect size and a significance value. A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran.',
+  },
 ];
 
 /**
@@ -932,8 +937,20 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    * as a whole.
    */
   const continuousPlot = activePlot ? CONTINUOUS_X_PLOT_TYPES.has(activePlot.plotType) : false;
+  /*
+   * A volcano's x is a fold change and its y is already -log10 of a p-value
+   * this app never computed — correlating the two would be Pearson/Spearman
+   * on an effect size against a transform of its own significance call,
+   * which answers nothing. `differential` excludes it from the correlation
+   * gate below even though it otherwise looks exactly like a single-series
+   * numeric-x plot, the shape `xyCorrelation` exists to allow.
+   */
+  const differential = dataset?.format === 'differential';
   const xyCorrelation =
-    CORRELATION_TESTS.has(test) && series.length === 1 && series[0]?.x !== undefined;
+    CORRELATION_TESTS.has(test) &&
+    series.length === 1 &&
+    series[0]?.x !== undefined &&
+    !differential;
   const blockedByContinuousAxis = continuousPlot && !xyCorrelation;
   const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
 
@@ -962,6 +979,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
   const nested = dataset?.format === 'nested';
 
   const run = async (): Promise<void> => {
+    if (differential) {
+      onError(
+        'This table already holds computed significance values; there is nothing further to ' +
+          'test on them here.',
+      );
+      return;
+    }
     if (nested) {
       onError(
         'Nested data needs a hierarchical model, which this build does not have. Pooling the ' +
@@ -1162,7 +1186,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
-      {blockedByContinuousAxis && !nested && (
+      {blockedByContinuousAxis && !nested && !differential && (
         <p className="hint">
           This plot has a numeric x axis, so there are no groups to compare and nowhere to
           anchor a significance bracket. Select a categorical plot, or a correlation/regression
@@ -1180,10 +1204,18 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
+      {differential && (
+        <p className="hint">
+          A volcano plot's p-values are already the output of a test run elsewhere — correlating
+          the fold change against its own significance call answers nothing. There is no test to
+          run on this table here; the cutoffs that colour the plot are set in the Inspector.
+        </p>
+      )}
+
       <button
         className="primary"
         onClick={() => void run()}
-        disabled={!minGroupsMet || blockedByContinuousAxis || nested}
+        disabled={!minGroupsMet || blockedByContinuousAxis || nested || differential}
       >
         Run and annotate
       </button>

@@ -27,7 +27,7 @@ import {
   type LayoutOptions,
 } from './layout.js';
 import type { LayoutTemplate } from './templates.js';
-import { CONTINUOUS_X_PLOT_TYPES } from './nodes.js';
+import { CONTINUOUS_X_PLOT_TYPES, DEFAULT_VOLCANO_THRESHOLDS } from './nodes.js';
 import type {
   ArrowNode,
   AssetId,
@@ -172,6 +172,10 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     // Counts are magnitudes; a dot over a single frequency says nothing extra.
     case 'contingency':
       return 'bar';
+    // A table of effect sizes and significance values exists to be read as a
+    // volcano plot, not as a trend or a bar over features.
+    case 'differential':
+      return 'volcano';
     default:
       return 'bar-dot';
   }
@@ -251,6 +255,22 @@ export function addPlot(
    */
   if (dataset && dataset.format === 'nested' && plot.plotType === 'dot') {
     plot.showPoints = true;
+  }
+
+  /*
+   * Axis titles are hardcoded rather than read from the dataset's own column
+   * headers (as most other formats do): real files spell the fold-change
+   * column inconsistently (`log2FC`/`logFC`/`L2FC`), and the y axis is a
+   * -log10 transform of the raw p-value column, which never shares its header
+   * either way. Both stay editable afterward through the ordinary axis UI.
+   */
+  if (dataset && dataset.format === 'differential') {
+    plot.plotType = 'volcano';
+    plot.errorBars = 'none';
+    plot.showPoints = true;
+    if (plot.x.title === '') plot.x.title = 'log2 fold change';
+    if (plot.y.title === '') plot.y.title = '-log10(p-value)';
+    plot.volcanoThresholds = DEFAULT_VOLCANO_THRESHOLDS;
   }
 
   draft.nodes[id] = plot;

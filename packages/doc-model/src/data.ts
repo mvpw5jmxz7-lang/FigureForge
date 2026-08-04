@@ -79,7 +79,28 @@ export type DataFormat =
    * drawn clustered per group rather than pooled. See the note on nested
    * statistics in the stats gate: they plot, they are not tested.
    */
-  | 'nested';
+  | 'nested'
+  /**
+   * Feature, log2FoldChange, pValue — one row per gene/feature, exactly three
+   * columns in this order.
+   *
+   * Structurally identical to `replicate` (a text column followed by numeric
+   * columns) and deliberately a separate member anyway, for the same reason
+   * `contingency` is: the two numeric columns mean specific, fixed things — an
+   * effect size and a significance value, not interchangeable replicate
+   * measurements — and nothing in the cells can tell the two readings apart.
+   * Never auto-inferred, for the same reason `contingency` never is: guessing
+   * wrong would draw meaningless bars off frequencies there, or a meaningless
+   * volcano off two columns that were actually replicates here. The author
+   * states it.
+   *
+   * A raw DESeq2/edgeR/limma export has more columns than this (baseMean,
+   * lfcSE, stat, padj, …) in a different order. This format does not guess
+   * which two matter — trim and reorder to this shape first, with the column
+   * tools the data grid already has, the same "reshape before declaring the
+   * layout" convention every other format already follows.
+   */
+  | 'differential';
 
 /**
  * Layouts whose columns are blocked into groups by a second header row.
@@ -607,6 +628,17 @@ export interface Series {
    * is explicitly not comparing. Defaults to `group` where they coincide.
    */
   legendKey?: string;
+  /**
+   * Per-point identity, parallel to `x` — one label per (x, value) pair, in
+   * the same order. Only `'differential'` populates it today.
+   *
+   * A parallel array rather than a richer point object, mirroring `x` itself:
+   * every existing consumer (`hasReplicatesAtX`, the Stats tab, `xyMarks`)
+   * already reads `.values`/`.x` as flat number arrays, and a point-object
+   * shape would force all of them to change for a feature only one plot type
+   * needs.
+   */
+  pointLabels?: readonly string[];
 }
 
 /** How a two-factor series is named, so nothing composes it a second way. */
@@ -813,6 +845,12 @@ export function toSeries(ds: Dataset): Series[] {
       return out;
     }
 
+    case 'differential': {
+      const [labelCol, fcCol, pCol] = ds.columns;
+      if (!labelCol || !fcCol || !pCol) return [];
+      return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
+    }
+
     case 'simple-xy':
     default: {
       const first = dataColumnOffset(ds);
@@ -940,17 +978,29 @@ function numericPairsAt(
   ds: Dataset,
   xIndex: number,
   yIndex: number,
-): { values: number[]; x: number[] } {
+  /**
+   * Column holding a per-point identity, e.g. a gene name. When given, a row
+   * whose label is null is dropped along with a row whose x or y is missing —
+   * a point with no identity is not a point `pointLabels`' callers can use.
+   */
+  labelIndex?: number,
+): { values: number[]; x: number[]; pointLabels?: string[] } {
   const values: number[] = [];
   const x: number[] = [];
+  const pointLabels: string[] | undefined = labelIndex === undefined ? undefined : [];
   for (const row of ds.rows) {
     const xValue = row[xIndex];
     const yValue = row[yIndex];
     if (typeof xValue !== 'number' || typeof yValue !== 'number') continue;
+    if (labelIndex !== undefined) {
+      const label = row[labelIndex];
+      if (label === null) continue;
+      pointLabels!.push(String(label));
+    }
     x.push(xValue);
     values.push(yValue);
   }
-  return { values, x };
+  return { values, x, ...(pointLabels ? { pointLabels } : {}) };
 }
 
 // ---------------------------------------------------------------------------

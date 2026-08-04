@@ -8,7 +8,10 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of reported fixes and the DOM-volume mechanism phase 7 needed first; phases 7–9's chart types are not.**
+could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of
+reported fixes, the DOM-volume mechanism phase 7 needed first, and phase 7's
+first chart type (volcano plots); heatmap, PCA, UMAP and survival are not,
+nor is phase 8 or 9.**
 
 ---
 
@@ -192,6 +195,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 7 stage 1 (volcano plots):** 395 TypeScript tests, 105
+Python tests, typecheck and lint clean, 46-check acceptance run unaffected —
+see "Phase 7, Stage 1 — volcano plots" below.
 
 **Verified after the DOM-volume mechanism:** 371 TypeScript tests, 105 Python
 tests, typecheck and lint clean, 46-check acceptance run — see "Pre-phase-7 —
@@ -1265,6 +1272,128 @@ the raster/placeholder branch and `line`'s free coverage, three quality-rule
 tests), 105 Python tests unchanged, typecheck and lint clean, 46-check
 acceptance run unaffected.
 
+### Phase 7, Stage 1 — volcano plots
+
+Phase 7 covers five chart types that split into three different architectural
+problems: heatmap and survival each need a wholly new `PlotGeometry` kind;
+PCA and UMAP need an `Analysis` whose *output* is itself a new plottable
+dataset, which nothing today expresses. Volcano needs neither — it mostly
+reuses the existing scatter/continuous geometry — so it went first, planned
+and built as one stage rather than the whole phase at once, the same
+roadmap-plus-first-stage shape every prior round already used. It is also a
+real second workload for the point-cloud rasterization mechanism above: a
+gene list is routinely 10,000–20,000 rows, comfortably over
+`MAX_VECTOR_POINTS`.
+
+- **`DataFormat` gained `'differential'`: a label plus exactly two numeric
+  columns, fixed order** (`Feature, log2FoldChange, pValue`). Structurally
+  identical to `'replicate'` (label + N numeric columns) at N=2 — there is no
+  cell-level signal separating "two replicate measurements" from "an effect
+  size and a significance value," the same situation `'contingency'` is
+  already in relative to `'replicate'`. So it is **never auto-inferred**;
+  `inferFormat` gained no branch for it, and it is reachable only by explicit
+  selection in the layout dropdown, mirroring `'contingency'`. A raw
+  DESeq2/edgeR/limma export has more columns in a different order and is not
+  read directly — trim and reorder first with the data grid's existing column
+  tools, the same "reshape before declaring the layout" convention every
+  other format already follows. Deliberately not solved with header-name
+  matching in this stage.
+- **`Series` gained `pointLabels?: readonly string[]`**, a parallel array
+  mirroring `x?: number[]` — the same "one more value per observation, aligned
+  by index" shape, rather than a richer point object that would force every
+  existing consumer of `.values`/`.x` as flat arrays to change for a feature
+  only one plot type needs. `numericPairsAt` gained an optional third
+  `labelIndex`, keeping "drop the whole row when any required cell is
+  missing" in the one function that already owns that discipline — a missing
+  label drops the point, no different from a missing x or y.
+- **Per-point colour is resolved in exactly one place, called twice, both
+  inside `packages/render`.** `xyMarks` gained an optional `classify(xValue,
+  yValue)` callback, threaded through the existing pair-filtering loop onto
+  `PointGeometry.category`; `resolveVolcanoColor` in `render-document.ts`
+  turns a category into a hex string. The vector path (`renderContinuousMarks`)
+  and the raster path (`planPointClouds`) both call it — not `apps/web`,
+  which would be a second place this could drift. Only the *resolved* hex
+  string crosses into `apps/web/src/pointRasters.ts`, as a new optional
+  `color?` on `PointCloudSeries.points[]`; `drawPoint` reads `point.color ??
+  series.color`, no volcano-specific import needed there at all. Classification
+  itself (`volcanoCategory` in `packages/plots/src/volcano.ts`) is pure
+  comparison math against the transformed y and the raw x — no server compute,
+  confirming the phase-7 roadmap's own read of this stage.
+- **The y axis is `-log10(p)`, transformed once**, before geometry or
+  classification sees it, so both are built from the same numbers the axis
+  actually shows — not the raw p-value `toSeries` returns. **A p of exactly 0
+  substitutes `Number.MIN_VALUE` before the transform**, rather than dropping
+  the point or letting `-log10(0) = Infinity` reach the scale: a p of 0 is a
+  floating-point underflow in the upstream test, not a claim of infinite
+  significance, and the substitution keeps the most significant row in the
+  table on the chart, at its extreme top, instead of silently missing.
+- **The y domain is anchored at zero** (`includeZero: true`), the same
+  reasoning `histogram`'s count axis already uses: `-log10(p)` is a
+  magnitude, and the single-point "flat series" fallback every other
+  continuous plot uses would otherwise pad symmetrically around one value and
+  start the axis well above zero.
+- **Point identity is a native SVG `<title>`, not an app-level tooltip.**
+  `markerNode` gained an optional `label` that becomes a `<title>` child —
+  free, DOM-free, and export-faithful, since both `toReact` and `toSvgString`
+  already render `.text` generically regardless of tag.
+  `parity.test.tsx`'s "every text-bearing node gets exactly one `<text>`"
+  assertion filters on `tag === 'text'` specifically, so this doesn't trip
+  it. **This only works below `MAX_VECTOR_POINTS`** — above it, points bake
+  into one raster with no per-point node to attach a title to, and a
+  realistic gene list crosses that threshold almost every time. Colour still
+  applies above threshold, baked into the pixels; label identity does not.
+- **Threshold reference lines are in scope**, not deferred — the cutoffs are
+  already mandatory `PlotNode` state (needed for colouring regardless), so
+  drawing two dashed vertical lines (±fold-change) and one dashed horizontal
+  line (p-value) is cheap and is what makes a coloured scatter actually read
+  as a volcano plot. New `SceneRole: 'threshold-line'`, kept distinct from
+  `'axis'`/`'error-bar'` for the same reason `'point-cloud'` is kept distinct
+  from `'image'`.
+- **The Stats tab explicitly refuses a `'differential'` dataset.** Once
+  `'volcano'` joined `CONTINUOUS_X_PLOT_TYPES`, the existing `xyCorrelation`
+  gate would otherwise have automatically offered Pearson/Spearman/linear
+  regression on log2FC vs. raw p-value — statistically meaningless, since the
+  p-values are already the output of a test this app never ran. Caught before
+  shipping, not after: the gate now excludes `differential` explicitly,
+  mirroring the existing `nested` refusal.
+- **The ordinary per-series Colours block is replaced, not left visible, on
+  a volcano plot.** Palette swatches, "reset to palette" and "points use
+  series colour" all key off `node.palette`/series colour, none of which
+  volcano's rendering ever reads once a point has a valid category — leaving
+  them up would be a control that visibly does nothing, the same failure
+  mode `isTwoFactor`'s own doc comment warns about. `VolcanoColorControls`
+  takes its place: fold-change/p-value cutoffs, a threshold-line toggle, and
+  three swatches (down/ns/up), the last chosen (`#4575b4`/`#999999`/`#d73027`)
+  specifically *not* red/green — the classic up/down convention is exactly
+  the classic colour-vision-deficiency failure case.
+- **The second-y-axis offering is withheld for volcano**, the same way it
+  already is for categorical plots. `continuousGeometry`'s volcano branch
+  never reads `node.y2`/`seriesAxis` — a volcano plot is always exactly one
+  series (`series.length !== 1` returns null) — so leaving the Inspector's
+  "Second y axis" checkbox enabled would be exactly the same "control that
+  does nothing" class of bug the Colours block fix above exists to avoid.
+
+Driven in a real browser: a differential table's layout was never
+auto-suggested (`Detect` stayed the default until "Feature, log2 fold change,
+p-value" was chosen explicitly), the panel opened as a volcano plot with the
+Thresholds/Colours controls in place of the ordinary palette block, 4 points
+rendered in **3** distinct colours hoverable by gene name, **3** dashed
+threshold lines, the Stats tab's Run button was disabled with a stated
+reason, and the exported PDF was a single page. A 2,500-row import (over
+`MAX_VECTOR_POINTS`) baked to one `point-cloud` raster with **zero** new
+`point`-role nodes; sampling the baked PNG's own pixels — the same technique
+round 6's montage-crop fix was verified with — found **188** distinct
+colours, proving per-point colour survived the bake rather than collapsing
+to one.
+
+**Verified:** 395 TypeScript tests (371 + 24 new: doc-model format/series/
+schema tests, `packages/plots` classification and `xyMarks` tests, a
+`continuous-axis.test.ts` volcano geometry suite, two parity fixtures below
+and above `MAX_VECTOR_POINTS`, and quality-rule tests for the dropped-points
+disclosure), 105 Python tests unchanged, typecheck and lint clean, 46-check
+acceptance run unaffected (no existing fixture uses the new format or plot
+type).
+
 ---
 
 ## What's next
@@ -1277,7 +1406,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts` |
+| 7 | heatmap, PCA, UMAP, survival — **volcano is done**, stage 1 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution are the pattern the remaining stages extend, not repeat — see "Phase 7, Stage 1" below |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1295,13 +1424,15 @@ Phases 5–9, with the actual entry points:
 
 ### Declared-but-missing things — check before trusting the types
 
-- **All 9 `PlotType` variants now render distinctly.** The dropdown is gated on
-  what the *dataset* supports rather than on what is implemented (`typesFor` in
-  `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
+- **All 10 `PlotType` variants now render distinctly.** The dropdown is gated
+  on what the *dataset* supports rather than on what is implemented (`typesFor`
+  in `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
   supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
-  series, since pooling groups invents a bimodal shape belonging to neither.
-  `computePlotGeometry` returns null for an unsupported combination, so a type
-  set some other way draws nothing rather than something wrong.
+  series, since pooling groups invents a bimodal shape belonging to neither;
+  volcano needs a single series carrying `Series.pointLabels`, which only the
+  `differential` format supplies. `computePlotGeometry` returns null for an
+  unsupported combination, so a type set some other way draws nothing rather
+  than something wrong.
 
 ---
 
@@ -1313,7 +1444,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction` and `groupGapFraction`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, and phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members and phase 7 stage 1 by one more (`differential`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way, for the same reason — a `volcano` node is unreadable by an older build, not unreadable by this one. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

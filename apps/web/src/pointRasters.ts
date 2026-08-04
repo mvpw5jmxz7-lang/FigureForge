@@ -36,6 +36,8 @@ function drawPoint(
   series: PointCloudSeries,
   x: number,
   y: number,
+  /** Per-point override, e.g. a volcano plot's significance category colour — resolved once in `packages/render`. */
+  color?: string,
 ): void {
   // Every shape is area-matched to the circle of the same nominal size, the
   // same formulas `markerNode` uses, so switching shape does not silently
@@ -69,7 +71,7 @@ function drawPoint(
     default:
       ctx.arc(x, y, r, 0, Math.PI * 2);
   }
-  ctx.fillStyle = series.color;
+  ctx.fillStyle = color ?? series.color;
   ctx.fill();
   if (series.stroke) {
     ctx.strokeStyle = series.stroke.color;
@@ -93,7 +95,7 @@ export async function bakePointCloud(
   ctx.scale(scale, scale);
 
   for (const series of plan.series) {
-    for (const point of series.points) drawPoint(ctx, series, point.x, point.y);
+    for (const point of series.points) drawPoint(ctx, series, point.x, point.y, point.color);
   }
 
   const blob = await canvas.convertToBlob({ type: 'image/png' });

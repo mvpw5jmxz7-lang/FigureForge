@@ -45,6 +45,10 @@ export interface PointGeometry {
   x: number;
   y: number;
   value: number;
+  /** Per-point identity, e.g. a gene name. Only `xyMarks` given `pointLabels` sets this. */
+  label?: string;
+  /** Per-point classification, e.g. a volcano significance category. Only `xyMarks` given `classify` sets this. */
+  category?: string;
 }
 
 export interface BoxGeometry {
@@ -392,6 +396,15 @@ export interface XyMarkOptions {
    * the replicates.
    */
   showReplicates?: boolean;
+  /**
+   * Per-point classification, e.g. a volcano plot's up/down/not-significant
+   * call — computed from the *raw* (unscaled) pair, before it is placed on the
+   * page, so the classification never depends on axis geometry.
+   *
+   * Only meaningful without `summariseAtX`: a category classifies one
+   * measurement, and a summarised point is several.
+   */
+  classify?: (xValue: number, yValue: number) => string;
 }
 
 /**
@@ -403,7 +416,12 @@ const CAP_HALF_WIDTH_MM = 0.7;
 
 /** Paired (x, y) marks for scatter and line plots. */
 export function xyMarks(
-  series: readonly { name: string; values: readonly number[]; x?: readonly number[] }[],
+  series: readonly {
+    name: string;
+    values: readonly number[];
+    x?: readonly number[];
+    pointLabels?: readonly string[];
+  }[],
   options: XyMarkOptions,
 ): XySeriesMarks[] {
   return series.map((s, index) => {
@@ -413,13 +431,13 @@ export function xyMarks(
     // Only pairs where both coordinates are real. Dropping the pair rather than
     // the value keeps x and y aligned; dropping one side would shift every
     // subsequent point onto the wrong x.
-    const pairs: { xValue: number; yValue: number }[] = [];
+    const pairs: { xValue: number; yValue: number; label?: string }[] = [];
     for (let i = 0; i < s.values.length; i++) {
       const xValue = s.x?.[i];
       const yValue = s.values[i];
       if (xValue === undefined || yValue === undefined) continue;
       if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) continue;
-      pairs.push({ xValue, yValue });
+      pairs.push({ xValue, yValue, label: s.pointLabels?.[i] });
     }
 
     /*
@@ -428,7 +446,13 @@ export function xyMarks(
      * an axis that says it does not show a range must not show a mark there.
      */
     const points: PointGeometry[] = pairs
-      .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
+      .map((p) => ({
+        x: options.x.scale(p.xValue),
+        y: y.scale(p.yValue),
+        value: p.yValue,
+        ...(p.label !== undefined ? { label: p.label } : {}),
+        ...(options.classify ? { category: options.classify(p.xValue, p.yValue) } : {}),
+      }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
 
     /*

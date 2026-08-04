@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  DEFAULT_VOLCANO_THRESHOLDS,
   POINT_SHAPES,
   childrenOf,
   deleteNode,
@@ -38,13 +39,14 @@ import {
   type PlotType,
   type PointShape,
   type TextStyle,
+  type VolcanoCategory,
 } from '@figureforge/doc-model';
-import { reflowBrackets } from '@figureforge/render';
+import { DEFAULT_VOLCANO_COLORS, reflowBrackets } from '@figureforge/render';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
-/** Every plot type. All nine render distinctly since phase 3. */
+/** Every plot type. All ten render distinctly since round 7. */
 const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'bar', label: 'Bar' },
   { id: 'dot', label: 'Dot' },
@@ -55,6 +57,7 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'scatter', label: 'Scatter' },
   { id: 'line', label: 'Line' },
   { id: 'histogram', label: 'Histogram' },
+  { id: 'volcano', label: 'Volcano' },
 ];
 
 /**
@@ -62,25 +65,31 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
  *
  * Scatter and line need paired x values, which `toSeries` supplies only for the
  * xy-shaped formats; a histogram needs a single distribution, since pooling
- * several groups invents a bimodal shape belonging to neither. Offering a type
- * the data cannot support is how the unimplemented plot types shipped
+ * several groups invents a bimodal shape belonging to neither; a volcano plot
+ * needs a per-point identity, which only the `differential` format supplies —
+ * gated on that data shape rather than on the format's name, the same way
+ * scatter/line gate on "does `.x` exist" rather than on a format list. Offering
+ * a type the data cannot support is how the unimplemented plot types shipped
  * plausible-looking wrong output — so they are withheld rather than approximated.
  */
-function typesFor(series: readonly { values: number[]; x?: number[] }[]): {
+function typesFor(series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[]): {
   offered: typeof OFFERED_PLOT_TYPES;
   reason: string | null;
 } {
   const hasX = series.length > 0 && series.every((s) => s.x !== undefined && s.x.length > 0);
   const single = series.length === 1;
+  const hasLabels = single && (series[0]?.pointLabels?.length ?? 0) > 0;
 
   const blocked: string[] = [];
   if (!hasX) blocked.push('Scatter and line need a dataset with an x column');
   if (!single) blocked.push('Histogram needs a single group');
+  if (!hasLabels) blocked.push('Volcano needs a dataset with a label, fold change and p-value per row');
 
   return {
     offered: OFFERED_PLOT_TYPES.filter((t) => {
       if (t.id === 'scatter' || t.id === 'line') return hasX;
       if (t.id === 'histogram') return single;
+      if (t.id === 'volcano') return hasLabels;
       return true;
     }),
     reason: blocked.length > 0 ? `${blocked.join('. ')}.` : null,
@@ -89,6 +98,106 @@ function typesFor(series: readonly { values: number[]; x?: number[] }[]): {
 
 /** Types that draw the whole distribution, so a centre and error bar say nothing extra. */
 const DISTRIBUTION_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(['box', 'violin']);
+
+const VOLCANO_CATEGORY_LABELS: Record<VolcanoCategory, string> = {
+  down: 'Down',
+  ns: 'Not significant',
+  up: 'Up',
+};
+
+/**
+ * Cutoffs, threshold-line toggle and per-category colours for a volcano plot —
+ * in place of the ordinary per-series Colours block, which does not apply
+ * here: category colour wins over the series fallback for every valid point,
+ * so palette swatches and "points use series colour" would visibly do
+ * nothing.
+ */
+function VolcanoColorControls({
+  node,
+  setPlot,
+}: {
+  node: PlotNode;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+}) {
+  const thresholds = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
+  const colors = { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors };
+  const conflicts = findColorConflicts(Object.values(colors));
+
+  return (
+    <>
+      <h4>Thresholds</h4>
+      <label className="field">
+        |log2 fold change| ≥
+        <input
+          type="number"
+          min={0}
+          step={0.1}
+          value={thresholds.foldChange}
+          onChange={(e) => {
+            const foldChange = Number(e.target.value);
+            if (Number.isFinite(foldChange) && foldChange >= 0) {
+              setPlot('Change fold-change cutoff', {
+                volcanoThresholds: { ...thresholds, foldChange },
+              });
+            }
+          }}
+        />
+      </label>
+      <label className="field">
+        p-value ≤
+        <input
+          type="number"
+          min={0}
+          max={1}
+          step={0.01}
+          value={thresholds.pValue}
+          onChange={(e) => {
+            const pValue = Number(e.target.value);
+            if (Number.isFinite(pValue) && pValue > 0 && pValue <= 1) {
+              setPlot('Change p-value cutoff', { volcanoThresholds: { ...thresholds, pValue } });
+            }
+          }}
+        />
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={node.volcanoThresholdLines !== 'hide'}
+          onChange={(e) =>
+            setPlot('Change threshold lines', {
+              volcanoThresholdLines: e.target.checked ? 'show' : 'hide',
+            })
+          }
+        />
+        Show threshold lines
+      </label>
+
+      <h4>Colours</h4>
+      <div className="swatches">
+        {(Object.keys(colors) as VolcanoCategory[]).map((category) => (
+          <label className="swatch" key={category} title={VOLCANO_CATEGORY_LABELS[category]}>
+            <input
+              type="color"
+              value={colors[category]}
+              onChange={(e) =>
+                setPlot('Change volcano colour', {
+                  volcanoColors: { ...colors, [category]: e.target.value },
+                })
+              }
+            />
+            <span>{VOLCANO_CATEGORY_LABELS[category]}</span>
+          </label>
+        ))}
+      </div>
+      {conflicts.length > 0 && (
+        <p className="warning">
+          {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
+          {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
+        </p>
+      )}
+    </>
+  );
+}
 
 const ERROR_BARS = [
   { id: 'none', label: 'None' },
@@ -480,81 +589,87 @@ function PlotFields({
         key repeating them is furniture.
       </p>
 
-      <h4>Colours</h4>
-      <label className="field block">
-        Palette
-        <select
-          value={typeof node.palette === 'string' ? node.palette : ''}
-          onChange={(e) => setPlot('Change palette', { palette: e.target.value })}
-        >
-          {typeof node.palette !== 'string' && <option value="">Custom</option>}
-          {PALETTES.map((palette) => (
-            <option key={palette.id} value={palette.id}>
-              {palette.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {/* Keyed by index, not name: a paired-xy dataset legitimately repeats a
-          column name, and a duplicate React key drops one of the swatches. */}
-      <div className={perSeriesShapes ? 'swatches with-shapes' : 'swatches'}>
-        {series.map((s, index) => (
-          <label className="swatch" key={index} title={s.name}>
-            <input
-              type="color"
-              value={colors[index] ?? '#000000'}
-              onChange={(e) => setSeriesColor(index, e.target.value)}
-            />
-            <span>{s.name}</span>
-            {perSeriesShapes && (
-              <select
-                value={node.pointShapes?.[index] ?? ''}
-                title={`Marker for ${s.name}`}
-                onChange={(e) =>
-                  setSeriesShape(index, e.target.value === '' ? null : (e.target.value as PointShape))
-                }
-              >
-                <option value="">Default</option>
-                {POINT_SHAPES.map((shape) => (
-                  <option key={shape} value={shape}>
-                    {shape[0]!.toUpperCase() + shape.slice(1)}
-                  </option>
-                ))}
-              </select>
-            )}
+      {node.plotType === 'volcano' ? (
+        <VolcanoColorControls node={node} setPlot={setPlot} />
+      ) : (
+        <>
+          <h4>Colours</h4>
+          <label className="field block">
+            Palette
+            <select
+              value={typeof node.palette === 'string' ? node.palette : ''}
+              onChange={(e) => setPlot('Change palette', { palette: e.target.value })}
+            >
+              {typeof node.palette !== 'string' && <option value="">Custom</option>}
+              {PALETTES.map((palette) => (
+                <option key={palette.id} value={palette.id}>
+                  {palette.name}
+                </option>
+              ))}
+            </select>
           </label>
-        ))}
-      </div>
-      {perSeriesShapes && (
-        <p className="hint">
-          A different symbol per series is what tells them apart in greyscale, and for a
-          reader who cannot separate the colours. Once any series is given one, the legend
-          draws every series' own symbol. “Default” follows the Marker setting below.
-        </p>
-      )}
 
-      {typeof node.palette !== 'string' && (
-        <button onClick={() => setPlot('Reset palette', { palette: theme.paletteId })}>
-          Reset to palette
-        </button>
-      )}
+          {/* Keyed by index, not name: a paired-xy dataset legitimately repeats a
+              column name, and a duplicate React key drops one of the swatches. */}
+          <div className={perSeriesShapes ? 'swatches with-shapes' : 'swatches'}>
+            {series.map((s, index) => (
+              <label className="swatch" key={index} title={s.name}>
+                <input
+                  type="color"
+                  value={colors[index] ?? '#000000'}
+                  onChange={(e) => setSeriesColor(index, e.target.value)}
+                />
+                <span>{s.name}</span>
+                {perSeriesShapes && (
+                  <select
+                    value={node.pointShapes?.[index] ?? ''}
+                    title={`Marker for ${s.name}`}
+                    onChange={(e) =>
+                      setSeriesShape(index, e.target.value === '' ? null : (e.target.value as PointShape))
+                    }
+                  >
+                    <option value="">Default</option>
+                    {POINT_SHAPES.map((shape) => (
+                      <option key={shape} value={shape}>
+                        {shape[0]!.toUpperCase() + shape.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </label>
+            ))}
+          </div>
+          {perSeriesShapes && (
+            <p className="hint">
+              A different symbol per series is what tells them apart in greyscale, and for a
+              reader who cannot separate the colours. Once any series is given one, the legend
+              draws every series' own symbol. “Default” follows the Marker setting below.
+            </p>
+          )}
 
-      {conflicts.length > 0 && (
-        <p className="warning">
-          {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
-          {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
-        </p>
-      )}
+          {typeof node.palette !== 'string' && (
+            <button onClick={() => setPlot('Reset palette', { palette: theme.paletteId })}>
+              Reset to palette
+            </button>
+          )}
 
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={node.pointsUseSeriesColor ?? false}
-          onChange={(e) => setPlot('Change point colour', { pointsUseSeriesColor: e.target.checked })}
-        />
-        Points use series colour
-      </label>
+          {conflicts.length > 0 && (
+            <p className="warning">
+              {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
+              {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
+            </p>
+          )}
+
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.pointsUseSeriesColor ?? false}
+              onChange={(e) => setPlot('Change point colour', { pointsUseSeriesColor: e.target.checked })}
+            />
+            Points use series colour
+          </label>
+        </>
+      )}
 
       <h4>Marks</h4>
       <label className="field block">
@@ -812,7 +927,7 @@ function PlotFields({
       />
 
       <h4>Second y axis</h4>
-      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) ? (
+      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'volcano' ? (
         <>
           <label className="check">
             <input

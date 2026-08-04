@@ -27,7 +27,7 @@ import {
   type FigureDocument,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
-import { MAX_VECTOR_POINTS, renderDocument } from './render-document.js';
+import { MAX_VECTOR_POINTS, planPointClouds, renderDocument } from './render-document.js';
 import { toSvgString } from './svg-string.js';
 import { toReact } from './react.js';
 import { collectAttr, collectByRole, walkScene, walkWithOwner } from './scene.js';
@@ -342,6 +342,112 @@ describe('adapter parity', () => {
       // per-point markers collapse.
       if (plotType === 'line') expect(collectByRole(baked, 'line').length).toBe(1);
     }
+  });
+
+  it('draws a volcano plot identically through both adapters, coloured and labelled per point', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Gene,log2FC,p\nTP53,2.5,0.001\nMYC,-3.0,0.0005\nEGFR,0.1,0.8');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-volcano',
+        name: 'Differential expression',
+        format: 'differential',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/volcano.csv',
+        sourceFilename: 'volcano.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Volcano',
+        datasetId: dataset.id,
+        plotType: 'volcano',
+      });
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    const points = collectByRole(scene, 'point');
+    expect(points).toHaveLength(3);
+    expect(points.map((p) => p.children?.find((c) => c.tag === 'title')?.text).sort()).toEqual([
+      'EGFR',
+      'MYC',
+      'TP53',
+    ]);
+    // Not every point shares a colour — up, down and not-significant all
+    // appear in this fixture, which is what would silently collapse to one
+    // colour if a future change dropped the per-point resolution.
+    expect(new Set(points.map((p) => p.attrs?.['fill'])).size).toBeGreaterThan(1);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('rasterizes a volcano plot above MAX_VECTOR_POINTS with per-point colour surviving the bake', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    // Alternating sign and p-value spread guarantees up, down and
+    // not-significant all appear well past the threshold.
+    const rows = Array.from({ length: MAX_VECTOR_POINTS + 500 }, (_, i) => {
+      const fc = i % 2 === 0 ? 2 + i * 0.001 : -2 - i * 0.001;
+      const p = i % 3 === 0 ? 0.5 : 0.0001;
+      return `G${i},${fc},${p}`;
+    });
+    const parsed = parseDelimited(`Gene,log2FC,p\n${rows.join('\n')}`);
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-volcano-cloud',
+        name: 'Differential expression',
+        format: 'differential',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/volcano-cloud.csv',
+        sourceFilename: 'volcano-cloud.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Volcano cloud',
+        datasetId: dataset.id,
+        plotType: 'volcano',
+      });
+    });
+
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const plans = planPointClouds(doc, NATURE_THEME);
+    expect(plans).toHaveLength(1);
+    // The regression case: if per-point colour resolution ever stopped
+    // reaching the raster path, every point would silently share one colour.
+    const colors = new Set(plans[0]!.series[0]!.points.map((p) => p.color));
+    expect(colors.size).toBeGreaterThan(1);
+
+    const baked = renderDocument(doc, {
+      theme: NATURE_THEME,
+      pointRasters: new Map([[plotNode.id, 'data:image/png;base64,AAAA']]),
+    });
+    expect(collectByRole(baked, 'point-cloud').length).toBe(1);
+    expect(collectByRole(baked, 'point')).toEqual([]);
+    const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
   });
 
   it('leaves a plot at or under MAX_VECTOR_POINTS on the ordinary vector path', () => {

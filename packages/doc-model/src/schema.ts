@@ -115,6 +115,7 @@ const plotSchema = z.object({
     'violin',
     'beeswarm',
     'histogram',
+    'volcano',
   ]),
   datasetId: z.string(),
   encoding: z.object({
@@ -151,6 +152,12 @@ const plotSchema = z.object({
   // padding of 1, which is a plot of invisible bars.
   barGapFraction: finite.min(0).max(0.9).optional(),
   groupGapFraction: finite.min(0).max(0.9).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  volcanoThresholds: z.object({ foldChange: nonNeg, pValue: finite.gt(0).max(1) }).optional(),
+  volcanoColors: z
+    .object({ down: z.string(), ns: z.string(), up: z.string() })
+    .optional(),
+  volcanoThresholdLines: z.enum(['show', 'hide']).optional(),
 });
 
 const imageSchema = z.object({
@@ -276,6 +283,7 @@ const datasetSchema = z.object({
     'grouped-replicates',
     'xy-replicates',
     'nested',
+    'differential',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),

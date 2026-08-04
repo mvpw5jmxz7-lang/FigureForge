@@ -12,11 +12,13 @@ import {
   makeGroupedBandScale,
   makeScale,
   mulberry32,
+  negLog10,
   resolveDomain,
   silvermanBandwidth,
   summarize,
   tCritical95,
   tickCountForLength,
+  volcanoCategory,
   xyMarks,
   type MarkOptions,
   type XyMarkOptions,
@@ -511,6 +513,53 @@ describe('continuous marks', () => {
     const [mark] = xyMarks([{ name: 'A', values: [2, 4] }], xyOptions());
     expect(mark!.n).toBe(0);
     expect(mark!.points).toEqual([]);
+  });
+
+  it('labels and classifies each point from the raw pair, filtered in lockstep', () => {
+    const [mark] = xyMarks(
+      [{ name: 'A', values: [2, Number.NaN, 4], x: [10, 15, 20], pointLabels: ['P', 'Q', 'R'] }],
+      xyOptions({ classify: (xValue, yValue) => (xValue + yValue > 20 ? 'big' : 'small') }),
+    );
+    // The middle pair is dropped for a non-finite y, same as the unlabelled
+    // case — its label goes with it rather than shifting onto the next point.
+    expect(mark!.points.map((p) => p.label)).toEqual(['P', 'R']);
+    expect(mark!.points.map((p) => p.category)).toEqual(['small', 'big']);
+  });
+
+  it('leaves label and category unset when nothing is passed', () => {
+    const [mark] = xyMarks([{ name: 'A', values: [2, 4], x: [10, 20] }], xyOptions());
+    expect(mark!.points.every((p) => p.label === undefined && p.category === undefined)).toBe(true);
+  });
+});
+
+describe('volcano classification', () => {
+  const thresholds = { foldChange: 1, pValue: 0.05 };
+
+  it('classifies up and down by sign once both cutoffs are met', () => {
+    expect(volcanoCategory(2, negLog10(0.001), thresholds)).toBe('up');
+    expect(volcanoCategory(-2, negLog10(0.001), thresholds)).toBe('down');
+  });
+
+  it('is not-significant when the fold change is below the cutoff', () => {
+    expect(volcanoCategory(0.5, negLog10(0.001), thresholds)).toBe('ns');
+  });
+
+  it('is not-significant when the p-value is above the cutoff regardless of fold change', () => {
+    expect(volcanoCategory(5, negLog10(0.2), thresholds)).toBe('ns');
+  });
+
+  it('treats a p of exactly the cutoff as significant', () => {
+    expect(volcanoCategory(2, negLog10(thresholds.pValue), thresholds)).toBe('up');
+  });
+
+  it('reads a non-finite fold change or p-value as not-significant, not a crash', () => {
+    expect(volcanoCategory(Number.NaN, negLog10(0.001), thresholds)).toBe('ns');
+    expect(volcanoCategory(Number.POSITIVE_INFINITY, negLog10(0.001), thresholds)).toBe('ns');
+    expect(volcanoCategory(2, Number.NaN, thresholds)).toBe('ns');
+  });
+
+  it('reads a p of exactly zero as maximally significant, not invalid', () => {
+    expect(volcanoCategory(2, negLog10(Number.MIN_VALUE), thresholds)).toBe('up');
   });
 });
 

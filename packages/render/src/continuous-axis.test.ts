@@ -388,6 +388,130 @@ describe('a legend beside a secondary axis', () => {
   });
 });
 
+const DIFFERENTIAL_CSV = `Gene,log2FC,p
+TP53,2.5,0.001
+MYC,-3.0,0.0005
+EGFR,0.2,0.5
+BRCA1,4.0,0.2`;
+
+/** `format: 'differential'` is never inferred, so this sets it directly. */
+function makeVolcanoDocument(
+  csv: string,
+  format: Dataset['format'],
+  patch: Partial<PlotNode> = {},
+): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    widthMm: 183,
+    heightMm: 75,
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited(csv);
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Differential expression',
+      format,
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/d.csv',
+      sourceFilename: 'd.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 2, y: 2, width: 80, height: 60 },
+      name: 'Volcano',
+      datasetId: dataset.id,
+      plotType: 'volcano',
+    });
+
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') Object.assign(node, patch);
+    }
+  });
+}
+
+describe('volcano plots', () => {
+  it('classifies each point from its fold change and p-value', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+      }),
+    );
+    const points = collectByRole(s, 'point');
+    expect(points).toHaveLength(4);
+
+    const byLabel = new Map(
+      points.map((p) => [p.children?.find((c) => c.tag === 'title')?.text, p.attrs?.['fill']]),
+    );
+    expect(byLabel.get('TP53')).toBe('#d73027'); // up
+    expect(byLabel.get('MYC')).toBe('#4575b4'); // down
+    expect(byLabel.get('EGFR')).toBe('#999999'); // fold change too small
+    expect(byLabel.get('BRCA1')).toBe('#999999'); // p-value too large
+  });
+
+  it('respects custom threshold colours', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+        volcanoColors: { down: '#111111', ns: '#222222', up: '#333333' },
+      }),
+    );
+    const fills = new Set(collectByRole(s, 'point').map((p) => p.attrs?.['fill']));
+    expect(fills).toEqual(new Set(['#111111', '#222222', '#333333']));
+  });
+
+  it('draws the fold-change and p-value cutoffs as dashed threshold lines', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+      }),
+    );
+    // Two vertical (±fold change) plus one horizontal (p-value).
+    expect(collectByRole(s, 'threshold-line')).toHaveLength(3);
+  });
+
+  it('hides the threshold lines when asked, without dropping the points', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholdLines: 'hide',
+      }),
+    );
+    expect(collectByRole(s, 'threshold-line')).toEqual([]);
+    expect(collectByRole(s, 'point')).toHaveLength(4);
+  });
+
+  it('keeps the y domain anchored at zero rather than padding symmetrically', () => {
+    // A single point would otherwise pad on both sides of its own value (the
+    // "flat series" rule every other continuous plot falls back to) and start
+    // the axis well above zero — -log10(p) is a magnitude, so a truncated
+    // baseline would misread it the same way an un-anchored count axis would.
+    const s = scene(makeVolcanoDocument('Gene,log2FC,p\nA,1,0.5', 'differential'));
+    const yTicks = collectByRole(s, 'tick-label')
+      .filter((n) => n.attrs?.['dominant-baseline'] === 'central')
+      .map((n) => Number(n.text));
+    expect(yTicks.length).toBeGreaterThan(0);
+    expect(Math.min(...yTicks)).toBe(0);
+  });
+
+  it('refuses to draw when the dataset carries more than one series', () => {
+    // A prism-format table (shared x, several y series) plotted as volcano —
+    // pooling several groups would mix significance calls computed together.
+    const s = scene(makeVolcanoDocument('X,Y1,Y2\n1,2,3\n2,4,5', 'prism'));
+    expect(collectByRole(s, 'point')).toEqual([]);
+  });
+
+  it('refuses to draw without per-point labels', () => {
+    // A plain xy table has paired x values but no row identity.
+    const s = scene(makeVolcanoDocument('X,Y\n1,2\n2,4', 'simple-xy'));
+    expect(collectByRole(s, 'point')).toEqual([]);
+  });
+});
+
 describe('bracket anchoring on a continuous plot', () => {
   it('measures no categories, so no bracket can be misplaced', () => {
     const doc = makeDocument(XY, 'scatter');

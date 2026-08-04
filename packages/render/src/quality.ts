@@ -766,6 +766,42 @@ const checkPointCloudRasterization: Rule = ({ document, theme }) => {
   );
 };
 
+/**
+ * A volcano plot's rows dropped for a missing/non-numeric fold change, p-value
+ * or label.
+ *
+ * Disclosure, not a defect — the same stance as `checkPointCloudRasterization`
+ * and `checkDistributionSampleSize`: nothing is silently miscounted, the
+ * author just could not otherwise tell that some rows in the table never made
+ * it onto the plot. `severity: 'info'`, never costing score.
+ */
+const checkVolcanoDroppedPoints: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    const dataset = findDataset(document, node.datasetId);
+    if (!dataset) continue;
+
+    const drawn = toSeries(dataset)[0]?.values.length ?? 0;
+    const dropped = dataset.rows.length - drawn;
+    if (dropped <= 0) continue;
+
+    findings.push({
+      id: `volcano-dropped-${node.id}`,
+      severity: 'info',
+      title: `${dropped.toLocaleString()} row${dropped === 1 ? '' : 's'} not plotted`,
+      detail:
+        `${dropped.toLocaleString()} of ${dataset.rows.length.toLocaleString()} rows had a ` +
+        'missing or non-numeric label, fold change or p-value and were left off the plot ' +
+        'rather than placed at a position they were never measured at.',
+      nodeIds: [node.id],
+    });
+  }
+
+  return findings;
+};
+
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
@@ -779,6 +815,7 @@ const RULES: { category: string; rule: Rule }[] = [
   { category: 'Page dimensions', rule: checkPageDimensions },
   { category: 'Panel spacing', rule: checkPanelSpacing },
   { category: 'Point cloud rendering', rule: checkPointCloudRasterization },
+  { category: 'Volcano plot coverage', rule: checkVolcanoDroppedPoints },
 ];
 
 // ---------------------------------------------------------------------------

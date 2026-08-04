@@ -66,7 +66,14 @@ export type SceneRole =
    * baked point cloud are different things, and folding them together would
    * make a role-count assertion for one quietly start counting the other.
    */
-  | 'point-cloud';
+  | 'point-cloud'
+  /**
+   * A volcano plot's dashed fold-change/p-value cutoff line. Kept distinct
+   * from 'axis' and 'error-bar' for the same reason 'point-cloud' is kept
+   * distinct from 'image' — a role-count assertion for one must not be
+   * silently widened by another.
+   */
+  | 'threshold-line';
 
 export const el = (
   tag: string,
