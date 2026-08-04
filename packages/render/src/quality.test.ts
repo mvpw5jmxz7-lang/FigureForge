@@ -30,7 +30,7 @@ import {
   type TextNode,
 } from '@figureforge/doc-model';
 import { NATURE_THEME, resolveTheme, type Theme } from '@figureforge/theme';
-import { renderDocument } from './render-document.js';
+import { MAX_VECTOR_POINTS, renderDocument } from './render-document.js';
 import { checkFigure, type Finding } from './quality.js';
 
 /** Three replicates per group — the sample size biology actually runs. */
@@ -124,6 +124,77 @@ describe('distribution sample size', () => {
       }).score;
 
     expect(score(withWarning)).toBeLessThan(score(clean));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Point cloud rasterization
+// ---------------------------------------------------------------------------
+
+function xyDocument(rowCount: number, plotType: PlotType): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    title: 'XY figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const rows = Array.from({ length: rowCount }, (_, i) => `${i},${Math.cos(i)}`);
+    const parsed = parseDelimited(`X,Y\n${rows.join('\n')}`);
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Cloud',
+      format: inferFormat(parsed.columns),
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/cloud.csv',
+      sourceFilename: 'cloud.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Cloud',
+      datasetId: dataset.id,
+      plotType,
+      xTitle: 'X',
+      yTitle: 'Y',
+    });
+  });
+}
+
+function reportFor(document: FigureDocument) {
+  return checkFigure({
+    document,
+    theme: NATURE_THEME,
+    scene: renderDocument(document, { theme: NATURE_THEME }),
+  });
+}
+
+describe('point cloud rasterization', () => {
+  it('says nothing about a plot at or under the threshold', () => {
+    const findings = reportFor(xyDocument(MAX_VECTOR_POINTS, 'scatter')).findings;
+    expect(findings.filter((f) => f.id.startsWith('point-cloud-raster-'))).toEqual([]);
+  });
+
+  it('discloses the count, without dropping or sampling anything, once over it', () => {
+    const findings = reportFor(xyDocument(MAX_VECTOR_POINTS + 500, 'scatter')).findings;
+    const finding = findings.find((f) => f.id.startsWith('point-cloud-raster-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.title).toContain((MAX_VECTOR_POINTS + 500).toLocaleString());
+    expect(finding?.detail).toMatch(/none are dropped or sampled/);
+  });
+
+  it('never costs the readiness score, unlike a warning-level finding', () => {
+    const withoutCloud = reportFor(xyDocument(MAX_VECTOR_POINTS, 'scatter')).score;
+    const withCloud = reportFor(xyDocument(MAX_VECTOR_POINTS + 500, 'scatter')).score;
+    expect(withCloud).toBe(withoutCloud);
   });
 });
 

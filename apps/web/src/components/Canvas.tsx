@@ -48,6 +48,8 @@ export interface CanvasProps {
   zoom: number;
   showGrid: boolean;
   assetUrls: Record<string, string>;
+  /** Baked rasters for plots over `MAX_VECTOR_POINTS`, keyed by plot node id. */
+  pointRasters: ReadonlyMap<string, string>;
   /** Image being cropped on canvas, or null. Owned by the Inspector's toggle. */
   cropNodeId: NodeId | null;
   /** Scale bar being calibrated by measuring a feature, or null. */
@@ -139,6 +141,7 @@ export function Canvas({
   zoom,
   showGrid,
   assetUrls,
+  pointRasters,
   cropNodeId,
   measureNodeId,
   onMeasured,
@@ -170,6 +173,7 @@ export function Canvas({
     theme,
     resolveAsset,
     chrome: { selectedIds, showGrid },
+    pointRasters,
   });
 
   // --- selection ----------------------------------------------------------

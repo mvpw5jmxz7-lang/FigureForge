@@ -59,7 +59,14 @@ export type SceneRole =
    * handles still means "the eight compass grips" — the parity test asserts
    * exactly 8, and folding these in would quietly break that assertion's point.
    */
-  | 'point-handle';
+  | 'point-handle'
+  /**
+   * A raster standing in for a plot's points once its count exceeds
+   * `MAX_VECTOR_POINTS`. Kept distinct from 'image' — a real `ImageNode` and a
+   * baked point cloud are different things, and folding them together would
+   * make a role-count assertion for one quietly start counting the other.
+   */
+  | 'point-cloud';
 
 export const el = (
   tag: string,

@@ -32,6 +32,7 @@ import {
   relabelAllPanels,
   type Fix,
 } from './fixes.js';
+import { MAX_VECTOR_POINTS, planPointClouds } from './render-document.js';
 import { walkScene, walkWithOwner, type SceneNode } from './scene.js';
 
 export type Severity = 'error' | 'warning' | 'info';
@@ -740,6 +741,31 @@ const checkDistributionSampleSize: Rule = ({ document }) => {
   return findings;
 };
 
+/**
+ * A plot whose point count crossed `MAX_VECTOR_POINTS` renders as one raster
+ * image rather than individually editable marks — see `planPointClouds`.
+ *
+ * Disclosure, not a defect: every value is still drawn, none dropped or
+ * sampled, so this is `severity: 'info'`, same stance as
+ * `checkDistributionSampleSize` — surfaced for the author to see, never
+ * blocking and never costing score (`checkFigure` gives an info-only
+ * category full credit).
+ */
+const checkPointCloudRasterization: Rule = ({ document, theme }) => {
+  return planPointClouds(document, theme).map(
+    (plan): Finding => ({
+      id: `point-cloud-raster-${plan.nodeId}`,
+      severity: 'info',
+      title: `${plan.count.toLocaleString()} points rendered as a raster image`,
+      detail:
+        `Above ${MAX_VECTOR_POINTS.toLocaleString()} points, every value is still drawn — ` +
+        'none are dropped or sampled — but as one embedded image rather than individually ' +
+        'editable marks, to keep the figure responsive to edit and reasonable to export.',
+      nodeIds: [plan.nodeId],
+    }),
+  );
+};
+
 const RULES: { category: string; rule: Rule }[] = [
   { category: 'Text size', rule: checkTextSize },
   { category: 'Image resolution', rule: checkImageResolution },
@@ -752,6 +778,7 @@ const RULES: { category: string; rule: Rule }[] = [
   { category: 'Plot size', rule: checkPlotSize },
   { category: 'Page dimensions', rule: checkPageDimensions },
   { category: 'Panel spacing', rule: checkPanelSpacing },
+  { category: 'Point cloud rendering', rule: checkPointCloudRasterization },
 ];
 
 // ---------------------------------------------------------------------------

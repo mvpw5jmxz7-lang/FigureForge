@@ -27,7 +27,7 @@ import {
   type FigureDocument,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
-import { renderDocument } from './render-document.js';
+import { MAX_VECTOR_POINTS, renderDocument } from './render-document.js';
 import { toSvgString } from './svg-string.js';
 import { toReact } from './react.js';
 import { collectAttr, collectByRole, walkScene, walkWithOwner } from './scene.js';
@@ -273,6 +273,84 @@ describe('adapter parity', () => {
       expect(fromReact).toBe(normalise(toSvgString(scene)));
       expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
     }
+  });
+
+  it('rasterizes a scatter or line plot above MAX_VECTOR_POINTS instead of drawing every point', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const rows = Array.from(
+      { length: MAX_VECTOR_POINTS + 500 },
+      (_, i) => `${i},${Math.sin(i)}`,
+    );
+    const parsed = parseDelimited(`X,Y\n${rows.join('\n')}`);
+
+    for (const plotType of ['scatter', 'line'] as const) {
+      const doc = editDocument(base, (draft) => {
+        const dataset: Dataset = {
+          id: 'ds-cloud',
+          name: 'Cloud',
+          format: inferFormat(parsed.columns),
+          columns: parsed.columns,
+          rows: parsed.rows,
+          sourcePath: 'data/cloud.csv',
+          sourceFilename: 'cloud.csv',
+          importedAt: '2026-01-01T00:00:00.000Z',
+        };
+        draft.datasets = [dataset];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 2, y: 2, width: 80, height: 60 },
+          name: 'Cloud',
+          datasetId: dataset.id,
+          plotType,
+          xTitle: 'X',
+          yTitle: 'Y',
+        });
+      });
+
+      // No raster supplied: the pending placeholder stands in, identically in
+      // both adapters — the state a real load briefly passes through needs the
+      // same parity guarantee as everything else.
+      const pending = renderDocument(doc, { theme: NATURE_THEME });
+      expect(collectByRole(pending, 'point-cloud').length).toBe(1);
+      expect(collectByRole(pending, 'point')).toEqual([]);
+      const pendingFromReact = normalise(renderToStaticMarkup(toReact(pending)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(pendingFromReact).toBe(normalise(toSvgString(pending)));
+
+      // A raster supplied: one <image>, still exactly one 'point-cloud' node,
+      // still zero per-point marks, identically in both adapters.
+      const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+      const baked = renderDocument(doc, {
+        theme: NATURE_THEME,
+        pointRasters: new Map([[plotNode.id, 'data:image/png;base64,AAAA']]),
+      });
+      expect(collectByRole(baked, 'point-cloud').length).toBe(1);
+      expect(collectByRole(baked, 'point')).toEqual([]);
+      expect(collectAttr(baked, 'href')).toEqual(['data:image/png;base64,AAAA']);
+      const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
+
+      // 'line' keeps its batched connecting path regardless — only the
+      // per-point markers collapse.
+      if (plotType === 'line') expect(collectByRole(baked, 'line').length).toBe(1);
+    }
+  });
+
+  it('leaves a plot at or under MAX_VECTOR_POINTS on the ordinary vector path', () => {
+    // Regression guard: the continuous-types fixture above already proves
+    // this at five rows; this pins it explicitly against the boundary the
+    // new branch actually tests, so a future change to that threshold cannot
+    // silently start rasterising an ordinary small figure.
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'point-cloud')).toEqual([]);
   });
 
   it('renders deterministically across repeated calls', () => {

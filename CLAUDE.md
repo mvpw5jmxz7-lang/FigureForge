@@ -8,7 +8,7 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–6 are done, plus four rounds of reported fixes; phases 7–9 are not.**
+could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of reported fixes and the DOM-volume mechanism phase 7 needed first; phases 7–9's chart types are not.**
 
 ---
 
@@ -192,6 +192,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after the DOM-volume mechanism:** 371 TypeScript tests, 105 Python
+tests, typecheck and lint clean, 46-check acceptance run — see "Pre-phase-7 —
+the DOM-volume mechanism" below.
 
 **Verified after round 6:** 366 TypeScript tests, 105 Python tests, typecheck
 and lint clean, 46-check acceptance run.
@@ -1182,6 +1186,85 @@ shipped whole. Single page, exactly 183.0000 × 75.0000 mm, fonts embedded, the
 report was about panel handles. The `'auto'` legend still resolves to `'right'`
 and never picks `'bottom'` on its own.
 
+### Pre-phase-7 — the DOM-volume mechanism
+
+Phase 7 (heatmap, PCA, UMAP, volcano, survival) was blocked on a named risk:
+"a 100k-point UMAP as SVG nodes will kill the DOM." Solved before any phase-7
+chart type was written, deliberately — retrofitting this once five new mark
+types depend on the answer would have touched all five. Proven against the
+*existing* `scatter`/`line` types; no new `PlotType`, no schema change.
+
+- **Rasterize past a threshold; never downsample.** Downsampling a UMAP/PCA
+  embedding changes its apparent point *density* — the one thing such a plot
+  exists to show — which is a scientific-integrity regression, not a neutral
+  performance trade. `planPointClouds` (`render-document.ts`) instead bakes
+  every point of a plot over `MAX_VECTOR_POINTS` into one raster, dropping
+  none; below it, the ordinary per-point `markerNode` loop is untouched —
+  `planPointClouds` filters these plots out entirely, so the vector path
+  costs nothing extra and every existing figure's output is byte-identical.
+- **The threshold was measured, not guessed.** `Canvas.tsx` calls
+  `renderDocument`+`toReact` unmemoised on every render, and a resize/crop
+  drag commits on every `pointermove` — so the real cost of a large point
+  cloud is not "does it paint once" but "does every interaction frame rebuild
+  all N points." Forcing that same full-document re-render repeatedly against
+  a running instance of the unmodified app measured 55 ms at 500 points,
+  104 ms at 2,000, 160 ms at 5,000, 707 ms at 20,000, 1,726 ms at 100,000.
+  `MAX_VECTOR_POINTS = 2000` is the largest candidate that still lands under
+  the ~100 ms threshold at which a UI response stops reading as immediate.
+- **Baked outside `packages/render`, once, read by both live canvas and
+  export.** `apps/web/src/pointRasters.ts` mirrors `exportImages.ts`'s
+  `OffscreenCanvas` use for cropped micrographs, generalized to also cover
+  the *live* canvas — crop-flattening is export-only, but point-cloud volume
+  chokes the DOM before export is ever clicked. A `PointRasterStore`, shared
+  by `Canvas.tsx` and `App.tsx`'s `runExport` (not two independent stores),
+  guarantees the identical base64 PNG lands in both the on-screen `<image
+  href>` and the exported one — a stronger WYSIWYG guarantee than keeping two
+  live drawing paths in sync. Export **awaits** a fresh bake
+  (`bakeAllPointClouds`) rather than opportunistically reading whatever the
+  canvas cached, so it can never fire against a half-baked raster. Baked at a
+  fixed 600 dpi regardless of the live dpi dropdown: Ghostscript's
+  `eps2write` resamples an embedded raster to the export device resolution
+  regardless (see the export traps below), so downsampling a generously-baked
+  PNG is always safe and upsampling a thin one would not be.
+  A plot over threshold with no raster yet — the state a real load briefly
+  passes through — draws `renderImage`'s existing "no href" placeholder
+  idiom rather than nothing, on screen only.
+- **New `SceneRole: 'point-cloud'`**, not a reuse of `'image'` — the same
+  precedent as `'point-handle'` staying distinct from `'resize-handle'`, so a
+  role-count assertion for one can never conflate it with the other.
+- **`line` is covered as an architectural consequence, not a special case.**
+  Both `scatter` and `line` flow through the same `ContinuousPlotGeometry`
+  arm and the same `s.points` loop in `renderContinuousMarks`, so gating that
+  one loop covers both plot types' point markers at once. The connecting
+  `<path>` for a line is already one batched node and is untouched.
+  Categorical plots were never in scope: their marks are one per category,
+  never one per row, so there is no volume problem there to solve.
+- **Disclosed, never blocking.** `checkPointCloudRasterization` in
+  `quality.ts` is `severity: 'info'`, same stance as
+  `checkDistributionSampleSize` — every value is still drawn, none dropped or
+  sampled, so this is a disclosure, not a defect, and an info-only category
+  already receives full credit toward the Publication Readiness Score.
+- **`bakePointCloud` has no unit test, deliberately.** It needs
+  `OffscreenCanvas`, which the vitest config does not provide on purpose (see
+  the environment traps below) — exactly the reason `exportImages.ts`'s
+  `encodeCrop` has none either. Verified in a real browser instead.
+
+Driven in a real browser: a 5,000-row import switched to `scatter` baked to
+one `<image>` under `data-role="point-cloud"` — the live DOM held **1** such
+node, not 5,000 circles, and the two pre-existing sample panels' categorical
+`[data-role="point"]` marks stayed at their baseline count throughout,
+unaffected. The Quality tab read the disclosure ("points rendered as a raster
+image"). The exported PDF (160,591 bytes) carried an image XObject for the
+baked cloud — checked the same way `services/api/tests/test_export.py`
+already does, `/Subtype /Image` present in the raw PDF bytes — while
+`make acceptance`'s 46 checks, none of which touch a scatter or line plot
+large enough to cross the threshold, passed unchanged at a 100/100 score.
+
+**Verified:** 371 TypeScript tests (366 + 5 new: two parity fixtures pinning
+the raster/placeholder branch and `line`'s free coverage, three quality-rule
+tests), 105 Python tests unchanged, typecheck and lint clean, 46-check
+acceptance run unaffected.
+
 ---
 
 ## What's next
@@ -1194,7 +1277,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; needs the DOM-volume answer below first |
+| 7 | heatmaps, PCA, UMAP, volcano, survival | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts` |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1227,7 +1310,7 @@ Phases 5–9, with the actual entry points:
 | Risk | Detail |
 |---|---|
 | **Electron packaging** | Web-first deferred this, it did not remove it. The desktop shell needs Python bundled as a sidecar process with lifecycle management — real work, not a wrapper. |
-| **Omics panel volume** | A 100k-point UMAP as SVG nodes will kill the DOM. Phase 7 needs downsampling or a canvas/WebGL inset before the marks are written, not after. |
+| **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction` and `groupGapFraction`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |

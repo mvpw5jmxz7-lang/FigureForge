@@ -22,6 +22,7 @@ import {
 } from './api.js';
 import { useAssets, type AssetStore } from './assets.js';
 import { flattenCropsForExport } from './exportImages.js';
+import { usePointCloudRasters } from './pointRasters.js';
 import { createSampleDocument } from './sample.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
@@ -139,6 +140,7 @@ export function App() {
   const [pendingExport, setPendingExport] = useState<ExportFormat | null>(null);
 
   const theme = resolveTheme(api.document.themeId, api.document.themeOverrides);
+  const pointClouds = usePointCloudRasters(api.document, theme);
 
   /**
    * Publication readiness for the current figure.
@@ -151,7 +153,10 @@ export function App() {
   const report = useMemo(() => {
     // The scene has to carry its images: text-size and colour rules read the
     // rendered tree, and a figure checked as a set of grey placeholders is not
-    // the figure being submitted.
+    // the figure being submitted. No `pointRasters` here on purpose:
+    // `checkPointCloudRasterization` reads `document`/`theme` directly via
+    // `planPointClouds`, not the scene, so a plot over threshold showing its
+    // placeholder in this particular scene changes nothing this report reads.
     const scene = renderDocument(api.document, {
       theme,
       resolveAsset: (id) => assets.urls[id],
@@ -198,12 +203,19 @@ export function App() {
           setError,
         );
 
+        // Awaited, not read from whatever the canvas happened to have cached:
+        // this is what guarantees export never fires against a half-baked
+        // raster. The store is shared with the live canvas, so a plot already
+        // on screen resolves instantly here; one never shown yet bakes now.
+        const pointRasters = await pointClouds.bakeAll(flattened.document);
+
         // Render without editor chrome: no selection outlines, no grid.
         // Assets resolve to data URIs, never the canvas's blob URLs: those are
         // meaningless outside this tab, so the service would render blanks.
         const scene = renderDocument(flattened.document, {
           theme,
           resolveAsset: flattened.resolve,
+          pointRasters,
         });
         const svg = toSvgString(scene, { xmlDeclaration: format === 'svg' });
 
@@ -237,7 +249,7 @@ export function App() {
         setBusy(null);
       }
     },
-    [api.document, theme, dpi, assets],
+    [api.document, theme, dpi, assets, pointClouds.bakeAll],
   );
 
   /**
@@ -375,6 +387,7 @@ export function App() {
           zoom={zoom}
           showGrid={showGrid}
           assetUrls={assets.urls}
+          pointRasters={pointClouds.rasters}
           cropNodeId={cropNodeId}
           measureNodeId={measureNodeId}
           onMeasured={setMeasuredPx}
