@@ -10,8 +10,8 @@ Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
 could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of
 reported fixes, the DOM-volume mechanism phase 7 needed first, and phase 7's
-first three chart types (volcano plots, heatmaps, survival curves); PCA and
-UMAP are not, nor is phase 8 or 9.**
+first four stages (volcano plots, heatmaps, survival curves, PCA); UMAP is
+not, nor is phase 8 or 9.**
 
 ---
 
@@ -195,6 +195,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 7 stage 4 (PCA):** 450 TypeScript tests, 126 Python
+tests, typecheck and lint clean, 46-check acceptance run unaffected — see
+"Phase 7, Stage 4 — PCA" below.
 
 **Verified after phase 7 stage 3 (survival curves):** 447 TypeScript tests,
 111 Python tests, typecheck and lint clean, 46-check acceptance run
@@ -1699,6 +1703,122 @@ confidence band), 111 Python tests (105 + 6 new: the log-rank suite against
 the `aml` reference), typecheck and lint clean, 46-check acceptance run
 unaffected (no existing fixture uses the new format or plot type).
 
+### Phase 7, Stage 4 — PCA
+
+Phase 7's roadmap flagged PCA and UMAP as needing an unsolved mechanism:
+"Analysis output becomes a new plottable `Dataset`" — every stats test
+through log-rank *annotates* an existing plot; PCA *creates* a new one, from
+server-computed numbers nobody imported. Three research passes before
+implementation found the mechanism already existed almost in full —
+`Dataset.sourcePath`/`sourceFilename` are nullable, not merely optional, and
+`buildArchiveContents` already falls back to serialising a dataset's own
+rows via `datasetToCsv` whenever no verbatim original is registered ("used
+only when no verbatim original exists"); `addDataset`/`addPanelWithPlot`
+already do exactly what's needed; and `SidePanel.tsx`'s own CSV-import path
+(`DataTab.importDataset`) is already the identical two-`commit`-in-one-
+`transaction` shape a PCA action needs. This is the lightest stage of phase
+7 so far — **the only one that touches neither `packages/render` nor
+`packages/plots`**, since PC1/PC2 per sample is exactly paired-xy, drawn
+through the *existing* `scatter` type with no new geometry.
+
+- **Input reuses `'matrix'` outright — no new input format.** A
+  `'matrix'`-format dataset (`RowLabel, Col1, Col2, …`) is already samples ×
+  features, and `toMatrix` already parses it into
+  `{rowLabels, colLabels, cells}`. "Run PCA →" is offered on the same
+  datasets heatmap already accepts, in the Data tab's per-dataset row (not
+  the Stats tab, which is structurally built around annotating
+  `activePlot` and has no shape for "create a new plot instead") — gated on
+  `rowLabels.length >= 3 && colLabels.length >= 2`, the same "minimum size"
+  disabled-button-with-a-reason convention `minGroupsMet` uses elsewhere.
+- **Output is a new `DataFormat: 'pca'`: `SampleLabel, PC1, PC2`** —
+  structurally identical to `'differential'` (a text column, exactly two
+  numeric columns) and a separate member for the same reason: the numbers
+  are a specific, computed thing. **The first `DataFormat` that is never an
+  import layout at all** — every other format is something a real pasted
+  file can arrive shaped as; `'pca'` is producible only by the "Run PCA"
+  action, so it has no entry in `SidePanel.tsx`'s `DATA_FORMATS` dropdown
+  (nothing to select it for), though it still gets the ordinary
+  `inferFormat` exclusion since its shape would otherwise be misread as
+  `differential`'s. The Data tab shows a static "PCA output (PC1, PC2)"
+  label in place of the layout `<select>` for a `'pca'`-format row, since
+  changing that reading would be nonsensical for an output rather than a
+  parsed table.
+  `toSeries`'s `'pca'` case mirrors `differential`'s exactly
+  (`numericPairsAt(ds, 1, 2, 0)`), so a PCA scatter gets the same free
+  per-point `<title>` hover identity volcano's points already have, with
+  zero render-side code. `defaultPlotTypeFor('pca') → 'scatter'`; `addPlot`
+  forces `plotType: 'scatter'` the same defensive way
+  matrix/differential/survival force theirs — connecting PCA points with a
+  line would imply an ordering the data doesn't have.
+- **Only PC1/PC2 are stored**, not every component the server computes —
+  the dataset stays a 2D scatter by construction, and the full component
+  list is surfaced in a confirmation notice instead
+  (`"PC1 96.1%, PC2 3.9%"`), reusing the same "informational note through
+  `onError`" precedent `DataTab`'s own image-import path already set for a
+  non-fatal message. **Deferred, deliberately**: PC3+ selection, a scree
+  plot, and re-running PCA when its source matrix changes — there is no
+  live link between the two `Dataset` entries once created (this is the
+  first feature in the app that derives one dataset from another), and
+  staleness-tracking across that link is new surface with no existing
+  precedent to extend, so it is scoped out rather than half-built. Axis
+  titles carry the variance annotation instead (`"PC1 (96.1%)"`), set once
+  at creation and editable afterward like any other axis title.
+- **`figureforge/pca.py`, a sibling to `stats/`, not nested inside it** —
+  that package is specifically p-value tests (`Comparison`/`Omnibus`/
+  `TestOutcome`), and PCA produces neither. Plain mean-centered SVD
+  (`numpy.linalg.svd`), the standard closed-form construction — no
+  dependency addition, the same reasoning already on record for log-rank vs.
+  `lifelines`: this is well-published math, not something that needs
+  approximating. An optional `standardize` flag (client-exposed, default
+  `False`, the same "safer literal" stance heatmap's sequential-not-
+  diverging default takes) divides each feature by its own sample SD after
+  centering, for features on different scales.
+- **A sample missing any feature value is dropped, not imputed** — the same
+  "refuse rather than approximate" stance Fisher's exact test and nested
+  statistics already take, reported back as `droppedSamples` and a warning
+  string rather than a silent count change. Refused outright below 3
+  complete samples or 2 features: a 2-sample PCA is a single direction
+  explaining 100% of variance by construction, not a result.
+- **No `/analyze`-style test wraps this — `/pca` follows the same request/
+  response/error-handling pattern** (pydantic models, `ValueError → 422`,
+  generic `Exception → 500` via `logger.exception`, `_sanitize` for NaN/Inf
+  before JSON) but needs no semaphore or timeout the way export's
+  Chromium/Ghostscript calls do: this is cheap CPU-bound linear algebra on a
+  small matrix, not an external hangable process. A modest `Field`
+  dimension cap, matching `ExportBody`'s size-validator style, is guard
+  rail enough.
+- **Verified without an external reference dataset** — the first stage in
+  this app where none exists, and unlike log-rank's `aml` dataset, there is
+  no R-equivalent tool in this environment to derive one independently.
+  Verified instead against properties that hold for *any* correct
+  SVD-based PCA, not this implementation specifically: exact reconstruction
+  of the centered input from `scores @ Vt` (an SVD identity), mutual
+  orthogonality of the component scores, explained-variance ratios summing
+  to 1, a closed-form degenerate case (perfectly correlated features must
+  put 100% of the variance in PC1), and a small 3-sample/2-feature example
+  whose 2×2 covariance matrix's eigenvalues are solved by hand via the
+  quadratic formula and cited in the test docstring with the worked
+  arithmetic shown — landing on an exact 75/25 explained-variance split,
+  cross-checked against this implementation's own output. The same honest
+  "hand-verified, documented as such" fallback the survival stage's K>2
+  log-rank case already established, not a fabricated external citation.
+
+Driven in a real browser: a tab-separated 5-sample × 3-feature matrix
+imported under the existing "Matrix (rows × columns)" layout, "Run PCA →"
+appeared on its Data-tab row and stayed disabled until the size guard was
+met, clicking it created **exactly one** new panel drawing an **ordinary
+scatter** (`Plot type` read `scatter`, not a new type) with axis titles
+reading `PC1 (96.1%)` and `PC2 (3.9%)`, the new dataset's own row showed the
+static "PCA output (PC1, PC2)" label rather than a layout dropdown, and the
+exported PDF was a single page.
+
+**Verified:** 450 TypeScript tests (447 + 3 new: doc-model format/
+`toSeries`/schema tests — no `packages/render` or `packages/plots` changes,
+so no new tests in either), 126 Python tests (111 + 15 new: the invariant,
+degenerate-case, hand-worked-example, standardize and validation suites in
+`test_pca.py`), typecheck and lint clean, 46-check acceptance run
+unaffected (no existing fixture uses the new format).
+
 ---
 
 ## What's next
@@ -1711,7 +1831,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | PCA, UMAP — **volcano, heatmap and survival are done**, stages 1–3 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, and survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, are patterns the remaining stages extend, not repeat — see "Phase 7, Stage 1", "Stage 2" and "Stage 3" below. PCA/UMAP still need the unsolved "Analysis output becomes a new plottable Dataset" mechanism |
+| 7 | UMAP — **volcano, heatmap, survival and PCA are done**, stages 1–4 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, and PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), are patterns UMAP extends, not repeats — see "Phase 7, Stage 1" through "Stage 4" below. UMAP reuses PCA's derived-dataset mechanism directly; its own new work is the embedding algorithm itself |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1752,7 +1872,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), and stage 3 by one more again (`survival`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times, for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Stage 4 (PCA) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stage, since a PCA scatter is the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), and stage 4 by one more again (`pca`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not four — `pca` reuses `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

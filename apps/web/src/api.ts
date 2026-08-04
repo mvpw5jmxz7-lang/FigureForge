@@ -49,6 +49,38 @@ export async function analyze(request: AnalyzeRequest): Promise<StatResult> {
   return (await response.json()) as StatResult;
 }
 
+export interface PcaRequest {
+  rowLabels: string[];
+  values: (number | null)[][];
+  /** Divide each feature by its own sample SD after centering. Default false. */
+  standardize?: boolean;
+}
+
+export interface PcaComponent {
+  label: string;
+  explainedVarianceRatio: number;
+}
+
+export interface PcaResult {
+  /** Same order as `scores`; excludes any sample dropped for a missing value. */
+  sampleLabels: string[];
+  /** `scores[i]` are sample `sampleLabels[i]`'s component values, PC1 first. */
+  scores: number[][];
+  components: PcaComponent[];
+  droppedSamples: string[];
+  warnings: string[];
+}
+
+export async function runPca(request: PcaRequest): Promise<PcaResult> {
+  const response = await fetch(`${BASE}/pca`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as PcaResult;
+}
+
 export type ExportFormat = 'svg' | 'pdf' | 'eps' | 'png' | 'tiff';
 
 export interface ExportRequest {

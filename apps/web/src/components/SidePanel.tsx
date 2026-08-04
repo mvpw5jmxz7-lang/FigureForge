@@ -35,12 +35,14 @@ import {
   reorderNode,
   replaceAnalysisForPlot,
   repositionBrackets,
+  toMatrix,
   toSeries,
   toSurvivalGroups,
   xForHash,
   type Analysis,
   type Correction,
   type DataFormat,
+  type Dataset,
   type Delimiter,
   type FigureDocument,
   type NodeId,
@@ -56,7 +58,7 @@ import {
   type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
-import { analyze, ApiError } from '../api.js';
+import { analyze, ApiError, runPca } from '../api.js';
 import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
@@ -337,6 +339,108 @@ function DataTab({
     setPasted('');
     setName('');
     onError(null);
+  };
+
+  // Divides each feature by its own sample SD before PCA — off by default,
+  // the same "safer literal" stance heatmap's sequential-not-diverging
+  // default already takes, since it materially changes the result and isn't
+  // always wanted.
+  const [pcaStandardize, setPcaStandardize] = useState(false);
+  const [pcaBusyId, setPcaBusyId] = useState<NodeId | null>(null);
+
+  /*
+   * PCA is the first action in this app that creates a *new* dataset from an
+   * existing one rather than editing it or importing one from pasted text —
+   * so this mirrors `importDataset`'s own dataset+panel `transaction` shape,
+   * just building the `Dataset` from the server's scores instead of
+   * `datasetFromText`. There is no live link back to `source`: editing it
+   * afterward does not update or stale-flag this PCA dataset, the same way
+   * editing one imported dataset never reaches into another.
+   */
+  const runPcaOn = async (source: Dataset): Promise<void> => {
+    const matrix = toMatrix(source);
+    setPcaBusyId(source.id);
+    setBusy('Running PCA');
+    onError(null);
+
+    try {
+      const result = await runPca({
+        rowLabels: matrix.rowLabels,
+        values: matrix.cells,
+        standardize: pcaStandardize,
+      });
+
+      const [pc1, pc2] = result.components;
+      const pct = (r: number) => `${(r * 100).toFixed(1)}%`;
+      const pcaName = `${source.name} — PCA`;
+      const pcaDataset: Dataset = {
+        id: newId(),
+        name: pcaName,
+        format: 'pca',
+        columns: [
+          { name: 'Sample', kind: 'text' },
+          { name: 'PC1', kind: 'number' },
+          { name: 'PC2', kind: 'number' },
+        ],
+        rows: result.sampleLabels.map((label, i) => [
+          label,
+          result.scores[i]?.[0] ?? null,
+          result.scores[i]?.[1] ?? null,
+        ]),
+        sourcePath: null,
+        sourceFilename: null,
+        importedAt: new Date().toISOString(),
+      };
+
+      api.transaction('Run PCA', () => {
+        commit('Add PCA dataset', (draft) => {
+          draft.datasets = [...draft.datasets, pcaDataset];
+        });
+        commit('Add PCA panel', (draft) => {
+          addPanelWithPlot(draft, newId, {
+            frame: nextPanelFrame(draft, { width: 60, height: 50 }),
+            name: pcaName,
+            datasetId: pcaDataset.id,
+            plotType: 'scatter',
+            xTitle: pc1 ? `PC1 (${pct(pc1.explainedVarianceRatio)})` : 'PC1',
+            yTitle: pc2 ? `PC2 (${pct(pc2.explainedVarianceRatio)})` : 'PC2',
+          });
+          applyAutoLayout(draft, {
+            marginMm: theme.spacing.marginMm,
+            gutterMm: theme.spacing.panelGutterMm,
+            labelGutterMm: 4,
+          });
+          relabelPanels(draft, newId, {
+            uppercase: theme.panelLabelCase === 'upper',
+            fontSizePt: theme.type.panelLabelPt,
+            offsetMm: 4,
+          });
+          reflowBrackets(draft, theme);
+        });
+      });
+
+      // Reuses the "informational note through onError" precedent `onFile`
+      // already sets below for a non-fatal import note — there is no
+      // separate success-notice channel in this tab.
+      const variance = [pc1, pc2]
+        .filter((c): c is (typeof result)['components'][number] => c !== undefined)
+        .map((c) => `${c.label} ${pct(c.explainedVarianceRatio)}`)
+        .join(', ');
+      const dropped =
+        result.droppedSamples.length > 0
+          ? ` ${result.droppedSamples.length} sample(s) dropped for a missing value.`
+          : '';
+      onError(`PCA on ${source.name}: ${variance}.${dropped}`);
+    } catch (error) {
+      onError(
+        error instanceof ApiError
+          ? `PCA failed: ${error.message}`
+          : `Could not reach the analysis service. Is the API running? (${String(error)})`,
+      );
+    } finally {
+      setBusy(null);
+      setPcaBusyId(null);
+    }
   };
 
   const onFile = async (file: File): Promise<void> => {
@@ -675,9 +779,19 @@ function DataTab({
       )}
 
       <h3>Datasets</h3>
+      <label className="check" title="Divide each feature by its own sample SD before PCA">
+        <input
+          type="checkbox"
+          checked={pcaStandardize}
+          onChange={(e) => setPcaStandardize(e.target.checked)}
+        />
+        Standardize features before PCA
+      </label>
       <ul className="list">
         {doc.datasets.map((dataset) => {
           const uses = plotsUsingDataset(doc.nodes, dataset.id);
+          const matrix = dataset.format === 'matrix' ? toMatrix(dataset) : null;
+          const pcaEligible = matrix !== null && matrix.rowLabels.length >= 3 && matrix.colLabels.length >= 2;
           return (
             <li key={dataset.id}>
               {/* Editable in place: the name propagates to the panel and plot,
@@ -701,25 +815,45 @@ function DataTab({
               <div className="field-row">
                 {/* Fixable after the fact: a layout is a reading of the same
                     rows, not a transformation of them, so changing it is
-                    lossless. `toSeries` is the only consumer of this field. */}
-                <select
-                  value={dataset.format}
-                  title="How these columns are read"
-                  onChange={(e) =>
-                    commit('Change data layout', (draft) =>
-                      setDatasetReading(draft, dataset.id, {
-                        format: e.target.value as DataFormat,
-                      }),
-                    )
-                  }
-                >
-                  {DATA_FORMATS.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label}
-                    </option>
-                  ))}
-                </select>
+                    lossless. `toSeries` is the only consumer of this field.
+                    `'pca'` is not offered here at all — nothing in `DATA_FORMATS`
+                    names it, since it is never a reading a raw paste can take,
+                    only an output the "Run PCA" action itself produces. */}
+                {dataset.format === 'pca' ? (
+                  <span className="muted">PCA output (PC1, PC2)</span>
+                ) : (
+                  <select
+                    value={dataset.format}
+                    title="How these columns are read"
+                    onChange={(e) =>
+                      commit('Change data layout', (draft) =>
+                        setDatasetReading(draft, dataset.id, {
+                          format: e.target.value as DataFormat,
+                        }),
+                      )
+                    }
+                  >
+                    {DATA_FORMATS.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button onClick={() => setEditingId(dataset.id)}>Edit data…</button>
+                {dataset.format === 'matrix' && (
+                  <button
+                    title={
+                      pcaEligible
+                        ? 'Reduce this matrix to its first two principal components'
+                        : 'PCA needs at least 3 rows and 2 columns'
+                    }
+                    disabled={!pcaEligible || pcaBusyId === dataset.id}
+                    onClick={() => void runPcaOn(dataset)}
+                  >
+                    Run PCA →
+                  </button>
+                )}
                 <label className="check" title="Column 1 labels the rows rather than holding data">
                   <input
                     type="checkbox"

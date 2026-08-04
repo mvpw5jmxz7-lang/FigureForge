@@ -1,8 +1,9 @@
 """FigureForge API.
 
-Three responsibilities, deliberately narrow:
+Four responsibilities, deliberately narrow:
 
   * /analyze       — run a statistical test, return numbers and a methods sentence
+  * /pca           — reduce a sample x feature matrix to principal component scores
   * /export        — convert a rendered SVG to PDF/EPS/PNG/TIFF
   * /decode-image  — decode a format the browser cannot open (TIFF) to a PNG proxy
 
@@ -25,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .export.renderer import ExportRequest, render, shutdown_browser
 from .images.decode import DecodeError, TooLargeError, decode
+from .pca import compute_pca
 from .stats.methods import methods_sentence, software_versions
 from .stats.tests import run_test
 
@@ -203,6 +205,70 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         methodsSentence=sentence,
         warnings=outcome.warnings,
         softwareVersions=software_versions(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PCA
+# ---------------------------------------------------------------------------
+
+# A defensive dimension cap, matching `ExportBody`'s size-validator style —
+# this is cheap CPU-bound linear algebra on a small matrix, not an external
+# hangable process, so it needs no semaphore/timeout the way export's
+# Chromium/Ghostscript calls do; a sane bound is enough of a guard rail.
+MAX_PCA_SAMPLES = 5000
+MAX_PCA_FEATURES = 5000
+
+
+class PcaRequest(BaseModel):
+    rowLabels: list[str] = Field(min_length=1, max_length=MAX_PCA_SAMPLES)
+    values: list[list[float | None]]
+    standardize: bool = False
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> PcaRequest:
+        if len(self.values) != len(self.rowLabels):
+            raise ValueError("rowLabels and values must have the same length.")
+        if self.values and len(self.values[0]) > MAX_PCA_FEATURES:
+            raise ValueError(f"PCA is limited to {MAX_PCA_FEATURES} features.")
+        return self
+
+
+class PcaComponentOut(BaseModel):
+    label: str
+    explainedVarianceRatio: float
+
+
+class PcaResponse(BaseModel):
+    sampleLabels: list[str]
+    scores: list[list[float]]
+    components: list[PcaComponentOut]
+    droppedSamples: list[str]
+    warnings: list[str]
+
+
+@app.post("/pca", response_model=PcaResponse)
+async def pca(request: PcaRequest) -> PcaResponse:
+    try:
+        outcome = compute_pca(request.rowLabels, request.values, standardize=request.standardize)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("PCA failed")
+        raise HTTPException(status_code=500, detail=f"PCA failed: {error}") from error
+
+    return PcaResponse(
+        sampleLabels=outcome.sampleLabels,
+        scores=[[_sanitize(v) or 0.0 for v in row] for row in outcome.scores],
+        components=[
+            PcaComponentOut(
+                label=c.label,
+                explainedVarianceRatio=_sanitize(c.explainedVarianceRatio) or 0.0,
+            )
+            for c in outcome.components
+        ],
+        droppedSamples=outcome.droppedSamples,
+        warnings=outcome.warnings,
     )
 
 

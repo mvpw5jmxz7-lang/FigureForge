@@ -184,6 +184,10 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     // curve, not pooled into bars over subjects.
     case 'survival':
       return 'survival';
+    // Independent projected points, not a continuum — nothing about a PCA
+    // scatter has a natural ordering to trend a line through.
+    case 'pca':
+      return 'scatter';
     default:
       return 'bar-dot';
   }
@@ -307,6 +311,20 @@ export function addPlot(
     plot.x.showTicks = true;
     if (plot.x.title === '') plot.x.title = 'Time';
     if (plot.y.title === '') plot.y.title = 'Survival probability';
+  }
+
+  /*
+   * A PCA scatter is a set of independent projected points, not a
+   * continuum — connecting them with a line would imply an ordering the
+   * data doesn't have, so this is forced the same defensive way
+   * matrix/differential/survival are: an explicit plot type passed by a
+   * caller can't leave a PCA dataset drawn as a trend.
+   */
+  if (dataset && dataset.format === 'pca') {
+    plot.plotType = 'scatter';
+    plot.showPoints = true;
+    if (plot.x.title === '') plot.x.title = 'PC1';
+    if (plot.y.title === '') plot.y.title = 'PC2';
   }
 
   draft.nodes[id] = plot;

@@ -126,7 +126,22 @@ export type DataFormat =
    * plus a 0/1 flag, and guessing wrong draws a Kaplan–Meier curve off
    * numbers that were never a time-to-event at all. The author states it.
    */
-  | 'survival';
+  | 'survival'
+  /**
+   * SampleLabel, PC1, PC2 — the first two principal components of a sample
+   * scatter, one row per original sample. Exactly three columns, fixed
+   * order, the same shape `differential` uses and deliberately a separate
+   * member for the same reason: the numbers mean something specific — two
+   * component scores computed once, server side — not interchangeable
+   * replicate measurements.
+   *
+   * Unlike every other format, this one is never something a pasted file
+   * arrives shaped as — it is produced only by the "Run PCA" action, never
+   * offered as an import layout. It still gets the ordinary `inferFormat`
+   * exclusion below, since its shape is identical to `differential`'s and
+   * guessing wrong would misread one as the other.
+   */
+  | 'pca';
 
 /**
  * Layouts whose columns are blocked into groups by a second header row.
@@ -915,6 +930,12 @@ export function toSeries(ds: Dataset): Series[] {
        * keeps.
        */
       return toSurvivalGroups(ds).map((g) => ({ name: g.name, values: g.times }));
+    }
+
+    case 'pca': {
+      const [labelCol, pc1Col, pc2Col] = ds.columns;
+      if (!labelCol || !pc1Col || !pc2Col) return [];
+      return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
     }
 
     case 'simple-xy':

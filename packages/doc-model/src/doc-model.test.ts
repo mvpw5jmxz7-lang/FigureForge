@@ -356,6 +356,30 @@ describe('delimited parsing', () => {
     expect(toSurvivalGroups(table)[0]!.events).toEqual([true, false, true]);
   });
 
+  it('never infers pca from a bare table shaped like one', () => {
+    // Identical shape to `differential` — a label column plus exactly two
+    // numeric columns — and nothing in the cells says which reading is
+    // meant. `'pca'` is reachable only by the "Run PCA" action itself, never
+    // by declaring a layout, so this only has to confirm inference never
+    // lands on it, not that some other explicit-selection path exists.
+    expect(inferFormat(parseDelimited('Sample,PC1,PC2\nA,1.2,-0.5').columns)).not.toBe('pca');
+  });
+
+  it('reads a pca table as one series with per-sample labels', () => {
+    const table: Dataset = {
+      ...dataset('Sample,PC1,PC2\nA,2.1,-0.5\nB,-1.8,1.2\nC,0.1,0.3'),
+      format: 'pca',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    expect(series[0]).toEqual({
+      name: 'Test',
+      x: [2.1, -1.8, 0.1],
+      values: [-0.5, 1.2, 0.3],
+      pointLabels: ['A', 'B', 'C'],
+    });
+  });
+
   it('infers each supported layout', () => {
     expect(inferFormat(parseDelimited('X,Y\n1,2').columns)).toBe('simple-xy');
     expect(inferFormat(parseDelimited('Group,Value\nA,1').columns)).toBe('grouped');
@@ -1048,6 +1072,7 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('differential')).toBe('volcano');
     expect(defaultPlotTypeFor('matrix')).toBe('heatmap');
     expect(defaultPlotTypeFor('survival')).toBe('survival');
+    expect(defaultPlotTypeFor('pca')).toBe('scatter');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -1879,6 +1904,50 @@ describe('.figureforge archive', () => {
         plotNode.showCensorMarks = false;
         plotNode.showSurvivalCI = true;
       }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a pca dataset with a null source path', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        id: newId(),
+        name: 'Cohort — PCA',
+        format: 'pca',
+        columns: [
+          { name: 'Sample', kind: 'text' },
+          { name: 'PC1', kind: 'number' },
+          { name: 'PC2', kind: 'number' },
+        ],
+        rows: [
+          ['A', 2.1, -0.5],
+          ['B', -1.8, 1.2],
+        ],
+        // A PCA dataset has no verbatim import behind it — this is the
+        // escape hatch `buildArchiveContents` already handles by
+        // serialising the rows themselves through `datasetToCsv`.
+        sourcePath: null,
+        sourceFilename: null,
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'PCA',
+        plotType: 'scatter',
+      });
     });
 
     const bytes = saveArchive(buildArchiveContents(doc));

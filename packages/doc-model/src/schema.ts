@@ -296,6 +296,7 @@ const datasetSchema = z.object({
     'differential',
     'matrix',
     'survival',
+    'pca',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
