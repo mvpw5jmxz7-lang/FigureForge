@@ -185,8 +185,9 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     case 'survival':
       return 'survival';
     // Independent projected points, not a continuum — nothing about a PCA
-    // scatter has a natural ordering to trend a line through.
+    // or UMAP scatter has a natural ordering to trend a line through.
     case 'pca':
+    case 'umap':
       return 'scatter';
     default:
       return 'bar-dot';
@@ -325,6 +326,19 @@ export function addPlot(
     plot.showPoints = true;
     if (plot.x.title === '') plot.x.title = 'PC1';
     if (plot.y.title === '') plot.y.title = 'PC2';
+  }
+
+  /*
+   * A UMAP embedding is the same kind of independent projected-point set a
+   * PCA scatter is, forced the same defensive way. Unlike PCA's axis titles,
+   * these carry no percentage annotation — there is no per-axis
+   * variance-explained concept for a nonlinear embedding to state.
+   */
+  if (dataset && dataset.format === 'umap') {
+    plot.plotType = 'scatter';
+    plot.showPoints = true;
+    if (plot.x.title === '') plot.x.title = 'UMAP1';
+    if (plot.y.title === '') plot.y.title = 'UMAP2';
   }
 
   draft.nodes[id] = plot;

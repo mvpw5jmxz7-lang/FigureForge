@@ -297,6 +297,7 @@ const datasetSchema = z.object({
     'matrix',
     'survival',
     'pca',
+    'umap',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),

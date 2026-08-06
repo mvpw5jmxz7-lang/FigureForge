@@ -8,6 +8,15 @@ numpy==2.2.1
 scipy==1.15.0
 pandas==2.2.3
 statsmodels==0.14.4
+# Heaviest dependency in this image on purpose: UMAP's fuzzy-simplicial-set
+# + SGD-with-negative-sampling optimizer has no closed form, unlike PCA's
+# SVD or the hand-implemented log-rank test — it is not something this
+# project's usual "avoid the dependency, hand-roll the published formula"
+# stance can honestly apply to. Installs entirely from prebuilt wheels on
+# this image (verified before this pin was added) — no compiler toolchain
+# is present here, so a wheel gap on a future Python bump would fail loudly
+# rather than silently falling back to a slow source build.
+umap-learn==0.5.12
 
 playwright==1.49.1
 pillow==11.1.0

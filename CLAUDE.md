@@ -8,10 +8,10 @@ Requirements source of truth: [`build-a-nature-style-platform.md`](build-a-natur
 That spec describes a multi-year product surface (30+ chart types, omics compute,
 Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
-could be proven before breadth was added. **Phases 1–6 are done, plus six rounds of
-reported fixes, the DOM-volume mechanism phase 7 needed first, and phase 7's
-first four stages (volcano plots, heatmaps, survival curves, PCA); UMAP is
-not, nor is phase 8 or 9.**
+could be proven before breadth was added. **Phases 1–7 are done — six rounds of
+reported fixes, the DOM-volume mechanism phase 7 needed first, and all five of
+phase 7's chart types (volcano plots, heatmaps, survival curves, PCA, UMAP);
+phase 8 and 9 are not.**
 
 ---
 
@@ -195,6 +195,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 7 stage 5 (UMAP) — phase 7 is now complete:** 453
+TypeScript tests, 139 Python tests, typecheck and lint clean, 46-check
+acceptance run unaffected — see "Phase 7, Stage 5 — UMAP" below.
 
 **Verified after phase 7 stage 4 (PCA):** 450 TypeScript tests, 126 Python
 tests, typecheck and lint clean, 46-check acceptance run unaffected — see
@@ -1819,6 +1823,127 @@ degenerate-case, hand-worked-example, standardize and validation suites in
 `test_pca.py`), typecheck and lint clean, 46-check acceptance run
 unaffected (no existing fixture uses the new format).
 
+### Phase 7, Stage 5 — UMAP (closes phase 7)
+
+Phase 7's own roadmap flagged this stage in advance as the one exception to
+the project's standing "avoid the dependency, hand-roll the published
+formula" stance: fuzzy simplicial set construction followed by a
+stochastic-gradient-descent layout with negative sampling has no closed
+form, unlike PCA's SVD or the hand-implemented log-rank test, so
+`umap-learn` was added rather than approximated. Everything else about this
+stage is a direct reuse of what PCA's stage established — same input
+(`'matrix'`-format dataset via `toMatrix`), same output mechanism (a new
+derived `Dataset` with `sourcePath: null`, a new panel via
+`addPanelWithPlot`), same Data-tab-row trigger and
+`transaction`/two-`commit` shape, same "no live link back to the source"
+scope cut. **The second consecutive stage that touches neither
+`packages/render` nor `packages/plots`** — a UMAP scatter is the existing
+`scatter` `PlotType`, exactly like PCA.
+
+- **The dependency was verified empirically before being trusted, per the
+  roadmap's own instruction.** A `pip install --dry-run umap-learn` against
+  the existing API image confirmed full wheel resolution for the whole
+  chain (`umap-learn`, `scikit-learn`, `numba`, `pynndescent`, `llvmlite` —
+  the largest download at 59.9 MB) with nothing to compile, and a full
+  `make build` of the API image afterward confirmed the same end to end.
+  This image has no compiler toolchain, so a wheel gap would have failed
+  loudly rather than silently falling back to a slow source build — treated
+  as a blocking finding had it occurred, not something to route around.
+- **`figureforge/umap.py`, a sibling to `pca.py`, not a reuse of it.**
+  `compute_umap(row_labels, values, standardize)` mirrors `compute_pca`'s
+  validation shape exactly (drop a sample missing any feature value, report
+  `droppedSamples` + a warning, never impute) but diverges where UMAP's own
+  requirements diverge: refused outright below **4** complete samples, not
+  PCA's 3 — a 2–3 point neighbourhood is not something a clamped neighbour
+  count can rescue the way it can for the count itself.
+- **`n_neighbors` is auto-clamped to `min(DEFAULT_N_NEIGHBORS, n_samples -
+  1)`, not exposed as a UI control**, mirroring PCA's own restraint of
+  exposing only `standardize`. The clamped value is reported back
+  (`nNeighborsUsed`) so a caller can tell when the default silently
+  narrowed. `min_dist` stays fixed at UMAP's own conventional default. A
+  full hyperparameter surface (`n_neighbors`, `min_dist`, `metric`) is
+  deliberately deferred — the same kind of scope cut round 5/6 and
+  heatmap's own stage each made explicitly rather than half-building one.
+- **A fixed internal random seed**, not user-exposed, makes repeated "Run
+  UMAP" clicks against the same matrix reproducible — the same
+  determinism-mindedness `mulberry32`'s "seeded, not left to `Math.random`"
+  rule already enforces elsewhere in this app, even though nothing in the
+  document model requires it here (the result is stored as an ordinary
+  snapshot `Dataset`, ungoverned by anything downstream that would need
+  determinism the way on-screen jitter does).
+- **`DataFormat` gained `'umap'`, a separate member from `'pca'` despite
+  the identical three-column shape** (`SampleLabel, UMAP1, UMAP2`), for the
+  same reason `'pca'` is separate from `'differential'`: the axes mean
+  something different. **UMAP axes carry no percentage-explained
+  annotation** — there is no per-axis variance-explained concept for a
+  nonlinear embedding, and stating one would misrepresent what the plot
+  shows. Axis titles are plain `"UMAP1"`/`"UMAP2"`, set once at creation by
+  `addPlot`'s forcing branch and editable afterward like any other axis
+  title. Never an import layout, the same way `'pca'` never is: no
+  `DATA_FORMATS` entry, no `inferFormat` branch, and the Data tab shows a
+  static "UMAP output (UMAP1, UMAP2)" label in place of the layout
+  `<select>` for a `'umap'`-format row. `toSeries`'s `'umap'` case is
+  merged into `'pca'`'s existing `switch` arm (`numericPairsAt(ds, 1, 2,
+  0)`), since the two really do read identically.
+- **`POST /umap` mirrors `/pca`'s error-handling shape exactly**
+  (`ValueError → 422`, generic `Exception → 500` via `logger.exception`,
+  `_sanitize` for NaN/Inf before JSON) with its own request/response
+  models — `UmapRequest`/`UmapResponse` are not a reuse of `PcaRequest`,
+  since UMAP's parameters genuinely differ (`nNeighborsUsed` in the
+  response has no PCA analogue). No semaphore or timeout, the same
+  reasoning `/pca` already documented: bounded CPU-bound work, not an
+  external hangable process — a `MAX_UMAP_SAMPLES`/`MAX_UMAP_FEATURES`
+  guard rail is enough.
+- **`runUmapOn` in `SidePanel.tsx` mirrors `runPcaOn` structurally**, down
+  to the `transaction`/two-`commit` shape, and both actions read the same
+  `standardize` checkbox — relabelled "Standardize features before
+  reducing" to cover both rather than duplicating it, the same "a control
+  that visibly does nothing is a defect" stance that has applied to every
+  format-specific Inspector block since volcano's stage, inverted here: one
+  shared control covering two actions rather than one control per action
+  saying the same thing twice. The eligibility gate is `rowLabels.length >=
+  4`, UMAP's own stricter minimum, disabled with a reason the same
+  `minGroupsMet`-style way PCA's own gate already is.
+- **Verified without an external reference, and without a closed form to
+  hand-solve either** — the first stage in this app with neither escape
+  hatch available. `test_pca.py`'s docstring had already established the
+  honest fallback of asserting mathematical invariants instead of a
+  citation; this stage extends it with the property this codebase already
+  uses to test *stochastic* output, the `mulberry32` seeded-jitter
+  precedent ("same seed ⇒ identical output", never a literal expected
+  value). `test_umap.py` asserts: pairwise-distance rank correlation
+  between the input and the embedding (`scipy.stats.spearmanr` on
+  `scipy.spatial.distance.pdist` both ways) exceeds a threshold on a
+  matrix with genuine low-dimensional structure; the same input run twice
+  produces bit-identical output, with and without standardization; two
+  well-separated input clusters remain well-separated in the embedding
+  (mean inter-cluster distance exceeds mean intra-cluster distance); the
+  neighbour-count clamp engages below the default and does not above it;
+  and the missing-value/minimum-sample validation shape mirrors
+  `test_pca.py`'s own tests exactly. The module's own docstring states
+  plainly that no external reference exists for this stage, the same
+  honesty `test_pca.py`'s docstring already modelled.
+
+Driven in a real browser: a tab-separated 5-sample × 3-feature matrix (one
+outlier sample well separated from the other four) imported under the
+existing "Matrix (rows × columns)" layout, "Run UMAP →" appeared beside
+"Run PCA →" on its Data-tab row and stayed disabled until the 4-row size
+guard was met, clicking it created **exactly one** new panel drawing an
+**ordinary scatter** with axis titles reading plain `UMAP1`/`UMAP2` — no
+percentage annotation, unlike the adjacent PCA panel's `PC1 (96.1%)` — the
+new dataset's own row showed the static "UMAP output (UMAP1, UMAP2)" label
+rather than a layout dropdown, and the exported PDF was a single,
+non-trivial-sized page with no console errors throughout.
+
+**Verified:** 453 TypeScript tests (450 + 3 new: doc-model format/
+`toSeries`/schema tests — no `packages/render` or `packages/plots`
+changes, the second consecutive stage to touch neither), 139 Python tests
+(126 + 13 new: neighbourhood-preservation, seed-stability, the two-cluster
+degenerate case, neighbour-clamping and validation suites in
+`test_umap.py`), typecheck and lint clean, 46-check acceptance run
+unaffected (no existing fixture uses the new format). This closes phase 7:
+all five chart types (volcano, heatmap, survival, PCA, UMAP) are done.
+
 ---
 
 ## What's next
@@ -1831,7 +1956,7 @@ Phases 5–9, with the actual entry points:
 | 4 | **done** — image panels, crop, scale bars, annotations | `apps/web/src/assets.ts` is the asset store; `scaleBarWidthMm`/`resyncScaleBars` in `operations.ts`; `/decode-image` in the API |
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
-| 7 | UMAP — **volcano, heatmap, survival and PCA are done**, stages 1–4 of 5 | new mark types; the DOM-volume prerequisite is answered — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, and PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), are patterns UMAP extends, not repeats — see "Phase 7, Stage 1" through "Stage 4" below. UMAP reuses PCA's derived-dataset mechanism directly; its own new work is the embedding algorithm itself |
+| 7 | **done** — all five chart types (volcano, heatmap, survival, PCA, UMAP) | the DOM-volume prerequisite — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), and UMAP's reuse of that same mechanism plus its own new dependency (`figureforge/umap.py`, the `'umap'` `DataFormat`, "Run UMAP") — see "Phase 7, Stage 1" through "Stage 5" below |
 | 8 | Electron shell | new; see the sidecar risk below |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
@@ -1872,7 +1997,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Stage 4 (PCA) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stage, since a PCA scatter is the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), and stage 4 by one more again (`pca`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not four — `pca` reuses `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

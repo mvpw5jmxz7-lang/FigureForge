@@ -1,9 +1,10 @@
 """FigureForge API.
 
-Four responsibilities, deliberately narrow:
+Five responsibilities, deliberately narrow:
 
   * /analyze       — run a statistical test, return numbers and a methods sentence
   * /pca           — reduce a sample x feature matrix to principal component scores
+  * /umap          — reduce a sample x feature matrix to a 2D UMAP embedding
   * /export        — convert a rendered SVG to PDF/EPS/PNG/TIFF
   * /decode-image  — decode a format the browser cannot open (TIFF) to a PNG proxy
 
@@ -29,6 +30,7 @@ from .images.decode import DecodeError, TooLargeError, decode
 from .pca import compute_pca
 from .stats.methods import methods_sentence, software_versions
 from .stats.tests import run_test
+from .umap import compute_umap
 
 logger = logging.getLogger("figureforge")
 
@@ -269,6 +271,61 @@ async def pca(request: PcaRequest) -> PcaResponse:
         ],
         droppedSamples=outcome.droppedSamples,
         warnings=outcome.warnings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# UMAP
+# ---------------------------------------------------------------------------
+
+# Same reasoning as MAX_PCA_SAMPLES/MAX_PCA_FEATURES: a defensive dimension
+# cap, not a performance tune. UMAP is heavier per-sample than PCA's SVD, but
+# still bounded CPU work with no external process to hang, so a sane bound is
+# guard rail enough — no semaphore or timeout needed.
+MAX_UMAP_SAMPLES = 5000
+MAX_UMAP_FEATURES = 5000
+
+
+class UmapRequest(BaseModel):
+    rowLabels: list[str] = Field(min_length=1, max_length=MAX_UMAP_SAMPLES)
+    values: list[list[float | None]]
+    standardize: bool = False
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> UmapRequest:
+        if len(self.values) != len(self.rowLabels):
+            raise ValueError("rowLabels and values must have the same length.")
+        if self.values and len(self.values[0]) > MAX_UMAP_FEATURES:
+            raise ValueError(f"UMAP is limited to {MAX_UMAP_FEATURES} features.")
+        return self
+
+
+class UmapResponse(BaseModel):
+    sampleLabels: list[str]
+    coords: list[list[float]]
+    droppedSamples: list[str]
+    warnings: list[str]
+    nNeighborsUsed: int
+
+
+@app.post("/umap", response_model=UmapResponse)
+async def umap(request: UmapRequest) -> UmapResponse:
+    try:
+        outcome = compute_umap(
+            request.rowLabels, request.values, standardize=request.standardize
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("UMAP failed")
+        raise HTTPException(status_code=500, detail=f"UMAP failed: {error}") from error
+
+    return UmapResponse(
+        sampleLabels=outcome.sampleLabels,
+        coords=[[_sanitize(v) or 0.0 for v in row] for row in outcome.coords],
+        droppedSamples=outcome.droppedSamples,
+        warnings=outcome.warnings,
+        nNeighborsUsed=outcome.nNeighborsUsed,
     )
 
 

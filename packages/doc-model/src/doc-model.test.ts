@@ -380,6 +380,29 @@ describe('delimited parsing', () => {
     });
   });
 
+  it('never infers umap from a bare table shaped like one', () => {
+    // Same reasoning as pca: identical shape to `differential`, reachable
+    // only by the "Run UMAP" action itself, never by declaring a layout.
+    expect(inferFormat(parseDelimited('Sample,UMAP1,UMAP2\nA,1.2,-0.5').columns)).not.toBe(
+      'umap',
+    );
+  });
+
+  it('reads a umap table as one series with per-sample labels', () => {
+    const table: Dataset = {
+      ...dataset('Sample,UMAP1,UMAP2\nA,2.1,-0.5\nB,-1.8,1.2\nC,0.1,0.3'),
+      format: 'umap',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    expect(series[0]).toEqual({
+      name: 'Test',
+      x: [2.1, -1.8, 0.1],
+      values: [-0.5, 1.2, 0.3],
+      pointLabels: ['A', 'B', 'C'],
+    });
+  });
+
   it('infers each supported layout', () => {
     expect(inferFormat(parseDelimited('X,Y\n1,2').columns)).toBe('simple-xy');
     expect(inferFormat(parseDelimited('Group,Value\nA,1').columns)).toBe('grouped');
@@ -1073,6 +1096,7 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('matrix')).toBe('heatmap');
     expect(defaultPlotTypeFor('survival')).toBe('survival');
     expect(defaultPlotTypeFor('pca')).toBe('scatter');
+    expect(defaultPlotTypeFor('umap')).toBe('scatter');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -1946,6 +1970,49 @@ describe('.figureforge archive', () => {
         frame: { x: 0, y: 0, width: 80, height: 60 },
         datasetId: ds.id,
         name: 'PCA',
+        plotType: 'scatter',
+      });
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a umap dataset with a null source path', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        id: newId(),
+        name: 'Cohort — UMAP',
+        format: 'umap',
+        columns: [
+          { name: 'Sample', kind: 'text' },
+          { name: 'UMAP1', kind: 'number' },
+          { name: 'UMAP2', kind: 'number' },
+        ],
+        rows: [
+          ['A', 2.1, -0.5],
+          ['B', -1.8, 1.2],
+        ],
+        // A UMAP dataset has no verbatim import behind it either — the same
+        // `datasetToCsv` escape hatch the pca round-trip test above exercises.
+        sourcePath: null,
+        sourceFilename: null,
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'UMAP',
         plotType: 'scatter',
       });
     });

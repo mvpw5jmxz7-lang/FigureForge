@@ -58,7 +58,7 @@ import {
   type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
-import { analyze, ApiError, runPca } from '../api.js';
+import { analyze, ApiError, runPca, runUmap } from '../api.js';
 import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
@@ -443,6 +443,100 @@ function DataTab({
     }
   };
 
+  const [umapBusyId, setUmapBusyId] = useState<NodeId | null>(null);
+
+  /*
+   * UMAP reuses PCA's "create a new dataset+panel, no live link back to the
+   * source" mechanism exactly, down to the `transaction`/two-`commit` shape —
+   * this is the second consecutive stage that touches only this action, not
+   * `packages/render` or `packages/plots`. Where it differs: no
+   * percentage-explained annotation on the axis titles (a nonlinear embedding
+   * has no per-axis variance-explained concept to state), and it shares the
+   * standardize checkbox with PCA rather than duplicating it.
+   */
+  const runUmapOn = async (source: Dataset): Promise<void> => {
+    const matrix = toMatrix(source);
+    setUmapBusyId(source.id);
+    setBusy('Running UMAP');
+    onError(null);
+
+    try {
+      const result = await runUmap({
+        rowLabels: matrix.rowLabels,
+        values: matrix.cells,
+        standardize: pcaStandardize,
+      });
+
+      const umapName = `${source.name} — UMAP`;
+      const umapDataset: Dataset = {
+        id: newId(),
+        name: umapName,
+        format: 'umap',
+        columns: [
+          { name: 'Sample', kind: 'text' },
+          { name: 'UMAP1', kind: 'number' },
+          { name: 'UMAP2', kind: 'number' },
+        ],
+        rows: result.sampleLabels.map((label, i) => [
+          label,
+          result.coords[i]?.[0] ?? null,
+          result.coords[i]?.[1] ?? null,
+        ]),
+        sourcePath: null,
+        sourceFilename: null,
+        importedAt: new Date().toISOString(),
+      };
+
+      api.transaction('Run UMAP', () => {
+        commit('Add UMAP dataset', (draft) => {
+          draft.datasets = [...draft.datasets, umapDataset];
+        });
+        commit('Add UMAP panel', (draft) => {
+          addPanelWithPlot(draft, newId, {
+            frame: nextPanelFrame(draft, { width: 60, height: 50 }),
+            name: umapName,
+            datasetId: umapDataset.id,
+            plotType: 'scatter',
+            xTitle: 'UMAP1',
+            yTitle: 'UMAP2',
+          });
+          applyAutoLayout(draft, {
+            marginMm: theme.spacing.marginMm,
+            gutterMm: theme.spacing.panelGutterMm,
+            labelGutterMm: 4,
+          });
+          relabelPanels(draft, newId, {
+            uppercase: theme.panelLabelCase === 'upper',
+            fontSizePt: theme.type.panelLabelPt,
+            offsetMm: 4,
+          });
+          reflowBrackets(draft, theme);
+        });
+      });
+
+      const dropped =
+        result.droppedSamples.length > 0
+          ? ` ${result.droppedSamples.length} sample(s) dropped for a missing value.`
+          : '';
+      const clamped =
+        result.nNeighborsUsed < 15 ? ` (neighbours clamped to ${result.nNeighborsUsed})` : '';
+      onError(
+        `UMAP on ${source.name}: embedded ${result.sampleLabels.length} sample(s)${clamped}. ` +
+          "UMAP axes aren't directly interpretable the way PCA's are — distances " +
+          `in the plot are not distances in the original feature units.${dropped}`,
+      );
+    } catch (error) {
+      onError(
+        error instanceof ApiError
+          ? `UMAP failed: ${error.message}`
+          : `Could not reach the analysis service. Is the API running? (${String(error)})`,
+      );
+    } finally {
+      setBusy(null);
+      setUmapBusyId(null);
+    }
+  };
+
   const onFile = async (file: File): Promise<void> => {
     try {
       setPasted(await file.text());
@@ -779,19 +873,22 @@ function DataTab({
       )}
 
       <h3>Datasets</h3>
-      <label className="check" title="Divide each feature by its own sample SD before PCA">
+      <label className="check" title="Divide each feature by its own sample SD before reducing">
         <input
           type="checkbox"
           checked={pcaStandardize}
           onChange={(e) => setPcaStandardize(e.target.checked)}
         />
-        Standardize features before PCA
+        Standardize features before reducing
       </label>
       <ul className="list">
         {doc.datasets.map((dataset) => {
           const uses = plotsUsingDataset(doc.nodes, dataset.id);
           const matrix = dataset.format === 'matrix' ? toMatrix(dataset) : null;
           const pcaEligible = matrix !== null && matrix.rowLabels.length >= 3 && matrix.colLabels.length >= 2;
+          // UMAP's own minimum, stricter than PCA's 3: it needs a real local
+          // neighbourhood to mean anything.
+          const umapEligible = matrix !== null && matrix.rowLabels.length >= 4;
           return (
             <li key={dataset.id}>
               {/* Editable in place: the name propagates to the panel and plot,
@@ -816,11 +913,14 @@ function DataTab({
                 {/* Fixable after the fact: a layout is a reading of the same
                     rows, not a transformation of them, so changing it is
                     lossless. `toSeries` is the only consumer of this field.
-                    `'pca'` is not offered here at all — nothing in `DATA_FORMATS`
-                    names it, since it is never a reading a raw paste can take,
-                    only an output the "Run PCA" action itself produces. */}
+                    Neither `'pca'` nor `'umap'` is offered here at all —
+                    nothing in `DATA_FORMATS` names them, since neither is a
+                    reading a raw paste can take, only an output the "Run
+                    PCA"/"Run UMAP" actions themselves produce. */}
                 {dataset.format === 'pca' ? (
                   <span className="muted">PCA output (PC1, PC2)</span>
+                ) : dataset.format === 'umap' ? (
+                  <span className="muted">UMAP output (UMAP1, UMAP2)</span>
                 ) : (
                   <select
                     value={dataset.format}
@@ -852,6 +952,19 @@ function DataTab({
                     onClick={() => void runPcaOn(dataset)}
                   >
                     Run PCA →
+                  </button>
+                )}
+                {dataset.format === 'matrix' && (
+                  <button
+                    title={
+                      umapEligible
+                        ? 'Embed this matrix into a 2D UMAP projection'
+                        : 'UMAP needs at least 4 rows'
+                    }
+                    disabled={!umapEligible || umapBusyId === dataset.id}
+                    onClick={() => void runUmapOn(dataset)}
+                  >
+                    Run UMAP →
                   </button>
                 )}
                 <label className="check" title="Column 1 labels the rows rather than holding data">

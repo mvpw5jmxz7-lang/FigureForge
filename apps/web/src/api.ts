@@ -81,6 +81,34 @@ export async function runPca(request: PcaRequest): Promise<PcaResult> {
   return (await response.json()) as PcaResult;
 }
 
+export interface UmapRequest {
+  rowLabels: string[];
+  values: (number | null)[][];
+  /** Divide each feature by its own sample SD after centering. Default false. */
+  standardize?: boolean;
+}
+
+export interface UmapResult {
+  /** Same order as `coords`; excludes any sample dropped for a missing value. */
+  sampleLabels: string[];
+  /** `coords[i]` are sample `sampleLabels[i]`'s [UMAP1, UMAP2]. */
+  coords: number[][];
+  droppedSamples: string[];
+  warnings: string[];
+  /** The neighbour count actually used, after clamping to `n_samples - 1`. */
+  nNeighborsUsed: number;
+}
+
+export async function runUmap(request: UmapRequest): Promise<UmapResult> {
+  const response = await fetch(`${BASE}/umap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as UmapResult;
+}
+
 export type ExportFormat = 'svg' | 'pdf' | 'eps' | 'png' | 'tiff';
 
 export interface ExportRequest {

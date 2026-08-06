@@ -141,7 +141,18 @@ export type DataFormat =
    * exclusion below, since its shape is identical to `differential`'s and
    * guessing wrong would misread one as the other.
    */
-  | 'pca';
+  | 'pca'
+  /**
+   * SampleLabel, UMAP1, UMAP2 — a 2D UMAP embedding, one row per original
+   * sample. Same three-column shape as `pca` and produced the same way, by
+   * an action rather than an import (`inferFormat` never returns it, for the
+   * identical reason). Kept as its own member rather than reusing `pca`
+   * outright because the axes mean something different: there is no
+   * per-axis percentage-of-variance-explained concept for a nonlinear
+   * embedding, so nothing here should imply one the way a `pca` axis title
+   * does.
+   */
+  | 'umap';
 
 /**
  * Layouts whose columns are blocked into groups by a second header row.
@@ -932,9 +943,10 @@ export function toSeries(ds: Dataset): Series[] {
       return toSurvivalGroups(ds).map((g) => ({ name: g.name, values: g.times }));
     }
 
-    case 'pca': {
-      const [labelCol, pc1Col, pc2Col] = ds.columns;
-      if (!labelCol || !pc1Col || !pc2Col) return [];
+    case 'pca':
+    case 'umap': {
+      const [labelCol, c1Col, c2Col] = ds.columns;
+      if (!labelCol || !c1Col || !c2Col) return [];
       return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
     }
 
