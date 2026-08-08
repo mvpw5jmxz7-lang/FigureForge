@@ -171,6 +171,22 @@ describe('scales', () => {
     expect(formatTick(1000, 100)).toBe('1000');
   });
 
+  it('sets a negative sign as an en dash, not the ASCII hyphen-minus', () => {
+    // Journals set a minus as an en dash (–, U+2013) — toFixed/toExponential
+    // emit the ASCII hyphen-minus (-, U+002D), which formatTick replaces.
+    expect(formatTick(-0.3, 0.1)).toBe('–0.3');
+    expect(formatTick(-1000, 100)).toBe('–1000');
+  });
+
+  it('replaces both the mantissa and exponent sign in scientific notation', () => {
+    // -0.00001234 is below the 1e-3 threshold, so it takes the exponential
+    // branch: mantissa "-1.2" and exponent "-5", both ASCII before the
+    // replace and both the en dash after.
+    const label = formatTick(-0.00001234, 0.00001);
+    expect(label).toBe('–1.2×10^–5');
+    expect(label).not.toContain('-');
+  });
+
   it('cuts a range out of a broken axis and keeps the rest monotonic', () => {
     const scale = makeScale({
       domain: { min: 0, max: 100 },
@@ -395,7 +411,7 @@ describe('mark geometry', () => {
     // half of it states half of what was measured.
     const [both] = categoricalMarks([{ name: 'A', values }], options({ showBar: true }));
     expect(both!.errorBar!.upperOnly).toBe(false);
-    expect(both!.errorBar!.bottomMm).toBeGreaterThan(both!.errorBar!.topMm);
+    expect(both!.errorBar!.lowMm).toBeGreaterThan(both!.errorBar!.highMm);
 
     const [up] = categoricalMarks(
       [{ name: 'A', values }],
@@ -457,7 +473,7 @@ describe('mark geometry', () => {
     const violin = mark!.violin!;
     const widest = Math.max(...violin.profile.map((p) => p.halfWidthMm));
     expect(widest).toBeCloseTo((band.bandwidth * 0.8) / 2, 6);
-    expect(violin.centerX).toBeCloseTo(band.center('A'), 6);
+    expect(violin.bandCenterMm).toBeCloseTo(band.center('A'), 6);
   });
 
   it('leaves box and violin null for the categorical types', () => {
@@ -465,6 +481,62 @@ describe('mark geometry', () => {
     expect(mark!.box).toBeNull();
     expect(mark!.violin).toBeNull();
     expect(mark!.outliers).toEqual([]);
+  });
+
+  describe('horizontal orientation', () => {
+    // The same swap `geometryForMargin` performs on the scale ranges: the band
+    // axis gets what was the value axis's range, and the value axis gets what
+    // was the band axis's range, not inverted — larger values sit further right.
+    const bandH = makeBandScale(['A'], [0, 50]);
+    const yH = makeScale({ domain: { min: 0, max: 10 }, rangeMm: [0, 60], tickStep: null, kind: 'linear' });
+    const optionsH = (overrides: Partial<MarkOptions> = {}): MarkOptions =>
+      options({ band: bandH, y: yH, orientation: 'horizontal', ...overrides });
+
+    it('omitting orientation renders exactly as vertical', () => {
+      const vertical = categoricalMarks([{ name: 'A', values }], options({ showBar: true }));
+      const explicit = categoricalMarks(
+        [{ name: 'A', values }],
+        options({ showBar: true, orientation: 'vertical' }),
+      );
+      expect(explicit).toEqual(vertical);
+    });
+
+    it('grows the bar along x instead of y', () => {
+      const [mark] = categoricalMarks([{ name: 'A', values }], optionsH({ showBar: true }));
+      const bar = mark!.bar!;
+      // The band position (a single category over [0, 50]) now sits in y, not x.
+      expect(bar.y).toBeCloseTo(bandH.center('A') - (bandH.bandwidth * 0.8) / 2, 6);
+      expect(bar.height).toBeCloseTo(bandH.bandwidth * 0.8, 6);
+      // The value extent (mean = 3, scale(3) = 18 on a [0,10]→[0,60] scale, from
+      // the baseline at scale(0) = 0) now sits in x, not y.
+      expect(bar.x).toBeCloseTo(0, 6);
+      expect(bar.width).toBeCloseTo(yH.scale(3), 6);
+    });
+
+    it('places jittered points with the value in x and the band offset in y', () => {
+      const [mark] = categoricalMarks(
+        [{ name: 'A', values }],
+        optionsH({ showPoints: true, jitterMm: 0 }),
+      );
+      // Zero jitter collapses every point onto the band centre exactly.
+      expect(mark!.points.every((p) => p.y === bandH.center('A'))).toBe(true);
+      expect(mark!.points.map((p) => p.x).sort((a, b) => a - b)).toEqual(
+        [...values].map((v) => yH.scale(v)).sort((a, b) => a - b),
+      );
+    });
+
+    it('leaves box/violin geometry unaffected by orientation — the field values are band/value-axis numbers, not physical x/y, so render-document.ts decides their placement', () => {
+      const horizontal = categoricalMarks([{ name: 'A', values }], optionsH({ showBox: true, showViolin: true }));
+      // Same band/value scales, orientation set to 'vertical' instead: the
+      // numbers must come out identical, since only `bar`/`points`/`outliers`
+      // read `orientation` at all.
+      const sameScalesVertical = categoricalMarks(
+        [{ name: 'A', values }],
+        options({ band: bandH, y: yH, showBox: true, showViolin: true }),
+      );
+      expect(horizontal[0]!.box).toEqual(sameScalesVertical[0]!.box);
+      expect(horizontal[0]!.violin).toEqual(sameScalesVertical[0]!.violin);
+    });
   });
 });
 

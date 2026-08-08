@@ -15,6 +15,21 @@ import {
   type ErrorBarKind,
 } from './summary.js';
 
+/**
+ * Which physical edge the band (category) axis runs along. `'vertical'` is
+ * every plot before this existed: categories along the bottom, bars growing
+ * up. `'horizontal'` runs categories down the left, bars growing right.
+ *
+ * `BandScale`/`NumericScale` are already axis-agnostic — `options.band` and
+ * `options.y` below are configured by the caller with whichever physical
+ * range matches the orientation, so every `scale()`/`center()` call already
+ * returns the correct physical mm. This flag only decides which *field*
+ * (`x` vs `y`, `width` vs `height`) each already-correct number is written
+ * into for `BarGeometry`/`PointGeometry` — the one seam where that decision
+ * can be made once and the renderer needs no orientation awareness at all.
+ */
+export type MarkOrientation = 'vertical' | 'horizontal';
+
 export interface BarGeometry {
   x: number;
   y: number;
@@ -25,18 +40,22 @@ export interface BarGeometry {
 }
 
 export interface ErrorBarGeometry {
-  x: number;
-  /** Upper end (smaller mm value, since y is inverted). */
-  topMm: number;
-  bottomMm: number;
+  /** Position along the band (category) axis. */
+  bandMm: number;
+  /** Value-axis position of the statistically low end of the interval. */
+  lowMm: number;
+  /** Value-axis position of the statistically high end. */
+  highMm: number;
   capHalfWidthMm: number;
   /**
-   * True when only the upper half is drawn.
+   * True when only the high-value end is drawn.
    *
-   * Bar charts conventionally hide the lower cap under the bar, and the
-   * renderer used to go further and drop the whole lower segment — so a figure
-   * showed half of the spread that was measured. It is now an explicit choice
-   * on the plot (`errorBarDirection`), defaulting to both directions.
+   * Bar charts conventionally hide the low-value cap, which normally sits
+   * inside the bar's own extent — the renderer used to go further and drop
+   * the whole lower segment, so a figure showed half of the spread that was
+   * measured. It is now an explicit choice on the plot (`errorBarDirection`),
+   * defaulting to both directions. Orientation-agnostic: it always means
+   * "hide the low value," not "hide whichever end is physically upper."
    */
   upperOnly: boolean;
 }
@@ -52,10 +71,11 @@ export interface PointGeometry {
 }
 
 export interface BoxGeometry {
-  /** Left edge of the box. */
-  x: number;
-  width: number;
-  /** Hinges in mm. y is inverted, so q3Mm is the visual top of the box. */
+  /** Edge of the box nearer the band scale's start (band centre minus half width). */
+  bandMm: number;
+  /** Extent of the box along the band (category) axis. */
+  bandWidthMm: number;
+  /** Hinges/whiskers along the value axis, in data-statistical (not physical-screen) order. */
   q1Mm: number;
   q3Mm: number;
   medianMm: number;
@@ -65,12 +85,13 @@ export interface BoxGeometry {
 }
 
 export interface ViolinGeometry {
-  centerX: number;
+  /** Centre of the violin along the band (category) axis. */
+  bandCenterMm: number;
   /**
-   * Half-width in mm at each grid position, ordered by increasing mm (visually
-   * top to bottom). The renderer mirrors this about `centerX` to close the path.
+   * Half-width in mm at each value-axis position, ordered by increasing
+   * value. The renderer mirrors this about `bandCenterMm` to close the path.
    */
-  profile: { yMm: number; halfWidthMm: number }[];
+  profile: { valueMm: number; halfWidthMm: number }[];
 }
 
 export interface SeriesMarks {
@@ -84,7 +105,14 @@ export interface SeriesMarks {
   /** Tukey outliers, drawn only by box plots — empty for every other type. */
   outliers: PointGeometry[];
   centerMm: number;
-  /** Highest drawn feature in mm — where a significance bracket must clear. */
+  /**
+   * Value-axis position of the highest (statistically extreme) drawn
+   * feature — where a significance bracket must clear on a vertical plot.
+   * Only meaningful for `'vertical'` orientation: a horizontal plot refuses
+   * brackets entirely (`measurePlot` returns empty measurements before this
+   * is ever read), so the number is computed the same way regardless of
+   * orientation but is unused when horizontal.
+   */
   topMm: number;
   n: number;
   errorLabel: string;
@@ -109,6 +137,8 @@ export interface MarkOptions {
   colors: readonly string[];
   /** Seeded so jitter is stable across re-renders and identical on export. */
   seed?: number;
+  /** Absent means `'vertical'`, today's only behaviour. */
+  orientation?: MarkOrientation;
 }
 
 /**
@@ -169,11 +199,40 @@ export function beeswarmOffsets(
   return offsets;
 }
 
+/**
+ * Place a band-axis extent and a value-axis extent into physical `x/y/
+ * width/height`. `options.band`/`options.y` are already configured by the
+ * caller with the physical range matching the orientation, so the two
+ * extents passed in are already correct mm — this only decides which
+ * struct field each goes into.
+ */
+function placeRect(
+  orientation: MarkOrientation,
+  bandLowMm: number,
+  bandExtentMm: number,
+  valueLowMm: number,
+  valueExtentMm: number,
+): { x: number; y: number; width: number; height: number } {
+  return orientation === 'horizontal'
+    ? { x: valueLowMm, y: bandLowMm, width: valueExtentMm, height: bandExtentMm }
+    : { x: bandLowMm, y: valueLowMm, width: bandExtentMm, height: valueExtentMm };
+}
+
+/** Place a band-axis position and a value-axis position into physical `x/y`. */
+function placePoint(
+  orientation: MarkOrientation,
+  bandMm: number,
+  valueMm: number,
+): { x: number; y: number } {
+  return orientation === 'horizontal' ? { x: valueMm, y: bandMm } : { x: bandMm, y: valueMm };
+}
+
 /** Build the marks for one categorical series (bar / dot / bar+dot plots). */
 export function categoricalMarks(
   series: readonly { name: string; values: readonly number[] }[],
   options: MarkOptions,
 ): SeriesMarks[] {
+  const orientation = options.orientation ?? 'vertical';
   const random = mulberry32(options.seed ?? 0x5eed);
   // A broken axis maps a value inside a gap to NaN, and zero can land in one.
   // The range start is the honest fallback: it is where the axis begins.
@@ -185,16 +244,19 @@ export function categoricalMarks(
     const interval = errorInterval(stats, options.center, options.errorBars);
     const color = options.colors[index % Math.max(1, options.colors.length)] ?? '#000000';
 
-    const centerX = options.band.center(s.name);
+    const bandCenterMm = options.band.center(s.name);
     const barWidth = options.band.bandwidth * options.barWidthFraction;
     const centerMm = options.y.scale(interval.center);
 
     const bar: BarGeometry | null = options.showBar
       ? {
-          x: centerX - barWidth / 2,
-          y: Math.min(centerMm, baselineMm),
-          width: barWidth,
-          height: Math.abs(baselineMm - centerMm),
+          ...placeRect(
+            orientation,
+            bandCenterMm - barWidth / 2,
+            barWidth,
+            Math.min(centerMm, baselineMm),
+            Math.abs(baselineMm - centerMm),
+          ),
           baselineMm,
         }
       : null;
@@ -208,9 +270,9 @@ export function categoricalMarks(
       distributionShown || options.errorBars === 'none' || !Number.isFinite(interval.low)
         ? null
         : {
-            x: centerX,
-            topMm: options.y.scale(interval.high),
-            bottomMm: options.y.scale(interval.low),
+            bandMm: bandCenterMm,
+            lowMm: options.y.scale(interval.low),
+            highMm: options.y.scale(interval.high),
             capHalfWidthMm: Math.max(0.5, barWidth * 0.25),
             // Both directions unless the plot explicitly asks for the bar-chart
             // convention: an error bar states a spread, and drawing half of it
@@ -221,8 +283,8 @@ export function categoricalMarks(
     const box: BoxGeometry | null =
       options.showBox && stats.n > 0
         ? {
-            x: centerX - barWidth / 2,
-            width: barWidth,
+            bandMm: bandCenterMm - barWidth / 2,
+            bandWidthMm: barWidth,
             q1Mm: options.y.scale(stats.q1),
             q3Mm: options.y.scale(stats.q3),
             medianMm: options.y.scale(stats.median),
@@ -239,12 +301,12 @@ export function categoricalMarks(
       if (density.length > 0 && peak > 0) {
         const halfMax = barWidth / 2;
         violin = {
-          centerX,
+          bandCenterMm,
           // Scaled so the widest point of each violin fills its band. Widths are
           // therefore comparable *within* a series, not across them — the same
           // convention as every violin implementation.
           profile: density.map((d) => ({
-            yMm: options.y.scale(d.value),
+            valueMm: options.y.scale(d.value),
             halfWidthMm: (d.density / peak) * halfMax,
           })),
         };
@@ -257,10 +319,11 @@ export function categoricalMarks(
     const outliers: PointGeometry[] =
       box && !options.showPoints
         ? stats.outliers
-            .map((value) => ({ x: centerX, y: options.y.scale(value), value }))
+            .map((value) => ({ value, valueMm: options.y.scale(value) }))
             // Dropped, not clamped: an axis that says it does not show a range
             // must not show a mark there.
-            .filter((p) => Number.isFinite(p.y))
+            .filter((p) => Number.isFinite(p.valueMm))
+            .map((p) => ({ ...placePoint(orientation, bandCenterMm, p.valueMm), value: p.value }))
         : [];
 
     let points: PointGeometry[] = [];
@@ -275,17 +338,34 @@ export function categoricalMarks(
           : ys.map(() => (random() * 2 - 1) * spread);
 
       points = finite
-        .map((value, i) => ({ x: centerX + (offsets[i] ?? 0), y: ys[i]!, value }))
-        .filter((p) => Number.isFinite(p.y));
+        .map((value, i) => ({ value, valueMm: ys[i]!, offset: offsets[i] ?? 0 }))
+        .filter((p) => Number.isFinite(p.valueMm))
+        .map((p) => ({
+          ...placePoint(orientation, bandCenterMm + p.offset, p.valueMm),
+          value: p.value,
+        }));
     }
 
+    // Bracket clearance is always computed in value-axis terms — the same
+    // numbers regardless of orientation — since only a vertical plot ever
+    // reads this (a horizontal plot refuses brackets before this is used).
     const candidates = [centerMm].filter(Number.isFinite);
-    if (bar) candidates.push(bar.y);
-    if (errorBar) candidates.push(errorBar.topMm);
+    if (bar) candidates.push(Math.min(centerMm, baselineMm));
+    if (errorBar) candidates.push(errorBar.highMm);
     // The whisker cap, not the hinge — a bracket placed off q3 sits inside the plot.
     if (box) candidates.push(box.upperWhiskerMm);
-    if (violin) for (const p of violin.profile) candidates.push(p.yMm);
-    for (const p of [...points, ...outliers]) candidates.push(p.y - options.pointSizeMm / 2);
+    if (violin) for (const p of violin.profile) candidates.push(p.valueMm);
+    // Mirrors exactly which values `points`/`outliers` above actually draw —
+    // outliers only when box is shown and points are not (or they'd double
+    // count), points only when shown at all.
+    const clearanceValues = [
+      ...(box && !options.showPoints ? stats.outliers : []),
+      ...(options.showPoints ? s.values : []),
+    ];
+    for (const value of clearanceValues) {
+      const valueMm = options.y.scale(value);
+      if (Number.isFinite(valueMm)) candidates.push(valueMm - options.pointSizeMm / 2);
+    }
 
     return {
       name: s.name,

@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
+  copyBlock,
   editDataset,
   insertColumn,
   insertRow,
@@ -58,10 +59,30 @@ export function DataGrid({
    * predictable when nothing is open.
    */
   const [anchor, setAnchor] = useState<Cursor>(ORIGIN);
+  /**
+   * The far corner of a multi-cell selection, or null for a single selected
+   * cell (`anchor` alone) — today's behaviour, unchanged when this is null.
+   */
+  const [rangeEnd, setRangeEnd] = useState<Cursor | null>(null);
   /** The text being typed, so a half-finished number is not parsed mid-keystroke. */
   const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * Whether the pointer currently down started as a Shift-click. Read on
+   * pointerup: a Shift-click always extends the selection and must never
+   * open the editor, even when it lands back on the anchor cell.
+   */
+  const shiftSelectRef = useRef(false);
+  /**
+   * Set for the one focus event a pointerdown itself causes (clicking a
+   * button focuses it natively) so `onFocus` below can ignore it — otherwise
+   * a Shift-click's `rangeEnd` is set by `onPointerDown` and immediately
+   * wiped by the focus event the same click produces. Left `false` the rest
+   * of the time, which is what lets `onFocus` still track genuine Tab
+   * navigation between cells.
+   */
+  const pointerSelectingRef = useRef(false);
 
   useEffect(() => {
     if (cursor) inputRef.current?.focus();
@@ -104,6 +125,74 @@ export function DataGrid({
     const row = Math.min(Math.max(cursor.row + dr, 0), dataset.rows.length - 1);
     const col = Math.min(Math.max(cursor.col + dc, 0), dataset.columns.length - 1);
     commitCell({ row, col });
+  };
+
+  /** The top-left corner of the current selection — a single cell if `rangeEnd` is null. */
+  const selectionTopLeft = (): Cursor => {
+    const end = rangeEnd ?? anchor;
+    return { row: Math.min(anchor.row, end.row), col: Math.min(anchor.col, end.col) };
+  };
+
+  /*
+   * Range selection: drag across cells, or Shift-click a second cell to
+   * extend from the current anchor. Mirrors the `setPointerCapture` +
+   * pointerdown/move/up idiom `Canvas.tsx` already uses for its own drag
+   * interactions (crop and resize handles) rather than inventing a second one.
+   *
+   * Pointer capture pins every subsequent move/up event to the cell that was
+   * pressed, not whatever the pointer is currently over — so `onPointerMove`
+   * has to hit-test for the cell under the pointer itself (`data-row`/
+   * `data-col`), and `onPointerUp`'s own `row`/`col` closure arguments always
+   * refer back to the *original* mousedown cell, which is exactly `anchor`.
+   */
+  const onCellPointerDown = (
+    event: React.PointerEvent<HTMLButtonElement>,
+    row: number,
+    col: number,
+  ): void => {
+    if (event.button !== 0) return;
+    // A button click elsewhere while a cell is open never reaches here for
+    // the cell that's mid-edit — that one renders an `<input>`, not this
+    // button — so `cursor` set at all means switching away from another cell.
+    if (cursor) commitCell(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointerSelectingRef.current = true;
+    if (event.shiftKey) {
+      shiftSelectRef.current = true;
+      setRangeEnd({ row, col });
+    } else {
+      shiftSelectRef.current = false;
+      setAnchor({ row, col });
+      setRangeEnd(null);
+    }
+  };
+
+  const onCellPointerMove = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    if (!(event.buttons & 1)) return;
+    const target = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>('button[data-row]');
+    if (!target) return;
+    const row = Number(target.dataset['row']);
+    const col = Number(target.dataset['col']);
+    if (Number.isNaN(row) || Number.isNaN(col)) return;
+    setRangeEnd((prev) => (prev && prev.row === row && prev.col === col ? prev : { row, col }));
+  };
+
+  const onCellPointerUp = (
+    event: React.PointerEvent<HTMLButtonElement>,
+    row: number,
+    col: number,
+  ): void => {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const wasShiftSelect = shiftSelectRef.current;
+    shiftSelectRef.current = false;
+    // A Shift-click always leaves a selection, never opens the editor. A
+    // plain click that never moved to a different cell opens it, exactly as
+    // before; a real drag leaves the range selected instead.
+    if (!wasShiftSelect && (rangeEnd === null || (rangeEnd.row === row && rangeEnd.col === col))) {
+      open(row, col);
+    }
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
@@ -171,14 +260,70 @@ export function DataGrid({
     if (!text.includes('\t') && !text.includes('\n')) return;
 
     event.preventDefault();
-    const { row, col } = cursor ?? anchor;
+    // A selected range pastes at its top-left corner, same as a single
+    // selected cell — the block paints its own size there rather than
+    // repeating to fill whatever was selected.
+    const { row, col } = cursor ?? selectionTopLeft();
     edit('Paste cells', (ds) => pasteBlock(ds, row, col, text));
     setCursor(null);
     setAnchor({ row, col });
+    setRangeEnd(null);
+  };
+
+  /**
+   * Copying leaves an in-progress edit's own text selection to the browser's
+   * native copy — only a *selected range* of cells, with nothing open, goes
+   * to the clipboard as a block. This is the real `copy` event, not the
+   * in-app node-id clipboard `Canvas.tsx` uses for figure elements: cell data
+   * has to leave the app and land in a real spreadsheet.
+   */
+  const onCopy = (event: React.ClipboardEvent<HTMLElement>): void => {
+    if (cursor !== null) return;
+    const end = rangeEnd ?? anchor;
+    const r0 = Math.min(anchor.row, end.row);
+    const r1 = Math.max(anchor.row, end.row);
+    const c0 = Math.min(anchor.col, end.col);
+    const c1 = Math.max(anchor.col, end.col);
+    event.clipboardData.setData('text/plain', copyBlock(dataset, r0, c0, r1, c1));
+    event.preventDefault();
+  };
+
+  const onGridKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    /*
+     * A selected cell is a `<button>`, not a text selection — the browser has
+     * nothing to act on for a bare Ctrl/Cmd+C, so no native `copy` event ever
+     * fires and `onCopy` below never runs. `execCommand('copy')` forces that
+     * same native event to fire (still landing on `onCopy`, still read via
+     * `event.clipboardData`), rather than switching to
+     * `navigator.clipboard.writeText()`'s separate, promptable permission.
+     */
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c' && cursor === null) {
+      document.execCommand('copy');
+      return;
+    }
+    if (event.key === 'Escape' && cursor === null && rangeEnd !== null) {
+      setRangeEnd(null);
+    }
+  };
+
+  // Computed once per render rather than per cell — the bounds a selected
+  // range covers, or just the anchor's own position when `rangeEnd` is null.
+  const rangeBounds = rangeEnd && {
+    r0: Math.min(anchor.row, rangeEnd.row),
+    r1: Math.max(anchor.row, rangeEnd.row),
+    c0: Math.min(anchor.col, rangeEnd.col),
+    c1: Math.max(anchor.col, rangeEnd.col),
   };
 
   return (
-    <div className="data-grid" ref={rootRef} tabIndex={-1} onPaste={onPaste}>
+    <div
+      className="data-grid"
+      ref={rootRef}
+      tabIndex={-1}
+      onPaste={onPaste}
+      onCopy={onCopy}
+      onKeyDown={onGridKeyDown}
+    >
       <div className="field-row">
         <strong>{dataset.name}</strong>
         <span className="muted">
@@ -249,6 +394,14 @@ export function DataGrid({
                 </th>
                 {dataset.columns.map((_, c) => {
                   const editing = cursor?.row === r && cursor.col === c;
+                  const isAnchor = anchor.row === r && anchor.col === c;
+                  const inRange =
+                    !isAnchor &&
+                    rangeBounds !== null &&
+                    r >= rangeBounds.r0 &&
+                    r <= rangeBounds.r1 &&
+                    c >= rangeBounds.c0 &&
+                    c <= rangeBounds.c1;
                   return (
                     <td key={c} className={editing ? 'editing' : ''}>
                       {editing ? (
@@ -261,11 +414,20 @@ export function DataGrid({
                         />
                       ) : (
                         <button
-                          className={
-                            anchor.row === r && anchor.col === c ? 'cell selected' : 'cell'
-                          }
-                          onClick={() => open(r, c)}
-                          onFocus={() => setAnchor({ row: r, col: c })}
+                          className={isAnchor ? 'cell selected' : inRange ? 'cell in-range' : 'cell'}
+                          data-row={r}
+                          data-col={c}
+                          onPointerDown={(e) => onCellPointerDown(e, r, c)}
+                          onPointerMove={onCellPointerMove}
+                          onPointerUp={(e) => onCellPointerUp(e, r, c)}
+                          onFocus={() => {
+                            if (pointerSelectingRef.current) {
+                              pointerSelectingRef.current = false;
+                              return;
+                            }
+                            setAnchor({ row: r, col: c });
+                            setRangeEnd(null);
+                          }}
                         >
                           {cellText(row[c] ?? null) || ' '}
                         </button>
@@ -285,8 +447,9 @@ export function DataGrid({
           Add row
         </button>
         <span className="muted">
-          Paste from Excel with Ctrl/Cmd+V — the block fills from the selected cell, adding rows
-          and columns to fit.
+          Drag or Shift-click to select a range, then Ctrl/Cmd+C to copy it — to another
+          spreadsheet or back into the grid. Paste with Ctrl/Cmd+V fills from the selected cell's
+          top-left corner, adding rows and columns to fit.
         </span>
         {dataset.editedAt && (
           <span className="muted">

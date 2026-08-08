@@ -225,6 +225,30 @@ describe('adapter parity', () => {
     }
   });
 
+  it('draws bar/box/violin/dot marks through both adapters identically when horizontal', () => {
+    // The orientation-gated path-string branch in the box/violin/error-bar
+    // drawing code is exactly the kind of divergence risk this file exists to
+    // catch — one adapter forgetting the branch would still "work" until
+    // compared here.
+    for (const plotType of ['bar-dot', 'box', 'violin', 'dot'] as const) {
+      const doc = editDocument(makeDocument(), (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') {
+            node.plotType = plotType;
+            node.orientation = 'horizontal';
+          }
+        }
+      });
+      const scene = renderDocument(doc, { theme: NATURE_THEME });
+
+      const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(fromReact).toBe(normalise(toSvgString(scene)));
+      expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+    }
+  });
+
   it('draws the continuous types through both adapters identically', () => {
     // These need a numeric x axis and paired x values, so they get their own
     // two-column document rather than the replicate CSV above.

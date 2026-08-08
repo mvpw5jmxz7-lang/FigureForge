@@ -1220,6 +1220,17 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
   const survival = dataset?.format === 'survival';
   const survivalLogRank = survival && test === 'log-rank';
   const blockedByContinuousAxis = continuousPlot && !xyCorrelation && !survivalLogRank;
+  /*
+   * A horizontal plot's categories run down the side, not along the bottom
+   * — there is nowhere flat to sit a bracket above a bar the way vertical
+   * orientation has. `measurePlot` already refuses it there (the same
+   * empty-measurements answer continuous plots get), so this gate keeps the
+   * Stats tab from offering a test whose result could never be drawn.
+   * `!continuousPlot` guards it the same way `blockedByContinuousAxis`
+   * guards itself — orientation is only ever meaningful on a categorical
+   * plot type.
+   */
+  const blockedByHorizontalOrientation = !continuousPlot && activePlot?.orientation === 'horizontal';
   const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
 
   // Counts and measurements take disjoint tests; see COUNT_TESTS.
@@ -1313,6 +1324,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     }
     if (blockedByContinuousAxis) {
       onError('Group comparisons need a categorical plot; this one has a numeric x axis.');
+      return;
+    }
+    if (blockedByHorizontalOrientation) {
+      onError(
+        "This plot's categories run down the side, so there is nowhere flat to anchor a " +
+          'significance bracket. Switch it back to vertical to compare groups.',
+      );
       return;
     }
     if (!activePlot || !dataset || !minGroupsMet) {
@@ -1536,6 +1554,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
+      {blockedByHorizontalOrientation && (
+        <p className="hint">
+          This plot's categories run down the side, so there is nowhere flat to anchor a
+          significance bracket. Switch it back to vertical in the Inspector to compare groups.
+        </p>
+      )}
+
       {nested && (
         <p className="hint">
           Nested data plots here but is not tested. A nested design needs a hierarchical model,
@@ -1564,7 +1589,14 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       <button
         className="primary"
         onClick={() => void run()}
-        disabled={!minGroupsMet || blockedByContinuousAxis || nested || differential || matrix}
+        disabled={
+          !minGroupsMet ||
+          blockedByContinuousAxis ||
+          blockedByHorizontalOrientation ||
+          nested ||
+          differential ||
+          matrix
+        }
       >
         Run and annotate
       </button>

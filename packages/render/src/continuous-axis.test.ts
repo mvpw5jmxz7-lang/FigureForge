@@ -275,6 +275,47 @@ describe('independent xy pairs', () => {
     expect(diamonds).toHaveLength(12);
   });
 
+  it('draws the four new marker shapes with distinct, area-matched geometry', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShapes: ['triangle-down', 'pentagon', null],
+      pointShape: 'star',
+    });
+    const points = collectByRole(scene(doc), 'point');
+    expect(points).toHaveLength(18);
+
+    const paths = points.filter((n) => n.tag === 'path');
+    const vertexCount = (n: (typeof paths)[number]): number =>
+      String(n.attrs?.['d']).match(/[ML]/g)?.length ?? 0;
+
+    // Pentagon: 5 vertices, six points.
+    expect(paths.filter((n) => vertexCount(n) === 5)).toHaveLength(6);
+    // Star: 10 vertices — the plot-wide fallback, so it covers the third series.
+    expect(paths.filter((n) => vertexCount(n) === 10)).toHaveLength(6);
+
+    // Triangle-down shares its vertex count (3) with 'triangle', so the two
+    // are told apart by orientation: its apex — the first point drawn — sits
+    // *below* (larger SVG y than) its other two vertices, the opposite of
+    // an upright triangle.
+    const triangleDown = paths.filter((n) => vertexCount(n) === 3);
+    expect(triangleDown).toHaveLength(6);
+    for (const n of triangleDown) {
+      const ys = [...String(n.attrs?.['d']).matchAll(/[ML]-?[\d.]+ (-?[\d.]+)/g)].map((m) =>
+        Number(m[1]),
+      );
+      expect(ys[0]).toBeGreaterThan(ys[1]!);
+      expect(ys[0]).toBeGreaterThan(ys[2]!);
+    }
+  });
+
+  it('draws the cross marker as a 12-vertex plus sign', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, { pointShape: 'cross' });
+    const points = collectByRole(scene(doc), 'point');
+    const crosses = points.filter(
+      (n) => n.tag === 'path' && String(n.attrs?.['d']).match(/[ML]/g)?.length === 12,
+    );
+    expect(crosses).toHaveLength(18);
+  });
+
   it('draws the legend key as the symbol it stands for', () => {
     // Four identical blocks beside three different symbols withholds exactly
     // the mapping a reader needs.
@@ -317,6 +358,117 @@ describe('independent xy pairs', () => {
       .filter((n) => n.tag === 'text')
       .map((n) => n.text);
     expect(labels).toEqual(['Y1', 'Y2', 'Y3']);
+  });
+});
+
+/**
+ * `lineStyle`/`lineStyles` — a second way (besides `pointShapes`) to carry
+ * series identity where colour cannot. Mirrors the `pointShapes` test suite
+ * above field for field: plot-wide default, per-series override, fallback,
+ * a byte-identical-when-absent regression, and the legend's "any series
+ * carries one" drawing rule.
+ */
+describe('line styles', () => {
+  it('gives every line the plot-wide dash pattern', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, { lineStyle: 'dashed' });
+    const lines = collectByRole(scene(doc), 'line');
+    expect(lines).toHaveLength(3);
+    for (const line of lines) {
+      expect(line.attrs?.['stroke-dasharray']).toBeDefined();
+    }
+  });
+
+  it('gives each series its own dash pattern when asked', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      lineStyles: ['dashed', 'dotted', 'dash-dot'],
+    });
+    const lines = collectByRole(scene(doc), 'line');
+    expect(lines).toHaveLength(3);
+    const dashArrays = lines.map((l) => l.attrs?.['stroke-dasharray']);
+    for (const d of dashArrays) expect(d).toBeDefined();
+    // Three distinct patterns, not the same one repeated three times.
+    expect(new Set(dashArrays).size).toBe(3);
+  });
+
+  it('falls back to the plot-wide style for a series that names none', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      lineStyle: 'dotted',
+      lineStyles: ['dashed', null, null],
+    });
+    const [first, second, third] = collectByRole(scene(doc), 'line');
+    expect(first!.attrs?.['stroke-dasharray']).not.toBe(second!.attrs?.['stroke-dasharray']);
+    // The two that named nothing both take the plot-wide dotted pattern.
+    expect(second!.attrs?.['stroke-dasharray']).toBe(third!.attrs?.['stroke-dasharray']);
+  });
+
+  it('gives a series explicitly set to solid no dasharray, even beside a dashed sibling', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      lineStyles: ['solid', 'dashed', null],
+    });
+    const lines = collectByRole(scene(doc), 'line');
+    expect(lines[0]!.attrs?.['stroke-dasharray']).toBeUndefined();
+    expect(lines[1]!.attrs?.['stroke-dasharray']).toBeDefined();
+    // Third series named nothing, and the plot-wide default is solid too.
+    expect(lines[2]!.attrs?.['stroke-dasharray']).toBeUndefined();
+  });
+
+  it('leaves the line solid, with no stroke-dasharray attribute, when the style is absent or explicitly solid', () => {
+    // The property every optional field in this codebase is held to: a figure
+    // drawn before the field existed renders exactly as it did.
+    const plain = toSvgString(scene(makeDocument(XY_PAIRS, 'line')));
+    const explicitSolid = toSvgString(
+      scene(makeDocument(XY_PAIRS, 'line', 80, { lineStyle: 'solid' })),
+    );
+    const nullArray = toSvgString(
+      scene(makeDocument(XY_PAIRS, 'line', 80, { lineStyles: [null, null, null] })),
+    );
+    expect(explicitSolid).toBe(plain);
+    expect(nullArray).toBe(plain);
+    expect(plain).not.toContain('stroke-dasharray');
+  });
+
+  it('draws a dashed line in the legend once any series is given a line style', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      lineStyles: ['dashed', null, null],
+    });
+    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
+    // One line-segment swatch per entry — no `pointShapes` set, so the marker
+    // branch never engages.
+    expect(swatches.map((n) => n.tag)).toEqual(['path', 'path', 'path']);
+    expect(swatches[0]!.attrs?.['stroke-dasharray']).toBeDefined();
+    // The other two fall back to the plot-wide default, which is solid.
+    expect(swatches[1]!.attrs?.['stroke-dasharray']).toBeUndefined();
+    expect(swatches[2]!.attrs?.['stroke-dasharray']).toBeUndefined();
+  });
+
+  it('leaves the legend a plain block when only the plot-wide style is set', () => {
+    // Mirrors `pointShape`'s own asymmetry: a plot-wide-only setting changes
+    // nothing about which series is which, so the key stays a plain block.
+    const doc = makeDocument(XY_PAIRS, 'line', 80, { lineStyle: 'dashed' });
+    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
+    expect(swatches.every((n) => n.tag === 'rect')).toBe(true);
+  });
+
+  it('composes a dashed line and a marker in one legend entry when both are set', () => {
+    const doc = makeDocument(XY_PAIRS, 'line', 80, {
+      pointShapes: ['square', null, null],
+      lineStyles: ['dashed', null, null],
+    });
+    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
+    // Any series carrying a shape draws a marker on every entry, and any
+    // series carrying a line style draws a line on every entry too — the
+    // same "any, not this one" rule both gates apply independently. Three
+    // entries, each with both: 3 markers + 3 lines = 6 swatch nodes, only
+    // the first line actually dashed.
+    expect(swatches).toHaveLength(6);
+    const dashedLines = swatches.filter(
+      (n) => n.tag === 'path' && n.attrs?.['stroke-dasharray'] !== undefined,
+    );
+    expect(dashedLines).toHaveLength(1);
+    // series 0's square marker.
+    expect(swatches.filter((n) => n.tag === 'rect')).toHaveLength(1);
+    // series 1 and 2 fall back to the default circle marker.
+    expect(swatches.filter((n) => n.tag === 'circle')).toHaveLength(2);
   });
 });
 

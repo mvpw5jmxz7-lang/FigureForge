@@ -525,6 +525,10 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 /* The selected cell outlives the editor, because that is where a paste lands.
    Shown, or an author has no way to know which cell a block will fill from. */
 .grid td .cell.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* The rest of a dragged or Shift-clicked range — a fill rather than an
+   outline, so a multi-cell selection reads as one rectangle with the anchor
+   cell's outline marking its corner, not a grid of individually-outlined cells. */
+.grid td .cell.in-range { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .data-grid:focus { outline: none; }
 .grid td input {
   width: 100%;

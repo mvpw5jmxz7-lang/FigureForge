@@ -59,12 +59,67 @@ function drawPoint(
       ctx.closePath();
       break;
     }
+    case 'triangle-down': {
+      const side = r * Math.sqrt((4 * Math.PI) / Math.sqrt(3));
+      const height = (side * Math.sqrt(3)) / 2;
+      ctx.moveTo(x, y + (2 / 3) * height);
+      ctx.lineTo(x + side / 2, y - height / 3);
+      ctx.lineTo(x - side / 2, y - height / 3);
+      ctx.closePath();
+      break;
+    }
     case 'diamond': {
       const half = r * Math.sqrt(Math.PI / 2);
       ctx.moveTo(x, y - half);
       ctx.lineTo(x + half, y);
       ctx.lineTo(x, y + half);
       ctx.lineTo(x - half, y);
+      ctx.closePath();
+      break;
+    }
+    case 'pentagon': {
+      const rPent = r * Math.sqrt((2 * Math.PI) / (5 * Math.sin((2 * Math.PI) / 5)));
+      for (let k = 0; k < 5; k++) {
+        const angle = ((-90 + k * 72) * Math.PI) / 180;
+        const px = x + rPent * Math.cos(angle);
+        const py = y + rPent * Math.sin(angle);
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      break;
+    }
+    case 'cross': {
+      const span = 3 * r * Math.sqrt(Math.PI / 5);
+      const half = span / 2;
+      const armHalf = span / 6;
+      ctx.moveTo(x + armHalf, y - half);
+      ctx.lineTo(x + armHalf, y - armHalf);
+      ctx.lineTo(x + half, y - armHalf);
+      ctx.lineTo(x + half, y + armHalf);
+      ctx.lineTo(x + armHalf, y + armHalf);
+      ctx.lineTo(x + armHalf, y + half);
+      ctx.lineTo(x - armHalf, y + half);
+      ctx.lineTo(x - armHalf, y + armHalf);
+      ctx.lineTo(x - half, y + armHalf);
+      ctx.lineTo(x - half, y - armHalf);
+      ctx.lineTo(x - armHalf, y - armHalf);
+      ctx.lineTo(x - armHalf, y - half);
+      ctx.closePath();
+      break;
+    }
+    case 'star': {
+      const innerRatio = (3 - Math.sqrt(5)) / 2;
+      const outerR = r * Math.sqrt(Math.PI / (5 * innerRatio * Math.sin(Math.PI / 5)));
+      const innerR = outerR * innerRatio;
+      for (let k = 0; k < 10; k++) {
+        const radius = k % 2 === 0 ? outerR : innerR;
+        const angle = ((-90 + k * 36) * Math.PI) / 180;
+        const px = x + radius * Math.cos(angle);
+        const py = y + radius * Math.sin(angle);
+        if (k === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
       ctx.closePath();
       break;
     }

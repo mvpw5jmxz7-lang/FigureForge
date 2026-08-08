@@ -101,12 +101,18 @@ export function formatTick(value: number, step: number): string {
   if (value === 0) return '0';
 
   const magnitude = Math.abs(value);
-  if (magnitude >= 1e5 || (magnitude < 1e-3 && magnitude > 0)) {
-    return value.toExponential(1).replace('e+', '×10^').replace('e-', '×10^−');
-  }
+  const formatted =
+    magnitude >= 1e5 || (magnitude < 1e-3 && magnitude > 0)
+      ? value.toExponential(1).replace('e+', '×10^').replace('e-', '×10^-')
+      : value.toFixed(Math.min(Math.max(0, -Math.floor(Math.log10(Math.abs(step || 1)))), 6));
 
-  const decimals = Math.max(0, -Math.floor(Math.log10(Math.abs(step || 1))));
-  return value.toFixed(Math.min(decimals, 6));
+  // Journals set a negative sign as an en dash (–), not the ASCII
+  // hyphen-minus `toFixed`/`toExponential` emit — replaced once, here, so
+  // every caller (axis ticks, heatmap cell values, the colourbar) agrees
+  // with text-width.ts's own '–' advance-width entry used to measure it. The
+  // only characters either branch can produce are digits, '.', 'e' and '-',
+  // so a blanket replace is exact, not a heuristic.
+  return formatted.replace(/-/g, '–');
 }
 
 export interface AxisBreak {

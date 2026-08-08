@@ -34,6 +34,7 @@ import {
   type FigureNode,
   type HeatmapScaleMode,
   type ImageNode,
+  type LineStyle,
   type Matrix,
   type PanelLabelNode,
   type PanelNode,
@@ -66,6 +67,7 @@ import {
   tickCountForLength,
   volcanoCategory,
   xyMarks,
+  type MarkOrientation,
   type NumericScale,
   type PointGeometry,
   type SurvivalStep,
@@ -663,6 +665,11 @@ export interface CategoricalPlotGeometry extends PlotGeometryBase {
   axisCategories: string[];
   /** Distinct legend keys in draw order, with the colour each one carries. */
   legend: { label: string; color: string }[];
+  /**
+   * Which physical edge the band (category) axis runs against. Absent reads
+   * as `'vertical'`, today's only behaviour — see `PlotNode.orientation`.
+   */
+  orientation: MarkOrientation;
 }
 
 /**
@@ -979,6 +986,8 @@ function geometryForMargin(
     return continuousGeometry(node, series, { margin, plotWidth, plotHeight });
   }
 
+  const orientation: MarkOrientation = node.orientation ?? 'vertical';
+
   const yDomain = resolveDomain(series.flatMap((s) => s.values), {
     min: node.y.min,
     max: node.y.max,
@@ -990,8 +999,11 @@ function geometryForMargin(
 
   const yScale = makeScale({
     domain: yDomain,
-    // Inverted: SVG y grows downward, data grows upward.
-    rangeMm: [plotHeight, 0],
+    // Vertical: inverted, since SVG y grows downward and data grows upward.
+    // Horizontal: the value axis is physical x, which already grows the same
+    // direction as the data — the same convention `continuousGeometry`'s
+    // numeric x-scale already uses.
+    rangeMm: orientation === 'horizontal' ? [0, plotWidth] : [plotHeight, 0],
     tickStep: node.y.tickStep,
     kind: node.y.scale,
     ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
@@ -1010,10 +1022,14 @@ function geometryForMargin(
   const groupGap = node.groupGapFraction ?? DEFAULT_GROUP_GAP_FRACTION;
   const barGap = node.barGapFraction ?? DEFAULT_BAR_GAP_FRACTION;
 
+  // The band axis is physical x when vertical, physical y when horizontal —
+  // `BandScale` itself is axis-agnostic, so only the output range changes.
+  const bandRangeMm: [number, number] = orientation === 'horizontal' ? [0, plotHeight] : [0, plotWidth];
+
   const grouped = twoFactor
     ? makeGroupedBandScale(
         series.map((s) => ({ name: s.name, category: s.category!, group: s.group! })),
-        [0, plotWidth],
+        bandRangeMm,
         groupGap,
         barGap,
       )
@@ -1021,7 +1037,7 @@ function geometryForMargin(
 
   const band = grouped
     ? grouped.band
-    : makeBandScale(series.map((s) => s.name), [0, plotWidth], groupGap);
+    : makeBandScale(series.map((s) => s.name), bandRangeMm, groupGap);
 
   /*
    * Colour keys on the legend factor, not on series order.
@@ -1058,6 +1074,7 @@ function geometryForMargin(
     colors,
     // Seeded from the node id so jitter is identical on screen and in export.
     seed: hashString(node.id),
+    orientation,
   });
 
   return {
@@ -1075,6 +1092,7 @@ function geometryForMargin(
       label,
       color: legendColors[i % legendColors.length]!,
     })),
+    orientation,
   };
 }
 
@@ -1496,6 +1514,7 @@ function requiredMargin(
   reserveTopMm = 0,
 ): { left: number; bottom: number; right: number; top: number } {
   const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
+  const oneLine = estimateTextHeightMm(theme.type.tickLabelPt);
 
   // An inward tick takes no gutter at all, so it must not reserve any.
   const yTickGutter =
@@ -1503,11 +1522,27 @@ function requiredMargin(
   const xTickGutter =
     node.x.showTicks && node.x.tickDirection !== 'in' ? theme.spacing.tickLengthMm : 0;
 
+  /*
+   * Vertical (today): the left gutter holds node.y (the value axis) and the
+   * bottom gutter holds node.x (the category axis, tilt-truncated as needed).
+   * Horizontal: swapped — node.x now runs down the left (one label per row,
+   * never tilting — a category owns a whole row rather than a narrow
+   * column) and node.y runs along the bottom (a numeric axis, which never
+   * tilts either way).
+   */
+  const horizontal = geometry.kind === 'categorical' && geometry.orientation === 'horizontal';
+
   const yLabels = node.y.showLabels ? yTickLayout(node, theme, geometry).maxLabelWidth : 0;
-  const left =
-    yTickGutter +
-    (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
-    (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+  const xCategoryLabels = horizontal
+    ? categoryLabelLayout(node, theme, geometry).maxLabelWidth
+    : 0;
+  const left = horizontal
+    ? xTickGutter +
+      (node.x.showLabels ? theme.spacing.tickLabelGapMm + xCategoryLabels : 0) +
+      (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0)
+    : yTickGutter +
+      (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
+      (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
 
   const placement = legendPlacement(node, geometry);
   const legendRow =
@@ -1532,11 +1567,16 @@ function requiredMargin(
           .rows
       : 0;
 
-  const bottom =
-    xTickGutter +
-    theme.spacing.tickLabelGapMm +
-    xLabelLayout(node, theme, geometry).depth +
-    (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
+  const bottom = horizontal
+    ? yTickGutter +
+      theme.spacing.tickLabelGapMm +
+      (node.y.showLabels ? oneLine : 0) +
+      (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
+      legendRows * legendRow
+    : xTickGutter +
+      theme.spacing.tickLabelGapMm +
+      xLabelLayout(node, theme, geometry).depth +
+      (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
     // A legend below sits under the x title; without the reserve it would be
     // drawn past the panel edge onto whatever is beneath.
     legendRows * legendRow;
@@ -1934,10 +1974,15 @@ export function measurePlot(
   const categoryX = new Map<string, number>();
   const categoryTop = new Map<string, number>();
 
-  // A continuous plot has no categories to anchor a bracket to. Empty
-  // measurements are the honest answer: `addBracket` then has nothing to place
-  // against, and the Stats tab refuses group comparisons on these plots.
-  if (geometry.kind !== 'categorical') {
+  /*
+   * A continuous plot has no categories to anchor a bracket to, and a
+   * horizontal categorical plot has categories running down the side
+   * instead of along the bottom — nowhere flat to sit a bracket either.
+   * Empty measurements are the honest answer in both cases: `addBracket`
+   * then has nothing to place against, and the Stats tab refuses group
+   * comparisons on these plots.
+   */
+  if (geometry.kind !== 'categorical' || geometry.orientation === 'horizontal') {
     const empty: PlotMeasurements = { categoryX, categoryTop };
     measureCache.set(plot, { dataset, theme, result: empty });
     return empty;
@@ -2200,22 +2245,55 @@ function renderLegend(
       geometry.kind === 'continuous' && (node.pointShapes?.some((s) => s != null) ?? false)
         ? (shapeForSeries(node, index) ?? node.pointShape ?? 'circle')
         : undefined;
+    /*
+     * The same "any series carries one" rule as the shape swatch above, for
+     * the same reason — but scoped to `line`, the only plot type with a
+     * connecting line an author can style through the Inspector at all.
+     * Composes with the marker rather than replacing it, so a series using
+     * both per-series shapes and per-series line styles shows both.
+     */
+    const lineDash =
+      node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false)
+        ? dashArrayFor(lineStyleForSeries(node, index) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
+        : undefined;
+    const drawsLine = node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false);
+    const swatchMarks: SceneNode[] = [];
+    if (drawsLine) {
+      swatchMarks.push(
+        el('path', {
+          d: `M${round(x)} ${round(y + rowHeight / 2)} L${round(x + LEGEND_SWATCH_MM)} ${round(y + rowHeight / 2)}`,
+          fill: 'none',
+          stroke: entry.color,
+          'stroke-width': theme.stroke.dataMm,
+          'stroke-linecap': 'round',
+          ...(lineDash ? { 'stroke-dasharray': lineDash } : {}),
+        }, undefined, { role: 'legend' }),
+      );
+    }
+    if (shape) {
+      swatchMarks.push(
+        markerNode(node, theme, x + LEGEND_SWATCH_MM / 2, y + rowHeight / 2, {
+          fill: entry.color,
+          sizeMm: LEGEND_SWATCH_MM,
+          shape,
+          role: 'legend',
+        }),
+      );
+    }
+    if (swatchMarks.length === 0) {
+      swatchMarks.push(
+        el('rect', {
+          x,
+          y: y + (rowHeight - LEGEND_SWATCH_MM) / 2,
+          width: LEGEND_SWATCH_MM,
+          height: LEGEND_SWATCH_MM,
+          fill: entry.color,
+          stroke: 'none',
+        }, undefined, { role: 'legend' }),
+      );
+    }
     children.push(
-      shape
-        ? markerNode(node, theme, x + LEGEND_SWATCH_MM / 2, y + rowHeight / 2, {
-            fill: entry.color,
-            sizeMm: LEGEND_SWATCH_MM,
-            shape,
-            role: 'legend',
-          })
-        : el('rect', {
-            x,
-            y: y + (rowHeight - LEGEND_SWATCH_MM) / 2,
-            width: LEGEND_SWATCH_MM,
-            height: LEGEND_SWATCH_MM,
-            fill: entry.color,
-            stroke: 'none',
-          }, undefined, { role: 'legend' }),
+      ...swatchMarks,
       text(entry.label, {
         x: x + LEGEND_SWATCH_MM + gap,
         // Baseline within the row, matching how tick labels are placed.
@@ -2242,6 +2320,33 @@ function renderLegend(
       : margin.top + plotHeight + margin.bottom - (below?.rows ?? 1) * pitch;
 
   return [group({ transform: translate(originX, originY) }, children)];
+}
+
+/**
+ * Physical `"x y"` for a (band-axis, value-axis) position pair, honouring the
+ * plot's orientation — vertical puts the band position in x and the value
+ * position in y; horizontal swaps them. Two points that share `bandMm` and
+ * differ in `valueMm` therefore draw a stem that is vertical or horizontal
+ * automatically; two that share `valueMm` and differ in `bandMm` draw the
+ * perpendicular cap the same way — box/violin/error-bar path construction
+ * below reads entirely through this one seam.
+ */
+function xyPoint(orientation: MarkOrientation, bandMm: number, valueMm: number): string {
+  const [x, y] = orientation === 'horizontal' ? [valueMm, bandMm] : [bandMm, valueMm];
+  return `${round(x)} ${round(y)}`;
+}
+
+/** The same band/value → physical placement as `xyPoint`, for a filled rect. */
+function rectXY(
+  orientation: MarkOrientation,
+  bandLowMm: number,
+  bandExtentMm: number,
+  valueLowMm: number,
+  valueExtentMm: number,
+): { x: number; y: number; width: number; height: number } {
+  return orientation === 'horizontal'
+    ? { x: valueLowMm, y: bandLowMm, width: valueExtentMm, height: bandExtentMm }
+    : { x: bandLowMm, y: valueLowMm, width: bandExtentMm, height: valueExtentMm };
 }
 
 function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions): SceneNode | null {
@@ -2312,13 +2417,16 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
     if (mark.violin) {
       const v = mark.violin;
-      // Up the right flank, then back down the left, mirrored about the centre.
+      // Up the right/upper flank, then back down the left/lower, mirrored
+      // about the spine — `xyPoint` maps (band, value) to physical (x, y),
+      // so the same construction draws a vertical or horizontal violin.
       const right = v.profile.map(
-        (p, i) => `${i === 0 ? 'M' : 'L'}${round(v.centerX + p.halfWidthMm)} ${round(p.yMm)}`,
+        (p, i) =>
+          `${i === 0 ? 'M' : 'L'}${xyPoint(geometry.orientation, v.bandCenterMm + p.halfWidthMm, p.valueMm)}`,
       );
       const left = [...v.profile]
         .reverse()
-        .map((p) => `L${round(v.centerX - p.halfWidthMm)} ${round(p.yMm)}`);
+        .map((p) => `L${xyPoint(geometry.orientation, v.bandCenterMm - p.halfWidthMm, p.valueMm)}`);
       markChildren.push(
         el('path', {
           d: `${right.join(' ')} ${left.join(' ')} Z`,
@@ -2333,26 +2441,33 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
     if (mark.box) {
       const b = mark.box;
+      const xy = (valueMm: number, bandOffsetMm = 0): string =>
+        xyPoint(geometry.orientation, b.bandMm + b.bandWidthMm / 2 + bandOffsetMm, valueMm);
       markChildren.push(
         el('path', {
           d:
-            `M${round(b.x + b.width / 2)} ${round(b.q3Mm)} L${round(b.x + b.width / 2)} ${round(b.upperWhiskerMm)} ` +
-            `M${round(b.x + b.width / 2 - b.capHalfWidthMm)} ${round(b.upperWhiskerMm)} L${round(b.x + b.width / 2 + b.capHalfWidthMm)} ${round(b.upperWhiskerMm)} ` +
-            `M${round(b.x + b.width / 2)} ${round(b.q1Mm)} L${round(b.x + b.width / 2)} ${round(b.lowerWhiskerMm)} ` +
-            `M${round(b.x + b.width / 2 - b.capHalfWidthMm)} ${round(b.lowerWhiskerMm)} L${round(b.x + b.width / 2 + b.capHalfWidthMm)} ${round(b.lowerWhiskerMm)}`,
+            `M${xy(b.q3Mm)} L${xy(b.upperWhiskerMm)} ` +
+            `M${xy(b.upperWhiskerMm, -b.capHalfWidthMm)} L${xy(b.upperWhiskerMm, b.capHalfWidthMm)} ` +
+            `M${xy(b.q1Mm)} L${xy(b.lowerWhiskerMm)} ` +
+            `M${xy(b.lowerWhiskerMm, -b.capHalfWidthMm)} L${xy(b.lowerWhiskerMm, b.capHalfWidthMm)}`,
           fill: 'none',
           stroke: theme.foreground,
           'stroke-width': theme.stroke.errorBarMm,
           'stroke-linecap': 'butt',
         }, undefined, { role: 'whisker' }),
       );
+      // The hinges are statistical low/high, not physical-screen positions —
+      // min/max of the two picks the physically-lower edge regardless of
+      // whether the value axis is inverted (vertical) or not (horizontal).
       markChildren.push(
         el('rect', {
-          x: b.x,
-          // y is inverted, so q3 is the top edge and the height is the IQR.
-          y: b.q3Mm,
-          width: b.width,
-          height: Math.abs(b.q1Mm - b.q3Mm),
+          ...rectXY(
+            geometry.orientation,
+            b.bandMm,
+            b.bandWidthMm,
+            Math.min(b.q1Mm, b.q3Mm),
+            Math.abs(b.q1Mm - b.q3Mm),
+          ),
           fill: mark.color,
           'fill-opacity': 0.55,
           stroke: theme.foreground,
@@ -2361,7 +2476,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       );
       markChildren.push(
         el('path', {
-          d: `M${round(b.x)} ${round(b.medianMm)} L${round(b.x + b.width)} ${round(b.medianMm)}`,
+          d: `M${xy(b.medianMm, -b.bandWidthMm / 2)} L${xy(b.medianMm, b.bandWidthMm / 2)}`,
           fill: 'none',
           stroke: theme.foreground,
           // The median is the box plot's headline number; it has to read against
@@ -2374,15 +2489,15 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
     if (mark.errorBar) {
       const eb = mark.errorBar;
-      const lower = eb.upperOnly ? mark.centerMm : eb.bottomMm;
+      const lower = eb.upperOnly ? mark.centerMm : eb.lowMm;
+      const xy = (valueMm: number, bandOffsetMm = 0): string =>
+        xyPoint(geometry.orientation, eb.bandMm + bandOffsetMm, valueMm);
       markChildren.push(
         el('path', {
           d:
-            `M${round(eb.x - eb.capHalfWidthMm)} ${round(eb.topMm)} L${round(eb.x + eb.capHalfWidthMm)} ${round(eb.topMm)} ` +
-            `M${round(eb.x)} ${round(eb.topMm)} L${round(eb.x)} ${round(lower)}` +
-            (eb.upperOnly
-              ? ''
-              : ` M${round(eb.x - eb.capHalfWidthMm)} ${round(eb.bottomMm)} L${round(eb.x + eb.capHalfWidthMm)} ${round(eb.bottomMm)}`),
+            `M${xy(eb.highMm, -eb.capHalfWidthMm)} L${xy(eb.highMm, eb.capHalfWidthMm)} ` +
+            `M${xy(eb.highMm)} L${xy(lower)}` +
+            (eb.upperOnly ? '' : ` M${xy(eb.lowMm, -eb.capHalfWidthMm)} L${xy(eb.lowMm, eb.capHalfWidthMm)}`),
           fill: 'none',
           stroke: theme.foreground,
           'stroke-width': theme.stroke.errorBarMm,
@@ -2419,7 +2534,10 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
     content.push(group({}, markChildren));
   }
 
-  const axes = renderAxes(node, theme, geometry);
+  const axes =
+    geometry.orientation === 'horizontal'
+      ? renderAxesHorizontal(node, theme, geometry)
+      : renderAxes(node, theme, geometry);
 
   const area = group(
     { transform: translate(margin.left, margin.top) },
@@ -2447,6 +2565,46 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
  */
 function shapeForSeries(node: PlotNode, index: number): PointShape | undefined {
   return node.pointShapes?.[index] ?? undefined;
+}
+
+/**
+ * The line style a given series draws, in one place — the line-drawing
+ * counterpart to `shapeForSeries`.
+ *
+ * Undefined rather than `'solid'` where nothing is set, so the caller falls
+ * through to `node.lineStyle` and a plot that never used per-series styles
+ * emits byte-identical markup.
+ */
+function lineStyleForSeries(node: PlotNode, index: number): LineStyle | undefined {
+  return node.lineStyles?.[index] ?? undefined;
+}
+
+/**
+ * The `stroke-dasharray` for a line style, scaled to the stroke width so a
+ * dash reads the same shape at any theme's data stroke weight rather than a
+ * fixed millimetre literal. `undefined` for `'solid'`, so a plot that never
+ * touches line style — the overwhelming majority — gets no
+ * `stroke-dasharray` attribute at all, not an empty or trivial one; the
+ * caller's spread pattern (`...(dashArray ? {...} : {})`) is what keeps that
+ * byte-identical to today.
+ *
+ * Dotted reuses the round linecap every line path already draws with: a
+ * zero-length dash under `stroke-linecap: round` paints as a filled circle
+ * the width of the stroke, so `'0 <gap>'` is a row of round dots rather than
+ * a row of literal, invisible dashes (which would need a butt cap to vanish,
+ * and would vanish if it got one).
+ */
+function dashArrayFor(style: LineStyle, strokeWidthMm: number): string | undefined {
+  switch (style) {
+    case 'dashed':
+      return `${round(strokeWidthMm * 3)} ${round(strokeWidthMm * 2)}`;
+    case 'dotted':
+      return `0 ${round(strokeWidthMm * 2.2)}`;
+    case 'dash-dot':
+      return `${round(strokeWidthMm * 3)} ${round(strokeWidthMm * 2)} 0 ${round(strokeWidthMm * 2)}`;
+    case 'solid':
+      return undefined;
+  }
 }
 
 /**
@@ -2603,12 +2761,76 @@ function markerNode(
         `L${round(cx - side / 2)} ${round(cy + height / 3)} Z`;
       return el('path', { d, ...common }, titleChildren, { role });
     }
+    case 'triangle-down': {
+      // Same formula as 'triangle', flipped so the apex points down.
+      const side = r * Math.sqrt((4 * Math.PI) / Math.sqrt(3));
+      const height = (side * Math.sqrt(3)) / 2;
+      const d =
+        `M${round(cx)} ${round(cy + (2 / 3) * height)} ` +
+        `L${round(cx + side / 2)} ${round(cy - height / 3)} ` +
+        `L${round(cx - side / 2)} ${round(cy - height / 3)} Z`;
+      return el('path', { d, ...common }, titleChildren, { role });
+    }
     case 'diamond': {
       const half = r * Math.sqrt(Math.PI / 2);
       const d =
         `M${round(cx)} ${round(cy - half)} L${round(cx + half)} ${round(cy)} ` +
         `L${round(cx)} ${round(cy + half)} L${round(cx - half)} ${round(cy)} Z`;
       return el('path', { d, ...common }, titleChildren, { role });
+    }
+    case 'pentagon': {
+      // Regular pentagon, area-matched: for a regular n-gon with circumradius
+      // R, area = (n/2) R^2 sin(2pi/n); solved for R at n=5, the same
+      // area-match rule 'triangle'/'diamond' apply in closed form for n=3/n=4.
+      const rPent = r * Math.sqrt((2 * Math.PI) / (5 * Math.sin((2 * Math.PI) / 5)));
+      const pts: string[] = [];
+      for (let k = 0; k < 5; k++) {
+        const angle = ((-90 + k * 72) * Math.PI) / 180;
+        pts.push(
+          `${k === 0 ? 'M' : 'L'}${round(cx + rPent * Math.cos(angle))} ${round(cy + rPent * Math.sin(angle))}`,
+        );
+      }
+      return el('path', { d: pts.join(' ') + ' Z', ...common }, titleChildren, { role });
+    }
+    case 'cross': {
+      // A filled plus sign: 12 vertices, arm width a third of the total span
+      // (the proportion a filled-plus marker conventionally uses). Two arms
+      // of length L and width w=L/3 overlap in a w×w square, so
+      // area = 2Lw - w^2 = 5L^2/9; solved for L at area = pi r^2.
+      const span = 3 * r * Math.sqrt(Math.PI / 5);
+      const half = span / 2;
+      const armHalf = span / 6;
+      const d =
+        `M${round(cx + armHalf)} ${round(cy - half)} ` +
+        `L${round(cx + armHalf)} ${round(cy - armHalf)} ` +
+        `L${round(cx + half)} ${round(cy - armHalf)} ` +
+        `L${round(cx + half)} ${round(cy + armHalf)} ` +
+        `L${round(cx + armHalf)} ${round(cy + armHalf)} ` +
+        `L${round(cx + armHalf)} ${round(cy + half)} ` +
+        `L${round(cx - armHalf)} ${round(cy + half)} ` +
+        `L${round(cx - armHalf)} ${round(cy + armHalf)} ` +
+        `L${round(cx - half)} ${round(cy + armHalf)} ` +
+        `L${round(cx - half)} ${round(cy - armHalf)} ` +
+        `L${round(cx - armHalf)} ${round(cy - armHalf)} ` +
+        `L${round(cx - armHalf)} ${round(cy - half)} Z`;
+      return el('path', { d, ...common }, titleChildren, { role });
+    }
+    case 'star': {
+      // Five-point star (pentagram), area-matched. Inner/outer radius ratio
+      // is the classic golden-ratio pentagram construction, (3-sqrt5)/2;
+      // outer radius solved from area = 5 * Ro * Ri * sin(pi/5) = pi r^2.
+      const innerRatio = (3 - Math.sqrt(5)) / 2;
+      const outerR = r * Math.sqrt(Math.PI / (5 * innerRatio * Math.sin(Math.PI / 5)));
+      const innerR = outerR * innerRatio;
+      const pts: string[] = [];
+      for (let k = 0; k < 10; k++) {
+        const radius = k % 2 === 0 ? outerR : innerR;
+        const angle = ((-90 + k * 36) * Math.PI) / 180;
+        pts.push(
+          `${k === 0 ? 'M' : 'L'}${round(cx + radius * Math.cos(angle))} ${round(cy + radius * Math.sin(angle))}`,
+        );
+      }
+      return el('path', { d: pts.join(' ') + ' Z', ...common }, titleChildren, { role });
     }
     default:
       return el('circle', { cx, cy, r, ...common }, titleChildren, { role });
@@ -2728,6 +2950,10 @@ function renderContinuousMarks(
     }
 
     if (s.linePath && s.linePath.length > 1) {
+      const lineDashArray = dashArrayFor(
+        lineStyleForSeries(node, index) ?? node.lineStyle ?? 'solid',
+        theme.stroke.dataMm,
+      );
       markChildren.push(
         el('path', {
           d: s.linePath
@@ -2738,6 +2964,7 @@ function renderContinuousMarks(
           'stroke-width': theme.stroke.dataMm,
           'stroke-linejoin': 'round',
           'stroke-linecap': 'round',
+          ...(lineDashArray ? { 'stroke-dasharray': lineDashArray } : {}),
         }, undefined, { role: 'line' }),
       );
     }
@@ -2964,7 +3191,13 @@ function renderAxisBreaks(
   theme: Theme,
   geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
 ): SceneNode[] {
-  const out = breakMarks(geometry.yScale, theme, 'y', geometry.plotWidth);
+  // `geometry.yScale` is always "the value axis" — physical y when vertical,
+  // physical x when horizontal — so its break marks follow the same swap
+  // every other value-axis draw call makes.
+  const valueAxisPhysical = geometry.kind === 'categorical' && geometry.orientation === 'horizontal' ? 'x' : 'y';
+  const valueAxisExtent =
+    valueAxisPhysical === 'x' ? geometry.plotHeight : geometry.plotWidth;
+  const out = breakMarks(geometry.yScale, theme, valueAxisPhysical, valueAxisExtent);
   if (geometry.kind === 'continuous') {
     out.push(...breakMarks(geometry.xScale, theme, 'x', geometry.plotHeight));
   }
@@ -2997,38 +3230,46 @@ function minorTickValues(majors: readonly number[], divisions: number | undefine
   return out;
 }
 
-function renderNumericXTicks(
-  node: PlotNode,
+/**
+ * A numeric axis drawn along the bottom, ticks pointing down. Used by every
+ * continuous plot's x axis, and by a horizontal categorical plot's value
+ * axis (`node.y`, drawn along the bottom once orientation flips) — taking
+ * the scale/axis/extent directly rather than a whole `ContinuousPlotGeometry`
+ * is what lets both callers share this one implementation.
+ */
+function renderNumericBottomAxis(
   theme: Theme,
-  geometry: ContinuousPlotGeometry,
+  axis: AxisSpec,
+  scale: NumericScale,
+  plotWidth: number,
+  plotHeight: number,
 ): SceneNode[] {
-  const { xScale, plotWidth, plotHeight } = geometry;
   const out: SceneNode[] = [];
   const tickLen = theme.spacing.tickLengthMm;
   const tickLabelPt = theme.type.tickLabelPt;
   const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
 
-  const visible = xScale.ticks.filter(
-    (tick) => xScale.scale(tick) >= -0.01 && xScale.scale(tick) <= plotWidth + 0.01,
+  const visible = scale.ticks.filter(
+    (tick) => scale.scale(tick) >= -0.01 && scale.scale(tick) <= plotWidth + 0.01,
   );
   if (visible.length === 0) return out;
 
   const widest = visible.reduce(
-    (max, tick) => Math.max(max, estimateTextWidthMm(xScale.format(tick), tickLabelPt)),
+    (max, tick) => Math.max(max, estimateTextWidthMm(scale.format(tick), tickLabelPt)),
     0,
   );
   // A gap of a quarter of the widest label keeps neighbours from touching.
   const maxLabels = widest > 0 ? Math.max(2, Math.floor(plotWidth / (widest * 1.25))) : visible.length;
   const stride = visible.length > maxLabels ? Math.ceil(visible.length / maxLabels) : 1;
 
-  if (node.x.showTicks) {
+  if (axis.showTicks) {
     // Minor ticks first, so a major tick is never drawn over by one.
-    for (const value of minorTickValues(visible, node.x.minorTicks)) {
-      const x = xScale.scale(value);
+    for (const value of minorTickValues(visible, axis.minorTicks)) {
+      const x = scale.scale(value);
       if (x < -0.01 || x > plotWidth + 0.01) continue;
       out.push(
         el('path', {
-          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(node.x, tickLen) * 0.55)}`,
+          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(axis, tickLen) * 0.55)}`,
           ...axisStroke,
         }, undefined, { role: 'tick' }),
       );
@@ -3036,19 +3277,19 @@ function renderNumericXTicks(
   }
 
   visible.forEach((tick, index) => {
-    const x = xScale.scale(tick);
+    const x = scale.scale(tick);
 
-    if (node.x.showTicks) {
+    if (axis.showTicks) {
       out.push(
         el('path', {
-          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(node.x, tickLen))}`,
+          d: `M${round(x)} ${round(plotHeight)} L${round(x)} ${round(plotHeight + tickOffset(axis, tickLen))}`,
           ...axisStroke,
         }, undefined, { role: 'tick' }),
       );
     }
 
     // Ticks stay put; only their labels thin out, so the scale still reads.
-    if (!node.x.showLabels || index % stride !== 0) return;
+    if (!axis.showLabels || index % stride !== 0) return;
 
     /*
      * Anchor the end labels inward. The theme reserves only 2 mm to the right of
@@ -3060,7 +3301,7 @@ function renderNumericXTicks(
     const anchor = isFirst ? 'start' : isLast ? 'end' : 'middle';
 
     out.push(
-      text(xScale.format(tick), {
+      text(scale.format(tick), {
         x,
         y: plotHeight + tickLen + theme.spacing.tickLabelGapMm + ptToMm(tickLabelPt) * 0.8,
         'font-family': theme.fontFamily,
@@ -3108,6 +3349,30 @@ function yTickLayout(
   });
 
   return { visibleTicks, stride, maxLabelWidth };
+}
+
+/**
+ * Which category labels print down the left in horizontal orientation, and
+ * how wide the widest one is. The horizontal-axis mirror of `yTickLayout`:
+ * one label per row, never rotated — a category owns a full row of vertical
+ * room (its band's own height) rather than a narrow column the way a
+ * category under the bottom axis does, so there is no tilt-vs-truncate
+ * tradeoff to make here the way `xLabelLayout` makes for the vertical case.
+ * Shared by `requiredMargin`, which sizes the left gutter from it, and the
+ * horizontal axis renderer, which draws them.
+ */
+function categoryLabelLayout(
+  node: PlotNode,
+  theme: Theme,
+  geometry: CategoricalPlotGeometry,
+): { maxLabelWidth: number } {
+  if (!node.x.showLabels) return { maxLabelWidth: 0 };
+  const tickLabelPt = theme.type.tickLabelPt;
+  const maxLabelWidth = geometry.axisCategories.reduce(
+    (max, name) => Math.max(max, estimateTextWidthMm(name, tickLabelPt)),
+    0,
+  );
+  return { maxLabelWidth };
 }
 
 /**
@@ -3293,7 +3558,7 @@ function renderAxes(
   const { angle, budget, depth: xLabelDepth } = xLabelLayout(node, theme, geometry);
 
   if (geometry.kind === 'continuous') {
-    out.push(...renderNumericXTicks(node, theme, geometry));
+    out.push(...renderNumericBottomAxis(theme, node.x, geometry.xScale, plotWidth, plotHeight));
   } else if (node.x.showLabels) {
     const { axisCategories, axisBand } = geometry;
     const baseY = plotHeight + tickLen + theme.spacing.tickLabelGapMm;
@@ -3345,6 +3610,106 @@ function renderAxes(
       text(node.x.title, {
         x: plotWidth / 2,
         y: Math.min(Math.max(defaultY, belowLabels), limit),
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(theme.type.axisTitlePt),
+        fill: theme.foreground,
+        'text-anchor': 'middle',
+      }, { role: 'axis-title' }),
+    );
+  }
+
+  return out;
+}
+
+/**
+ * The axis pair for a horizontal categorical plot: `node.x` (the category
+ * spec) drawn as a vertical axis down the left, `node.y` (the numeric spec)
+ * drawn as a horizontal axis along the bottom via `renderNumericBottomAxis`
+ * — the mirror image of `renderAxes`'s vertical layout. A sibling function
+ * rather than a deeper branch inside `renderAxes`, so the existing,
+ * heavily-pinned vertical path is untouched by construction and this can
+ * only ever affect a plot that opts into `orientation: 'horizontal'`.
+ *
+ * A category axis never draws individual tick marks in either orientation —
+ * `addPlot` defaults `x.showTicks` to `false` for every categorical plot
+ * type, on the grounds that "the category labels sit under their bands and
+ * the bars carry the reading" (see `CONTINUOUS_X_PLOT_TYPES`) — so this
+ * mirrors the vertical bottom-axis code exactly in drawing labels only.
+ */
+function renderAxesHorizontal(
+  node: PlotNode,
+  theme: Theme,
+  geometry: CategoricalPlotGeometry,
+): SceneNode[] {
+  const { yScale, plotWidth, plotHeight, axisBand, axisCategories } = geometry;
+  const out: SceneNode[] = [];
+  const tickLen = theme.spacing.tickLengthMm;
+  const tickLabelPt = theme.type.tickLabelPt;
+  const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
+
+  // --- left axis: node.x, the category axis --------------------------------
+  if (node.x.showLine) {
+    out.push(
+      el('path', { d: `M0 0 L0 ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
+    );
+  }
+
+  if (node.x.showLabels) {
+    for (const name of axisCategories) {
+      out.push(
+        text(name, {
+          x: -(tickLen + theme.spacing.tickLabelGapMm),
+          y: axisBand.center(name),
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(tickLabelPt),
+          fill: theme.foreground,
+          'text-anchor': 'end',
+          'dominant-baseline': 'central',
+        }, { role: 'tick-label' }),
+      );
+    }
+  }
+
+  if (node.x.title) {
+    const { maxLabelWidth } = categoryLabelLayout(node, theme, geometry);
+    const x = -(
+      tickLen +
+      theme.spacing.tickLabelGapMm +
+      maxLabelWidth +
+      theme.spacing.axisTitleGapMm
+    );
+    out.push(
+      text(node.x.title, {
+        x: 0,
+        y: 0,
+        // Rotated about the axis midpoint so the title stays centred — the
+        // exact construction `renderAxes` uses for `node.y.title`.
+        transform: `translate(${round(x)} ${round(plotHeight / 2)}) rotate(-90)`,
+        'font-family': theme.fontFamily,
+        'font-size': ptToMm(theme.type.axisTitlePt),
+        fill: theme.foreground,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'alphabetic',
+      }, { role: 'axis-title' }),
+    );
+  }
+
+  // --- bottom axis: node.y, the numeric axis --------------------------------
+  if (node.y.showLine) {
+    out.push(
+      el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
+    );
+  }
+
+  out.push(...renderNumericBottomAxis(theme, node.y, yScale, plotWidth, plotHeight));
+
+  if (node.y.title) {
+    out.push(
+      text(node.y.title, {
+        x: plotWidth / 2,
+        // The plot's own bottom margin, which grows to hold the numeric
+        // labels — the same construction `renderAxes` uses for `node.x.title`.
+        y: plotHeight + geometry.margin.bottom - theme.spacing.axisTitleGapMm,
         'font-family': theme.fontFamily,
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,

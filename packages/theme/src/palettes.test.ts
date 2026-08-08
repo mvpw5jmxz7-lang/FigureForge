@@ -3,9 +3,12 @@ import {
   contrastRatio,
   deltaE2000,
   findColorConflicts,
+  findPalette,
   MIN_SERIES_DELTA_E,
   OKABE_ITO,
+  paletteColors,
   panelLetter,
+  PALETTES,
   relativeLuminance,
   simulateCvd,
   toGrayscale,
@@ -98,6 +101,25 @@ describe('palette validation', () => {
     for (let i = 1; i < conflicts.length; i++) {
       expect(conflicts[i]!.deltaE).toBeGreaterThanOrEqual(conflicts[i - 1]!.deltaE);
     }
+  });
+});
+
+describe('single-colour bar palettes', () => {
+  it('offers a light red, a black and a grey, each one colour repeated for every bar', () => {
+    for (const id of ['bar-red', 'bar-black', 'bar-grey']) {
+      const palette = findPalette(id);
+      expect(palette?.colors).toHaveLength(1);
+      // paletteColors cycles a length-1 array, so every series gets the same
+      // fill regardless of how many bars are drawn.
+      expect(paletteColors(id, 5)).toEqual(Array(5).fill(palette!.colors[0]));
+    }
+  });
+
+  it('names bar-red as the default default bar colour', () => {
+    // `packages/doc-model`'s `addPlot` reads this id directly for new
+    // 'bar'/'bar-dot' plots; this pins the id it must keep matching.
+    expect(PALETTES.some((p) => p.id === 'bar-red')).toBe(true);
+    expect(findPalette('bar-red')?.colors[0]).toBe('#e57373');
   });
 });
 

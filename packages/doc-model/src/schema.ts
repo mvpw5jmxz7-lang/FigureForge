@@ -139,15 +139,26 @@ const plotSchema = z.object({
   pointsUseSeriesColor: z.boolean().optional(),
   histogramBins: z.number().int().positive().optional(),
   errorBarDirection: z.enum(['both', 'up']).optional(),
-  pointShape: z.enum(['circle', 'square', 'triangle', 'diamond']).optional(),
+  pointShape: z
+    .enum(['circle', 'square', 'triangle', 'triangle-down', 'diamond', 'pentagon', 'cross', 'star'])
+    .optional(),
   pointShapes: z
-    .array(z.enum(['circle', 'square', 'triangle', 'diamond']).nullable())
+    .array(
+      z
+        .enum(['circle', 'square', 'triangle', 'triangle-down', 'diamond', 'pentagon', 'cross', 'star'])
+        .nullable(),
+    )
     .optional(),
   pointFill: z.string().optional(),
   pointStroke: strokeSchema.optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  lineStyle: z.enum(['solid', 'dashed', 'dotted', 'dash-dot']).optional(),
+  lineStyles: z.array(z.enum(['solid', 'dashed', 'dotted', 'dash-dot']).nullable()).optional(),
   y2: axisSchema.optional(),
   seriesAxis: z.array(z.enum(['y', 'y2'])).optional(),
   legend: z.enum(['auto', 'right', 'bottom', 'none']).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  orientation: z.enum(['vertical', 'horizontal']).optional(),
   errorDisplay: z.enum(['bars', 'band']).optional(),
   showReplicates: z.boolean().optional(),
   // Capped below 1 rather than at it: d3's band scale gives zero bandwidth at a

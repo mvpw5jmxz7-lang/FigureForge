@@ -56,6 +56,27 @@ export const PALETTES: readonly Palette[] = [
     grayscaleSafe: true,
     description: 'Perceptually uniform and monotonic in lightness.',
   },
+  {
+    id: 'bar-red',
+    name: 'Light red (single colour)',
+    colors: ['#e57373'],
+    grayscaleSafe: true,
+    description: 'One light red fill for every bar — the default for a plain bar graph.',
+  },
+  {
+    id: 'bar-black',
+    name: 'Black (single colour)',
+    colors: ['#000000'],
+    grayscaleSafe: true,
+    description: 'One black fill for every bar.',
+  },
+  {
+    id: 'bar-grey',
+    name: 'Grey (single colour)',
+    colors: ['#808080'],
+    grayscaleSafe: true,
+    description: 'One grey fill for every bar.',
+  },
 ];
 
 export const findPalette = (id: string): Palette | undefined => PALETTES.find((p) => p.id === id);

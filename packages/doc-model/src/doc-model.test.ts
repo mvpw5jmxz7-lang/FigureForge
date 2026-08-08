@@ -7,6 +7,7 @@ import {
   createDocument,
   createIdFactory,
   blocksOfSize,
+  copyBlock,
   couldHaveRowNames,
   dataBlocks,
   insertColumn,
@@ -1122,6 +1123,93 @@ describe('operations', () => {
     expect(plot && 'x' in plot ? plot.x.showTicks : null).toBe(true);
   });
 
+  it('defaults a bar graph to a single light-red fill, not the multi-series palette', () => {
+    // 'bar'/'bar-dot' are the only plot types that draw a bar rect at all
+    // (`options.showBar` in `categoricalMarks`) — every other type keeps the
+    // CVD-safe Okabe-Ito default.
+    const { doc } = sampleDocument();
+    const barDotPlots = Object.values(doc.nodes).filter((n) => n.type === 'plot');
+    expect(barDotPlots).toHaveLength(2);
+    for (const plot of barDotPlots) {
+      expect(plot.type === 'plot' && plot.plotType).toBe('bar-dot');
+      expect(plot.type === 'plot' && plot.palette).toBe('bar-red');
+    }
+
+    // A contingency table forces `plotType` to 'bar' after this node is
+    // already constructed, so the default has to catch that override too —
+    // but a contingency table is row x column, exactly the two-factor shape
+    // that keeps the CVD-safe default: colour is what separates its columns
+    // (Yes vs No) across its rows.
+    const newId = createIdFactory();
+    const counts: Dataset = {
+      ...dataset('Group,Yes,No\nTreated,15,5\nControl,7,13', newId()),
+      format: 'contingency',
+    };
+    const contingencyDoc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        draft.datasets = [counts];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 60, height: 50 },
+          datasetId: counts.id,
+        });
+      },
+    );
+    const contingencyPlot = Object.values(contingencyDoc.nodes).find((n) => n.type === 'plot')!;
+    expect(contingencyPlot.type === 'plot' && contingencyPlot.plotType).toBe('bar');
+    expect(contingencyPlot.type === 'plot' && contingencyPlot.palette).toBe('okabe-ito');
+
+    // A single-factor dataset explicitly plotted as 'bar' (rather than
+    // reaching it through `defaultPlotTypeFor`) gets the flat default too —
+    // it is `plotType`, not the path that produced it, that this reads.
+    const explicitBarDoc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        const ds = dataset('Group,Value\nA,5\nB,7\nC,3', newId());
+        draft.datasets = [ds];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 60, height: 50 },
+          datasetId: ds.id,
+          plotType: 'bar',
+        });
+      },
+    );
+    const explicitBarPlot = Object.values(explicitBarDoc.nodes).find((n) => n.type === 'plot')!;
+    expect(explicitBarPlot.type === 'plot' && explicitBarPlot.palette).toBe('bar-red');
+
+    // A non-bar plot type keeps the CVD-safe default — only bars change.
+    const lineDoc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        const ds = dataset('X1,Y1,X2,Y2\n1,2,1.5,3\n2,4,2.5,5', newId());
+        draft.datasets = [ds];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 80, height: 60 },
+          datasetId: ds.id,
+        });
+      },
+    );
+    const linePlot = Object.values(lineDoc.nodes).find((n) => n.type === 'plot')!;
+    expect(linePlot.type === 'plot' && linePlot.plotType).toBe('line');
+    expect(linePlot.type === 'plot' && linePlot.palette).toBe('okabe-ito');
+
+    // An explicit caller-supplied palette is never overridden.
+    const explicitDoc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        const ds = dataset('Treatment,R1,R2,R3\nVehicle,10,11,12\nDrug,4,5,6', newId());
+        draft.datasets = [ds];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 80, height: 60 },
+          datasetId: ds.id,
+          palette: 'viridis-discrete',
+        });
+      },
+    );
+    const explicitPlot = Object.values(explicitDoc.nodes).find((n) => n.type === 'plot')!;
+    expect(explicitPlot.type === 'plot' && explicitPlot.palette).toBe('viridis-discrete');
+  });
+
   it('letters panels in reading order', () => {
     const { doc } = sampleDocument();
     const labels = Object.values(doc.nodes).filter((n) => n.type === 'panel-label');
@@ -1867,6 +1955,66 @@ describe('.figureforge archive', () => {
     expect(loaded.document).toEqual(doc);
   });
 
+  it('round-trips a horizontal plot, and leaves orientation absent when never set', () => {
+    // The schema trap this project keeps hitting: zod strips an undeclared
+    // optional key on save, so a field present only on the TS type is
+    // silently dropped. This is the regression guard for `orientation`.
+    const { doc } = sampleDocument();
+    const horizontal = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') node.orientation = 'horizontal';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(horizontal));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(horizontal);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.orientation).toBe('horizontal');
+
+    // A document that never touched orientation round-trips with the field
+    // absent, not defaulted to `'vertical'` — the same "absent means the
+    // default" convention every other optional field in this file holds to.
+    const untouchedLoaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    const untouchedPlot = Object.values(untouchedLoaded.document.nodes).find(
+      (n) => n.type === 'plot',
+    );
+    expect(untouchedPlot?.type === 'plot' && 'orientation' in untouchedPlot).toBe(false);
+  });
+
+  it('round-trips a line plot with lineStyle/lineStyles, and leaves them absent when never set', () => {
+    // The same schema trap `orientation`'s own regression guard exists for:
+    // zod strips an undeclared optional key on save, so a field present only
+    // on the TS type is silently dropped.
+    const { doc } = sampleDocument();
+    const styled = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.plotType = 'line';
+          node.lineStyle = 'dash-dot';
+          node.lineStyles = ['dashed', null, 'dotted'];
+        }
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(styled));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(styled);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.lineStyle).toBe('dash-dot');
+    expect(plot?.type === 'plot' && plot.lineStyles).toEqual(['dashed', null, 'dotted']);
+
+    // A document that never touched line style round-trips with both fields
+    // absent, not defaulted to `'solid'` — the same "absent means the
+    // default" convention every other optional field in this file holds to.
+    const untouchedLoaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    const untouchedPlot = Object.values(untouchedLoaded.document.nodes).find(
+      (n) => n.type === 'plot',
+    );
+    expect(untouchedPlot?.type === 'plot' && 'lineStyle' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'lineStyles' in untouchedPlot).toBe(false);
+  });
+
   it('round-trips a heatmap plot with its new optional fields', () => {
     const newId = createIdFactory();
     const base = createDocument({
@@ -2309,6 +2457,37 @@ describe('statistical annotation lifecycle', () => {
     const after = editDocument(doc, (draft) => repositionBrackets(draft, new Map()));
 
     expect(after.nodes[before.id]!.frame).toEqual(before.frame);
+  });
+
+  it('collapses a stale bracket to a harmless full-width marker, not a crash, when its plot flips to horizontal', () => {
+    // `packages/render`'s `measurePlot` refuses a horizontal plot's brackets
+    // the same way it already refuses a continuous plot's — empty but
+    // *defined* `categoryX`/`categoryTop` maps, not an absent measurement.
+    // That distinction matters here: an absent measurement leaves a bracket
+    // alone (the test above), but a defined-and-empty one reaches
+    // `bracketSpan`'s measured branch with nothing in it, which is what this
+    // test reproduces directly, without needing `packages/render` at all.
+    const { doc, plotId } = annotatedDocument();
+    const flipped = editDocument(doc, (draft) => {
+      const plot = draft.nodes[plotId];
+      if (plot?.type === 'plot') plot.orientation = 'horizontal';
+    });
+    const before = Object.values(flipped.nodes).find((n) => n.type === 'bracket')!;
+    const plotFrame = flipped.nodes[plotId]!.frame;
+
+    const after = editDocument(flipped, (draft) => {
+      repositionBrackets(draft, new Map([[plotId, { categoryX: new Map(), categoryTop: new Map() }]]));
+    });
+    const moved = after.nodes[before.id]!;
+
+    expect(moved.type).toBe('bracket');
+    expect(moved.type === 'bracket' && Number.isFinite(moved.frame.x)).toBe(true);
+    expect(moved.type === 'bracket' && Number.isFinite(moved.frame.y)).toBe(true);
+    // `bracketSpan`'s measured branch falls back to `0`/`plot.frame.width`
+    // for a category name that misses an empty map — spanning the full
+    // plot width is the resulting degenerate-but-harmless shape, an
+    // obviously-off marker the author can select and delete.
+    expect(moved.type === 'bracket' && moved.frame.width).toBeCloseTo(plotFrame.width, 6);
   });
 
   it('names brackets after the panel they annotate', () => {
@@ -2820,6 +2999,30 @@ describe('dataset editing', () => {
     expect(pasted.rows[2]).toEqual([null, 400, 500, 600]);
     // The untouched row is exactly as it was.
     expect(pasted.rows[0]).toEqual(['Vehicle', 10, 11, 12]);
+  });
+
+  it('copies a single cell', () => {
+    expect(copyBlock(table(), 0, 0, 0, 0)).toBe('Vehicle');
+    expect(copyBlock(table(), 1, 2, 1, 2)).toBe('5');
+  });
+
+  it('copies a multi-row, multi-column rectangle as tab/newline-delimited text', () => {
+    // The same shape Excel puts on the clipboard, and the shape `pasteBlock`
+    // already reads — a copy is meant to round-trip through a real
+    // spreadsheet and back.
+    expect(copyBlock(table(), 0, 1, 1, 3)).toBe('10\t11\t12\n4\t5\t6');
+  });
+
+  it('copies a blank cell as an empty string, not the word "null"', () => {
+    const ds = setCell(table(), 0, 1, '');
+    expect(copyBlock(ds, 0, 0, 0, 3)).toBe('Vehicle\t\t11\t12');
+  });
+
+  it('round-trips a copied block through pasteBlock at a new anchor', () => {
+    const copied = copyBlock(table(), 0, 1, 1, 3);
+    const pasted = pasteBlock(table(), 2, 1, copied);
+    expect(pasted.rows[2]).toEqual([null, 10, 11, 12]);
+    expect(pasted.rows[3]).toEqual([null, 4, 5, 6]);
   });
 
   it('marks the dataset edited, which is what makes an analysis go stale', () => {

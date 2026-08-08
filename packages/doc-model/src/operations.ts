@@ -13,7 +13,7 @@ import { current, isDraft } from 'immer';
 import type { Analysis } from './analysis.js';
 import { significanceStars } from './analysis.js';
 import type { DataFormat, Dataset } from './data.js';
-import { toSeries } from './data.js';
+import { isTwoFactor, toSeries } from './data.js';
 import type { Asset, FigureDocument } from './document.js';
 import { layerByName, nextZ } from './document.js';
 import type { PointMm, RectMm } from './geometry.js';
@@ -339,6 +339,33 @@ export function addPlot(
     plot.showPoints = true;
     if (plot.x.title === '') plot.x.title = 'UMAP1';
     if (plot.y.title === '') plot.y.title = 'UMAP2';
+  }
+
+  /*
+   * A plain bar graph reads conventionally in one flat colour, not the
+   * eight-colour Okabe-Ito set built to separate several groups at once —
+   * so 'bar'/'bar-dot' (the only plot types that draw a `BarGeometry` at
+   * all, via `options.showBar` in `categoricalMarks`) get a single light
+   * red instead. Only applies when the caller left `palette` unset, the
+   * same guard the `okabe-ito` default above uses, and runs last so it
+   * also sees the contingency-format override, which forces `'bar'` after
+   * this node was constructed.
+   *
+   * A *two-factor* table is the deliberate exception, contingency included:
+   * there, colour is what carries the second factor (WT vs KO, or a
+   * contingency table's Yes vs No column) across categories, so flattening
+   * it to one colour would erase the exact distinction the grouping exists
+   * to show. `isTwoFactor` is the same single spelling of that question the
+   * renderer and Inspector already use, so this cannot drift from what they
+   * decide — a contingency table reads as two-factor under it exactly as a
+   * `grouped` table does, since both set `category`/`group` per series.
+   */
+  if (
+    !options.palette &&
+    (plot.plotType === 'bar' || plot.plotType === 'bar-dot') &&
+    !(dataset && isTwoFactor(toSeries(dataset)))
+  ) {
+    plot.palette = 'bar-red';
   }
 
   draft.nodes[id] = plot;

@@ -179,10 +179,32 @@ export type HeatmapScaleMode = 'sequential' | 'diverging';
 
 export type ErrorBarKind = 'none' | 'sd' | 'sem' | 'ci95' | 'range' | 'iqr';
 
-/** Marker shapes. Enough to tell four series apart in greyscale. */
-export type PointShape = 'circle' | 'square' | 'triangle' | 'diamond';
+/** Marker shapes. Enough to tell eight series apart in greyscale. */
+export type PointShape =
+  | 'circle'
+  | 'square'
+  | 'triangle'
+  | 'triangle-down'
+  | 'diamond'
+  | 'pentagon'
+  | 'cross'
+  | 'star';
 
-export const POINT_SHAPES: readonly PointShape[] = ['circle', 'square', 'triangle', 'diamond'];
+export const POINT_SHAPES: readonly PointShape[] = [
+  'circle',
+  'square',
+  'triangle',
+  'triangle-down',
+  'diamond',
+  'pentagon',
+  'cross',
+  'star',
+];
+
+/** Connecting-line stroke styles for `line` plots. */
+export type LineStyle = 'solid' | 'dashed' | 'dotted' | 'dash-dot';
+
+export const LINE_STYLES: readonly LineStyle[] = ['solid', 'dashed', 'dotted', 'dash-dot'];
 
 export type CenterKind = 'mean' | 'median';
 
@@ -284,6 +306,28 @@ export interface PlotNode extends NodeBase {
   /** Marker outline. Unset draws no outline, as before. */
   pointStroke?: Stroke;
   /**
+   * Connecting-line stroke style for `line` plots. Solid unless asked
+   * otherwise — absent renders byte-identical to `'solid'`. See
+   * `dashArrayFor` in `packages/render`, which is where this actually turns
+   * into a dash pattern.
+   */
+  lineStyle?: LineStyle;
+  /**
+   * Line style per series, overriding `lineStyle` for the ones it names.
+   *
+   * Indexed by series *order*, the same key `pointShapes`, `seriesAxis` and
+   * the palette array use — so it needs no names and cannot go stale when a
+   * series is renamed. A missing or empty entry falls back to `lineStyle`,
+   * which keeps a plot that sets only the plot-wide style rendering exactly
+   * as it did.
+   *
+   * A second way (besides `pointShapes`) to carry series identity where
+   * colour cannot — in greyscale print, and for a reader with a
+   * colour-vision deficiency — which is why the legend draws the actual dash
+   * pattern rather than a plain swatch once it is set.
+   */
+  lineStyles?: readonly (LineStyle | null)[];
+  /**
    * A second y axis on the right, and which series read it.
    *
    * `seriesAxis` is indexed the same way as the palette — by series order — so
@@ -301,6 +345,23 @@ export interface PlotNode extends NodeBase {
    * spell out underneath is furniture, not information.
    */
   legend?: 'auto' | 'right' | 'bottom' | 'none';
+  /**
+   * Which physical edge the categorical axis draws against.
+   *
+   * `'vertical'` (absent, today's only behaviour) runs categories along the
+   * bottom and the value axis up the left, bars growing upward. `'horizontal'`
+   * runs categories down the left and the value axis along the bottom, bars
+   * growing rightward. `node.x` stays "the categorical spec" and `node.y`
+   * stays "the numeric spec" either way — orientation only changes which edge
+   * each is drawn against, never which one is which.
+   *
+   * Categorical plot types only (`bar`/`dot`/`bar-dot`/`box`/`violin`/
+   * `beeswarm`) — a continuous or grid plot has no category axis to flip.
+   * Significance brackets have nowhere flat to anchor on a horizontal plot,
+   * so `measurePlot` refuses them the same way it already does on a
+   * continuous plot, and the Stats tab disables comparisons with a reason.
+   */
+  orientation?: 'vertical' | 'horizontal';
   /**
    * Draw the error interval as a filled band rather than as bars.
    *

@@ -233,3 +233,46 @@ describe('axis label collision', () => {
     expect(Math.abs(x)).toBeGreaterThan(widest);
   });
 });
+
+describe('negative tick labels', () => {
+  it('draws a negative y tick with an en dash, never the ASCII hyphen-minus', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      const parsed = parseDelimited('Treatment,R1,R2,R3\nDrug,-4,-2,-6\nVehicle,10,11,12');
+      const dataset: Dataset = {
+        id: newId(),
+        name: 'Fold change',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/d.csv',
+        sourceFilename: 'd.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Fold change',
+        datasetId: dataset.id,
+        plotType: 'bar-dot',
+        yTitle: 'Fold change',
+      });
+    });
+
+    const labels = tickLabels(doc)
+      .filter(isYTickLabel)
+      .map((n) => n.text ?? '');
+    // The axis domain has to dip below zero for a negative-valued series, so
+    // at least one label reads negative — this asserts the reformatting
+    // reaches an actual drawn scene node, not only `formatTick` in isolation.
+    expect(labels.some((t) => t.includes('–'))).toBe(true);
+    expect(labels.some((t) => t.includes('-'))).toBe(false);
+  });
+});

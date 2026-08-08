@@ -12,6 +12,7 @@ import { useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
+  LINE_STYLES,
   POINT_SHAPES,
   childrenOf,
   deleteNode,
@@ -35,6 +36,7 @@ import {
   type AxisSpec,
   type FigureNode,
   type HeatmapScaleMode,
+  type LineStyle,
   type NodeId,
   type PlotNode,
   type PlotType,
@@ -671,6 +673,29 @@ function PlotFields({
     CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'survival' && series.length > 1;
 
   /*
+   * Per-series line styles, indexed by series order — the same key the
+   * palette and per-series shapes above use. Written as a full-length array
+   * with `null` for the series that follow the plot-wide style, mirroring
+   * `setSeriesShape`.
+   */
+  const setSeriesLineStyle = (index: number, style: LineStyle | null): void => {
+    const next: (LineStyle | null)[] = series.map((_, i) => node.lineStyles?.[i] ?? null);
+    next[index] = style;
+    setPlot('Change series line style', {
+      lineStyles: next.every((s) => s === null) ? undefined : next,
+    });
+  };
+
+  /*
+   * A different dash pattern per series is a second way to carry series
+   * identity where colour cannot. Offered only for `line`: it is the only
+   * plot type whose connecting line is both drawn and user-styleable —
+   * scatter never draws one, and survival's own curve has its own Inspector
+   * surface and is not exposed here.
+   */
+  const perSeriesLineStyles = node.plotType === 'line' && series.length > 1;
+
+  /*
    * Band spacing, and what to call it. Two factors put marks inside a category,
    * so both gaps mean something; one factor gives each mark its own category,
    * where the group gap *is* the gap between the bars. `barWidthFraction` also
@@ -707,6 +732,31 @@ function PlotFields({
         or several lines. On a plain bar chart the category labels already name every mark, so a
         key repeating them is furniture.
       </p>
+
+      {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'heatmap' && (
+        <>
+          <label className="field block">
+            Orientation
+            <select
+              value={node.orientation ?? 'vertical'}
+              onChange={(e) =>
+                setPlotGeometry('Change orientation', {
+                  orientation: e.target.value as 'vertical' | 'horizontal',
+                })
+              }
+            >
+              <option value="vertical">Vertical — bars grow upward</option>
+              <option value="horizontal">Horizontal — bars grow rightward</option>
+            </select>
+          </label>
+          <p className="hint">
+            Horizontal runs the category axis down the left instead of along the bottom — useful
+            for long category names or many categories. Significance brackets need a flat place to
+            sit above a bar, so they are refused on a horizontal plot; switch back to compare
+            groups.
+          </p>
+        </>
+      )}
 
       {node.plotType === 'volcano' ? (
         <VolcanoColorControls node={node} setPlot={setPlot} />
@@ -757,6 +807,22 @@ function PlotFields({
                     ))}
                   </select>
                 )}
+                {perSeriesLineStyles && (
+                  <select
+                    value={node.lineStyles?.[index] ?? ''}
+                    title={`Line style for ${s.name}`}
+                    onChange={(e) =>
+                      setSeriesLineStyle(index, e.target.value === '' ? null : (e.target.value as LineStyle))
+                    }
+                  >
+                    <option value="">Default</option>
+                    {LINE_STYLES.map((style) => (
+                      <option key={style} value={style}>
+                        {style[0]!.toUpperCase() + style.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </label>
             ))}
           </div>
@@ -765,6 +831,14 @@ function PlotFields({
               A different symbol per series is what tells them apart in greyscale, and for a
               reader who cannot separate the colours. Once any series is given one, the legend
               draws every series' own symbol. “Default” follows the Marker setting below.
+            </p>
+          )}
+          {perSeriesLineStyles && (
+            <p className="hint">
+              A different dash pattern per series is a second way to tell them apart in
+              greyscale, and for a reader who cannot separate the colours. Once any series is
+              given one, the legend draws a short line in every series' own pattern. “Default”
+              follows the Line style setting below.
             </p>
           )}
 
@@ -1069,6 +1143,22 @@ function PlotFields({
             </button>
           )}
         </>
+      )}
+
+      {node.plotType === 'line' && (
+        <label className="field block">
+          Line style
+          <select
+            value={node.lineStyle ?? 'solid'}
+            onChange={(e) => setPlot('Change line style', { lineStyle: e.target.value as LineStyle })}
+          >
+            {LINE_STYLES.map((style) => (
+              <option key={style} value={style}>
+                {style[0]!.toUpperCase() + style.slice(1)}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
 
       <h4>Axes</h4>

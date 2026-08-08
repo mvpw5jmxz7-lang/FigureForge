@@ -1337,3 +1337,21 @@ export function pasteBlock(ds: Dataset, row: number, col: number, text: string):
 
   return retyped(ds, rows, columns);
 }
+
+/**
+ * Serialise a rectangular block of cells as tab/newline-delimited text — the
+ * inverse of `pasteBlock`, and the same shape Excel puts on the clipboard, so
+ * a copied block round-trips through a real spreadsheet and back.
+ */
+export function copyBlock(ds: Dataset, r0: number, c0: number, r1: number, c1: number): string {
+  const rows: string[] = [];
+  for (let r = r0; r <= r1; r++) {
+    const cells: string[] = [];
+    for (let c = c0; c <= c1; c++) {
+      const value = ds.rows[r]?.[c] ?? null;
+      cells.push(value === null ? '' : String(value));
+    }
+    rows.push(cells.join('\t'));
+  }
+  return rows.join('\n');
+}
