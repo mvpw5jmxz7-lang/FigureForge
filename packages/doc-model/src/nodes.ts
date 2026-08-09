@@ -206,6 +206,11 @@ export type LineStyle = 'solid' | 'dashed' | 'dotted' | 'dash-dot';
 
 export const LINE_STYLES: readonly LineStyle[] = ['solid', 'dashed', 'dotted', 'dash-dot'];
 
+/** Stroke styles for `PlotNode.showGridlines`'s reference lines. */
+export type GridlineStyle = 'solid' | 'dashed' | 'dotted';
+
+export const GRIDLINE_STYLES: readonly GridlineStyle[] = ['solid', 'dashed', 'dotted'];
+
 export type CenterKind = 'mean' | 'median';
 
 /**
@@ -581,6 +586,55 @@ export interface PlotNode extends NodeBase {
    * instead. e.g. "Concentration (mg/mL)".
    */
   cascadeAxisTitle?: string;
+  /**
+   * Close the axis into a full rectangle: draw the top and right lines the
+   * default L-shaped axis omits, in the same stroke as the existing
+   * left/bottom lines. Absent/false draws exactly as today.
+   *
+   * Meaningless on a heatmap, which draws no axis lines at all
+   * (`GridPlotGeometry` has no numeric axis) — the Inspector hides the
+   * control there, the same way it hides other controls a plot type cannot
+   * honour.
+   */
+  boxed?: boolean;
+  /**
+   * Draw a light reference line at every visible tick of the value axis,
+   * beneath the marks. Uses the exact tick list the axis itself draws, so a
+   * gridline can never drift from the tick it belongs to. Absent/false draws
+   * nothing extra.
+   *
+   * On a cascading line plot (see `hasCascadeOffset`), each line instead runs
+   * diagonally from its front-axis tick to the matching position on the
+   * back-most series' plane, that plane is closed as a wall (a flat line per
+   * value tick continuing each diagonal, plus its top and right edges), and a
+   * second copy of the axes — left value axis and bottom x axis, with ticks
+   * but no labels — is drawn standing on it. Together that is the receding 3D
+   * box from the reference figure this feature was built against, and all of
+   * it is automatic whenever this and cascading are both true: none of it
+   * depends on `boxed`, which is a separate rectangle drawn on request.
+   *
+   * Meaningless on a heatmap (no numeric axis) — the Inspector hides it there.
+   */
+  showGridlines?: boolean;
+  /**
+   * Stroke colour for `showGridlines`'s reference lines. Absent/`'grey'`
+   * keeps today's exact muted blend between the theme's background and
+   * foreground; `'black'` draws them in the theme's plain foreground colour
+   * instead, for a grid that reads as a firmer reference rather than a faint
+   * one. Never affects the back-axis copy on a cascading plot, which always
+   * matches the front axis's own stroke, the same way a real axis would.
+   */
+  gridlineColor?: 'grey' | 'black';
+  /**
+   * Line style for `showGridlines`'s reference lines. Absent keeps today's
+   * automatic choice — solid on an ordinary plot, dashed on a cascading one
+   * (see `hasCascadeOffset`) — so an existing figure is unaffected; setting
+   * this explicitly applies uniformly regardless of cascade state.
+   * Deliberately narrower than `LineStyle` (no `'dash-dot'`): a reference
+   * grid reads clearly in three styles, and a fourth adds choice without
+   * adding clarity.
+   */
+  gridlineStyle?: GridlineStyle;
 }
 
 export interface ImageNode extends NodeBase {

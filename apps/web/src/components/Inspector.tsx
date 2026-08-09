@@ -12,6 +12,7 @@ import { useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
+  GRIDLINE_STYLES,
   LINE_STYLES,
   POINT_SHAPES,
   childrenOf,
@@ -35,6 +36,7 @@ import {
   type FigureDocument,
   type AxisSpec,
   type FigureNode,
+  type GridlineStyle,
   type HeatmapScaleMode,
   type LabelFormat,
   type LineStyle,
@@ -1315,6 +1317,57 @@ function PlotFields({
       )}
 
       <h4>Axes</h4>
+      {node.plotType !== 'heatmap' && (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={node.boxed ?? false}
+            onChange={(e) => setPlot('Toggle boxed axis', { boxed: e.target.checked })}
+          />
+          Boxed
+        </label>
+      )}
+      {node.plotType !== 'heatmap' && (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={node.showGridlines ?? false}
+            onChange={(e) => setPlot('Toggle gridlines', { showGridlines: e.target.checked })}
+          />
+          Show gridlines
+        </label>
+      )}
+      {node.plotType !== 'heatmap' && node.showGridlines && (
+        <>
+          <label className="field">
+            Gridline colour
+            <select
+              value={node.gridlineColor ?? 'grey'}
+              onChange={(e) =>
+                setPlot('Change gridline colour', { gridlineColor: e.target.value as 'grey' | 'black' })
+              }
+            >
+              <option value="grey">Grey</option>
+              <option value="black">Black</option>
+            </select>
+          </label>
+          <label className="field">
+            Gridline style
+            <select
+              value={node.gridlineStyle ?? (hasCascadeOffset(node, series.length) ? 'dashed' : 'solid')}
+              onChange={(e) =>
+                setPlot('Change gridline style', { gridlineStyle: e.target.value as GridlineStyle })
+              }
+            >
+              {GRIDLINE_STYLES.map((style) => (
+                <option key={style} value={style}>
+                  {style[0]!.toUpperCase() + style.slice(1)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
       <AxisFields
         label="Y"
         axis={node.y}

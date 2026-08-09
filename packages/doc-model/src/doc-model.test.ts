@@ -2362,6 +2362,59 @@ describe('.figureforge archive', () => {
     expect(untouchedPlot?.type === 'plot' && untouchedPlot.offsetStepMm).toBe(5);
   });
 
+  it('round-trips boxed/showGridlines/gridlineColor/gridlineStyle, absent when never set', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X\tY\n1\t2\n2\t4\n3\t6', newId()) };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Boxed',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'scatter';
+        plotNode.boxed = true;
+        plotNode.showGridlines = true;
+        plotNode.gridlineColor = 'black';
+        plotNode.gridlineStyle = 'dotted';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.boxed).toBe(true);
+    expect(plot?.type === 'plot' && plot.showGridlines).toBe(true);
+    expect(plot?.type === 'plot' && plot.gridlineColor).toBe('black');
+    expect(plot?.type === 'plot' && plot.gridlineStyle).toBe('dotted');
+
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X\tY\n1\t2\n2\t4', newId()) };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Boxed',
+      });
+    });
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'boxed' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'showGridlines' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'gridlineColor' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'gridlineStyle' in untouchedPlot).toBe(false);
+  });
+
   it('leaves an ordinary line plot without the offset fields at all', () => {
     const newId = createIdFactory();
     const base = createDocument({

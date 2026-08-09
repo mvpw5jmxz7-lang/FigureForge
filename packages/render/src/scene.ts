@@ -131,7 +131,28 @@ export type SceneRole =
   /** A cascade depth axis group's end-of-axis caption — the series' shared
    *  `category`, or `cascadeAxisTitle` in the single-implicit-group case.
    *  Distinct from 'axis-title' for the same reason. */
-  | 'cascade-axis-title';
+  | 'cascade-axis-title'
+  /**
+   * A reference line at a value axis's own tick, or (on a cascade) running
+   * diagonally to the back plane. Kept distinct from 'axis' for the standing
+   * reason: a role-count assertion for the real axis lines must not be
+   * silently widened by however many gridlines a plot draws. Never added to
+   * `quality.ts`'s `MARK_ROLES` — it is chrome, not data-ink, so the
+   * colour-vision-deficiency contrast checker must not compare it against
+   * series colours.
+   */
+  | 'gridline'
+  /**
+   * The second copy of the front L-axis — left value axis and bottom x axis,
+   * with tick marks but no labels — standing on a cascading plot's back
+   * plane, drawn by `showGridlines`. See `renderCascadeBackAxes`. Kept
+   * distinct from 'axis'/'tick' (the real front axis and its ticks) and from
+   * 'gridline' (the pale diagonals and the wall they close, including its top
+   * and right edges): this pair is drawn in the ordinary axis stroke rather
+   * than the gridline colour/style, and a role-count assertion for any of the
+   * others must not be silently widened by it.
+   */
+  | 'cascade-back-axis';
 
 export const el = (
   tag: string,

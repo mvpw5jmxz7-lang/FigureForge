@@ -1072,6 +1072,151 @@ describe('adapter parity', () => {
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
   });
+
+  it('draws a boxed plot border identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-boxed',
+        name: 'Boxed',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/boxed.csv',
+        sourceFilename: 'boxed.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Boxed',
+        datasetId: dataset.id,
+        plotType: 'scatter',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.boxed = true;
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // Two ordinary lines (left, bottom) plus the two `boxed` lines (top, right).
+    expect(collectByRole(scene, 'axis').filter((n) => n.tag === 'path')).toHaveLength(4);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws ordinary gridlines identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-gridlines',
+        name: 'Gridlines',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/gridlines.csv',
+        sourceFilename: 'gridlines.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Gridlines',
+        datasetId: dataset.id,
+        plotType: 'scatter',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.showGridlines = true;
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'gridline').length).toBeGreaterThan(0);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws diagonal cascade gridlines identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      ['X1\tY1\tX2\tY2', '1\t2\t1\t3', '2\t4\t2\t5', '3\t6\t3\t7'].join('\n'),
+    );
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-cascade-gridlines',
+        name: 'Cascade gridlines',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/cascade-gridlines.csv',
+        sourceFilename: 'cascade-gridlines.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Cascade gridlines',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.offsetStepMm = 10;
+        node.showGridlines = true;
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // One diagonal gridline per y tick and per x tick — density follows the
+    // axis, not the two series — and every one of them is dashed, since a
+    // cascade's reference lines recede into the back plane rather than
+    // sitting flat on the tick.
+    const gridlines = collectByRole(scene, 'gridline');
+    expect(gridlines.length).toBeGreaterThan(2);
+    for (const g of gridlines) {
+      expect(g.attrs?.['stroke-dasharray']).toBe('1.5 1');
+    }
+    // A second copy of the x and y axes standing on that back plane, with
+    // their own tick marks — so more than the two lines alone. The exact
+    // coordinates are pinned in `gridlines.test.ts`; what matters here is that
+    // the nodes exist in both adapters and neither throws on them.
+    expect(collectByRole(scene, 'cascade-back-axis').length).toBeGreaterThan(2);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

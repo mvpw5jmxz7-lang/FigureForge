@@ -13,10 +13,13 @@ reported fixes, the DOM-volume mechanism phase 7 needed first, and all five of
 phase 7's chart types (volcano plots, heatmaps, survival curves, PCA, UMAP) —
 plus a seventh round adding volcano point labels, cascade/offset line plots,
 scientific axis label formatting (including a symlog scale), and
-save-to-disk with directory selection and a `.ffg` extension, and an eighth
+save-to-disk with directory selection and a `.ffg` extension, an eighth
 round adding volcano label dragging with an auto-following leader, an
-axis-range clipping toggle, and a cascade plot's schematic depth (z) axis.
-Phase 8 and 9 are not started.**
+axis-range clipping toggle, and a cascade plot's schematic depth (z) axis,
+and a ninth round adding sign-aware centred tick labels, a full rectangular
+plot border, and — for a cascading line plot — a true 3D-oblique reference
+grid with configurable colour/style and a second copy of the axes standing
+on its back plane. Phase 8 and 9 are not started.**
 
 ---
 
@@ -200,6 +203,10 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after round 9 (sign-aware tick labels, boxed border, 3D cascade
+gridlines):** 686 TypeScript tests, 139 Python tests unchanged, typecheck and
+lint clean, 46-check acceptance run unaffected — see "Round 9" below.
 
 **Verified after round 8 (volcano label dragging, axis range clipping,
 cascade depth axis) — all three stages merged:** 644 TypeScript tests, 139
@@ -2288,6 +2295,126 @@ of the new fields).
 
 ---
 
+### Round 9 — sign-aware tick labels, a boxed border, and a 3D cascade grid
+
+Three more items reported from real use, the last revised twice against a
+reference figure (`TestFiles/cascade with reference lines.png`, a
+sedimentation-velocity plot whose four traces cascade diagonally behind a
+receding dashed grid and a second, back-plane copy of the axes). No
+`SCHEMA_VERSION` bump: every new field is optional.
+
+- **Every visible x tick centres on its digits, sign excluded.** A numeric
+  label's minus sign used to be included in the centring math — `formatTick`
+  emits it as the literal first character of the first run, and the *string*
+  was centred on the tick, which visibly off-centres the *digits* whenever
+  the label is negative. `leadingSignWidthMm` (`text-width.ts`) measures a
+  run list's leading en dash (`–`, U+2013 — the journal convention this
+  codebase already enforces, never the ASCII hyphen or the true minus
+  `−`); `renderNumericBottomAxis` shifts `x` left by half of it, so the sign
+  hangs outside the centred span rather than pulling the whole label off it.
+  The old inward start/end anchoring at the axis ends is gone — every label
+  is `text-anchor: 'middle'` now, sign-shifted or not — since a start/end
+  label was itself an approximation for the same overhang this fixes exactly.
+  `xEdgeOverhangMm` computes how far a centred (and now sign-shifted) edge
+  label reaches past the plot area, and `requiredMargin` folds it into the
+  existing two-pass `left`/`right` computation via `Math.max`, so a wide
+  edge label keeps fitting inside the panel instead of overhanging it.
+  `bottomNumericAxis` picks the right axis/scale pair for whichever physical
+  direction is currently the numeric one — `node.x` on a continuous plot,
+  `node.y` once a horizontal categorical plot flips it to the bottom —
+  mirroring `renderAxisBreaks`'s own `valueAxisPhysical` split so the two
+  can never disagree about which axis is "the numeric one along the
+  bottom." `xBottomAxisLayout` factors the shared tick-visibility/stride
+  arithmetic out of `renderNumericBottomAxis` so it and `xEdgeOverhangMm`
+  can't drift apart — two copies of that arithmetic would have shown up as
+  a label that fits the margin the renderer reserved but not the one it
+  actually drew against.
+- **`PlotNode.boxed` draws the missing top and right axis lines.** Today's
+  axis is always "L-shaped" — bottom and left only — with no way to close it
+  into a full rectangle. `renderBoxedBorder(node, plotWidth, plotHeight,
+  axisStroke, backOffset?)` is the one implementation, called from both
+  `renderAxes` and `renderAxesHorizontal` right after each one's own line
+  block, so the two orientations can't draw two different rectangles.
+  Hidden on a heatmap, which draws no axis lines at all.
+- **A cascading line plot's reference grid is a true 3D-oblique box, not a
+  flat one — revised twice against the reference figure.** The first pass
+  drew one flat line per series at its own baseline; comparing against the
+  reference figure showed the real shape is a receding grid: one dashed
+  diagonal per **front-axis tick** (not per series — the reference has
+  visibly more grid lines than traces), running parallel to the cascade's
+  own front→back offset from the front tick to the matching position on the
+  back-most series' plane, plus that plane closed as a wall and a *second*
+  copy of the axes standing on it.
+  - **`cascadeBackOffsetMm(series)`** is the one derivation of the
+    front→back displacement, read directly off the offset-baked
+    `baselineMm`/`baselineXMm` already on the first and last series (from
+    round 7's cascade work) rather than re-derived from
+    `effectiveOffsetStepsMm`/`offsetReserveMm` internals — so it cannot
+    disagree with where the marks themselves drew. Verified in-bounds by
+    construction: the back-most series' own window is exactly
+    `x ∈ [offset.x, plotWidth]`, `y ∈ [0, plotHeight + offset.y]` — the
+    canvas's own bounds — so nothing here needs a new margin reservation.
+  - **`renderGridlines`** draws the diagonals (one per visible y tick from
+    `x=0`, one per visible x tick from `y=plotHeight`, both landing on the
+    back plane), then the wall closing them: a flat line per value tick
+    continuing its own diagonal, plus the wall's top and right edges — all
+    in the gridline colour/style, so the receding grid reads as a closed 3D
+    box rather than a loose fan of lines. Every back-plane coordinate is
+    computed from the *same rounded* front-tick position the diagonal used
+    (`round(round(p) + offset)`, not `round(p + offset)` — the two are not
+    the same number), which is what makes a wall line's end and a back
+    tick's position land on a diagonal's endpoint exactly rather than a
+    rounding step away.
+  - **`renderCascadeBackAxes`** stands a second copy of the front L-axis —
+    left value axis and bottom x axis, with tick marks but no labels or
+    titles — on that back plane, at exactly the ticks the diagonals arrive
+    at. Gated per axis on the front axis's own `showLine`/`showTicks`, the
+    standing "a control that visibly does nothing is a defect" rule. New
+    role `'cascade-back-axis'`, kept distinct from `'axis'`/`'tick'` (the
+    real front axis) and `'gridline'` (the diagonals and the wall) so a
+    role-count assertion for any of the three is never silently widened by
+    another. All of this is automatic whenever `showGridlines` and cascading
+    are both true — independent of `boxed`, which still draws its own
+    (optionally back-offset) rectangle on request and simply overdraws the
+    wall's frame in the firmer axis stroke.
+  - **Non-cascading gridlines are unchanged**: flat lines at the value
+    axis's own ticks, exactly as before this round.
+- **`gridlineColor` (`'grey'` | `'black'`) and `gridlineStyle` (`'solid'` |
+  `'dashed'` | `'dotted'`)** make the reference lines' appearance a stated
+  choice rather than a fixed blend. Absent stays exactly today's behaviour —
+  the muted grey blend, solid on an ordinary plot and dashed on a cascading
+  one — and an explicit style overrides the cascade default uniformly, so a
+  cascading plot's grid can be forced solid or an ordinary plot's dotted.
+  `'dotted'` pairs a zero-length dash with a round linecap (the same idiom
+  `dashArrayFor` already uses) so it paints as dots rather than vanishing;
+  that is the only style needing an extra attribute, so `'solid'`/`'dashed'`
+  stay byte-identical to before this option existed. Both are Inspector
+  selects shown only once "Show gridlines" is checked.
+
+Driven in a real browser, light and dark: a negative-tick dataset centred
+its digits with the en dash hanging outside; `Boxed` closed a scatter plot
+into a rectangle with no effect on a heatmap; a 4-series cascade with both
+`offsetStepMm` and `offsetStepXMm` set showed a solid front L-axis, grey
+dashed diagonals landing exactly on a solid ticked back L-axis, and the wall
+between them closed top and right — with `Boxed` left **unchecked**, proving
+the back axes are automatic rather than tied to that toggle; checking
+`Boxed` afterward added exactly two more solid lines over the same two wall
+edges. Switching `Gridline colour` to black and `Gridline style` to dotted
+produced clearly dotted black diagonals; switching style to solid on the
+same cascading plot produced solid black diagonals, correctly overriding
+the automatic dashed default.
+
+**Verified:** 686 TypeScript tests (644 + 42 new: a `text-width.test.ts`
+suite for `leadingSignWidthMm`, a rewritten `gridlines.test.ts` covering the
+diagonal grid/wall/back-axes geometry and the colour/style options exactly,
+sign-aware-centring and boxed-border cases in `continuous-axis.test.ts`, a
+round-trip test in `doc-model.test.ts`, and parity fixtures for the boxed
+border and both gridline shapes), 139 Python tests unchanged (no stage
+touches `services/api`), typecheck and lint clean, 46-check acceptance run
+unaffected (no existing fixture uses any of the new fields).
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -2339,7 +2466,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

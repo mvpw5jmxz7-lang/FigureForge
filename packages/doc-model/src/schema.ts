@@ -194,6 +194,10 @@ const plotSchema = z.object({
   offsetFill: z.enum(['none', 'tint', 'solid']).optional(),
   showCascadeAxis: z.boolean().optional(),
   cascadeAxisTitle: z.string().optional(),
+  boxed: z.boolean().optional(),
+  showGridlines: z.boolean().optional(),
+  gridlineColor: z.enum(['grey', 'black']).optional(),
+  gridlineStyle: z.enum(['solid', 'dashed', 'dotted']).optional(),
 });
 
 const imageSchema = z.object({

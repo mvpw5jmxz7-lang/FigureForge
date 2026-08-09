@@ -114,6 +114,30 @@ export function superscriptSizePt(basePt: number): number {
   return Math.max(SUPERSCRIPT_MIN_PT, basePt * SUPERSCRIPT_SCALE);
 }
 
+/**
+ * Journals set a negative tick label's sign as an en dash `–` (U+2013), never
+ * the ASCII hyphen or the true minus `−` — see `formatTick`/`formatRunsFor`
+ * in `packages/plots/src/scales.ts`, which always emit it as the literal
+ * first character of the first (never superscript) run.
+ */
+const NEGATIVE_SIGN = '–';
+
+/**
+ * Width of a run list's leading negative sign, in millimetres — `0` when the
+ * label is not negative. Lets a caller centre a numeric tick label on its
+ * *digits* rather than the sign as well: subtracting half of this from an
+ * otherwise-centred `x` shifts the digit portion onto the tick and leaves the
+ * sign hanging further left, outside the centred span.
+ */
+export function leadingSignWidthMm(
+  runs: readonly { text: string; sup?: boolean }[],
+  fontSizePt: number,
+): number {
+  const first = runs[0];
+  if (!first || first.sup || !first.text.startsWith(NEGATIVE_SIGN)) return 0;
+  return estimateTextWidthMm(NEGATIVE_SIGN, fontSizePt);
+}
+
 /** Width of a run list, each optionally set at the reduced superscript size. */
 export function estimateRunsWidthMm(
   runs: readonly { text: string; sup?: boolean }[],

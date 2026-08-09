@@ -34,7 +34,7 @@ import {
   renderCascadeAxis,
   type ContinuousPlotGeometry,
 } from './render-document.js';
-import { collectByRole } from './scene.js';
+import { collectByRole, round } from './scene.js';
 import { toSvgString } from './svg-string.js';
 
 /** Two numeric columns → `simple-xy`, the format that carries paired x values. */
@@ -122,9 +122,7 @@ describe('numeric x axis', () => {
     expect(numeric.length).toBeGreaterThan(categorical.length);
   });
 
-  it('anchors the end labels inward so they stay inside the panel', () => {
-    // The Nature theme reserves 2 mm to the right of the plot; a centred label
-    // on the last tick overhangs the panel and, on the last panel, the page.
+  it('centres every x tick label, including the first and last', () => {
     // Y tick labels are centred on their own baseline; the x ones are not, which
     // is what separates the two axes' labels in the scene.
     const xAxisLabels = collectByRole(scene(makeDocument(XY, 'scatter')), 'tick-label').filter(
@@ -132,10 +130,7 @@ describe('numeric x axis', () => {
     );
 
     expect(xAxisLabels.length).toBeGreaterThan(1);
-    expect(xAxisLabels[0]!.attrs?.['text-anchor']).toBe('start');
-    expect(xAxisLabels[xAxisLabels.length - 1]!.attrs?.['text-anchor']).toBe('end');
-    // Everything between stays centred on its tick.
-    for (const label of xAxisLabels.slice(1, -1)) {
+    for (const label of xAxisLabels) {
       expect(label.attrs?.['text-anchor']).toBe('middle');
     }
   });
@@ -146,6 +141,110 @@ describe('numeric x axis', () => {
     // The tick count comes from the axis length alone, so a narrow panel asks
     // for more labels than fit; the thinning is what keeps them legible.
     expect(narrow).toBeLessThan(wide);
+  });
+
+  it('centres a negative tick label on its digits, sign hanging outside', () => {
+    const NEGATIVE_XY = `Dose,Response
+-3,2.1
+-1,3.9
+1,6.2
+3,7.8`;
+    const doc = makeDocument(NEGATIVE_XY, 'scatter');
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const tickLabelPt = NATURE_THEME.type.tickLabelPt;
+
+    const xAxisLabels = collectByRole(scene(doc), 'tick-label').filter(
+      (n) => n.attrs?.['dominant-baseline'] !== 'central',
+    );
+    // A negative label's text is the en dash followed by digits — never the
+    // ASCII hyphen — per the journal-typesetting convention this codebase
+    // already enforces (`formatTick`).
+    const negativeLabel = xAxisLabels.find((n) => n.text?.startsWith('–'));
+    expect(negativeLabel).toBeDefined();
+
+    const tick = geometry.xScale.ticks.find((t) => t < 0)!;
+    const rawTickX = geometry.xScale.scale(tick);
+    const signWidthMm = 0.556 * tickLabelPt * (25.4 / 72); // '–' advance, 556/1000 em
+    expect(Number(negativeLabel!.attrs?.['x'])).toBeCloseTo(rawTickX - signWidthMm / 2, 4);
+  });
+});
+
+describe('sign-aware margin reservation', () => {
+  it('grows the right margin to hold a centred, multi-digit last tick label', () => {
+    const WIDE_XY = `Dose,Response
+1,2
+500,999
+1000,2000`;
+    const doc = makeDocument(WIDE_XY, 'scatter');
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    // The theme's unconditional default reserve, with nothing else (no y2,
+    // cascade or legend) in play here.
+    expect(geometry.margin.right).toBeGreaterThan(NATURE_THEME.spacing.plotMarginMm.right);
+  });
+});
+
+describe('boxed plot border', () => {
+  it('draws no extra lines when absent, and exactly two more when boxed', () => {
+    const plain = collectByRole(scene(makeDocument(XY, 'scatter')), 'axis').length;
+    const boxed = collectByRole(scene(makeDocument(XY, 'scatter', 80, { boxed: true })), 'axis')
+      .length;
+    expect(boxed).toBe(plain + 2);
+  });
+
+  it('draws a rectangle: top and right edges at the plot area boundary', () => {
+    const doc = makeDocument(XY, 'scatter', 80, { boxed: true });
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const w = round(geometry.plotWidth);
+    const h = round(geometry.plotHeight);
+    const axisPaths = collectByRole(scene(doc), 'axis');
+    const top = axisPaths.find((n) => n.attrs?.['d'] === `M0 0 L${w} 0`);
+    const right = axisPaths.find((n) => n.attrs?.['d'] === `M${w} 0 L${w} ${h}`);
+    expect(top).toBeDefined();
+    expect(right).toBeDefined();
+  });
+
+  it('is byte-identical to today when absent or explicitly false', () => {
+    const absent = toSvgString(scene(makeDocument(XY, 'scatter')));
+    const explicitFalse = toSvgString(scene(makeDocument(XY, 'scatter', 80, { boxed: false })));
+    expect(explicitFalse).toBe(absent);
+  });
+
+  it('has no effect on a heatmap', () => {
+    const csv = `Gene,S1,S2\nA,1,2\nB,3,4`;
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      const parsed = parseDelimited(csv);
+      const dataset: Dataset = {
+        id: newId(),
+        name: 'Matrix',
+        format: 'matrix',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/m.csv',
+        sourceFilename: 'm.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Matrix',
+        datasetId: dataset.id,
+        plotType: 'heatmap',
+      });
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') node.boxed = true;
+      }
+    });
+    expect(collectByRole(scene(doc), 'axis')).toEqual([]);
   });
 });
 

@@ -32,6 +32,7 @@ import {
   type Dataset,
   type FigureDocument,
   type FigureNode,
+  type GridlineStyle,
   type HeatmapScaleMode,
   type ImageNode,
   type LineStyle,
@@ -82,6 +83,7 @@ import {
   estimateRunsWidthMm,
   estimateTextHeightMm,
   estimateTextWidthMm,
+  leadingSignWidthMm,
   superscriptRiseMm,
   superscriptSizePt,
   truncateToWidth,
@@ -1930,13 +1932,28 @@ function requiredMargin(
   const xCategoryLabels = horizontal
     ? categoryLabelLayout(node, theme, geometry).maxLabelWidth
     : 0;
-  const left = horizontal
-    ? xTickGutter +
-      (node.x.showLabels ? theme.spacing.tickLabelGapMm + xCategoryLabels : 0) +
-      (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0)
-    : yTickGutter +
-      (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
-      (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0);
+  /*
+   * A centred numeric tick label reaches half its own width past the tick on
+   * both ends of the axis; a leading sign reaches half its width further
+   * still. Folded into `left`/`right` below the same way every other
+   * measured quantity here is, so a wide edge label keeps fitting inside the
+   * panel instead of overhanging it now that it is centred rather than
+   * anchored inward.
+   */
+  const bottomNumeric = bottomNumericAxis(node, geometry);
+  const edgeOverhang = bottomNumeric
+    ? xEdgeOverhangMm(bottomNumeric.axis, bottomNumeric.scale, theme, geometry.plotWidth)
+    : { left: 0, right: 0 };
+  const left = Math.max(
+    horizontal
+      ? xTickGutter +
+        (node.x.showLabels ? theme.spacing.tickLabelGapMm + xCategoryLabels : 0) +
+        (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0)
+      : yTickGutter +
+        (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
+        (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0),
+    edgeOverhang.left,
+  );
 
   const placement = legendPlacement(node, geometry);
   const legendRow =
@@ -1988,6 +2005,7 @@ function requiredMargin(
   const cascade = geometry.kind === 'continuous' ? cascadeAxisReserveMm(node, theme, geometry.series) : 0;
   const right = Math.max(
     theme.spacing.plotMarginMm.right,
+    edgeOverhang.right,
     y2 +
       cascade +
       (placement === 'right'
@@ -2780,6 +2798,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       { transform: translate(margin.left, margin.top) },
       [
         ...renderAxes(node, theme, geometry),
+        ...renderGridlines(node, theme, geometry),
         ...renderCascadeAxis(node, theme, geometry),
         ...renderVolcanoThresholds(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
@@ -2962,7 +2981,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
 
   const area = group(
     { transform: translate(margin.left, margin.top) },
-    [...axes, ...content, ...renderAxisBreaks(node, theme, geometry)],
+    [...axes, ...renderGridlines(node, theme, geometry), ...content, ...renderAxisBreaks(node, theme, geometry)],
     { role: 'plot-area' },
   );
   return legend.length === 0 ? area : group({}, [area, ...legend]);
@@ -3949,6 +3968,83 @@ function tickLabelNode(
 }
 
 /**
+ * Which x ticks are visible, and how many of their labels actually get drawn
+ * before neighbours would touch — the bottom-axis counterpart to
+ * `yTickLayout`. Shared by `renderNumericBottomAxis`, which draws them, and
+ * `xEdgeOverhangMm`, which sizes the margin to hold them; two copies of this
+ * arithmetic would drift, and the symptom would be a label that fits the
+ * margin the renderer reserved but not the one it actually drew against.
+ */
+function xBottomAxisLayout(
+  axis: AxisSpec,
+  scale: NumericScale,
+  theme: Theme,
+  plotWidth: number,
+): { visible: number[]; stride: number } {
+  const tickLabelPt = theme.type.tickLabelPt;
+  const visible = scale.ticks.filter(
+    (tick) => scale.scale(tick) >= -0.01 && scale.scale(tick) <= plotWidth + 0.01,
+  );
+  if (visible.length === 0) return { visible, stride: 1 };
+
+  const widest = visible.reduce(
+    (max, tick) => Math.max(max, estimateRunsWidthMm(tickLabelRuns(scale, tick), tickLabelPt)),
+    0,
+  );
+  // A gap of a quarter of the widest label keeps neighbours from touching.
+  const maxLabels = widest > 0 ? Math.max(2, Math.floor(plotWidth / (widest * 1.25))) : visible.length;
+  const stride = visible.length > maxLabels ? Math.ceil(visible.length / maxLabels) : 1;
+  return { visible, stride };
+}
+
+/**
+ * How far a centred first/last x tick label would reach past the plot area's
+ * left/right edge, in millimetres — `0` on each side with nothing to
+ * overhang. Centering (rather than the old inward start/end anchoring) means
+ * a wide edge label's *digits* reach half their own width past the tick, and
+ * a leading sign reaches half its width further still; `requiredMargin` folds
+ * this into the same margin it already reserves, so the label keeps fitting
+ * inside the panel rather than overhanging it.
+ */
+function xEdgeOverhangMm(
+  axis: AxisSpec,
+  scale: NumericScale,
+  theme: Theme,
+  plotWidth: number,
+): { left: number; right: number } {
+  if (!axis.showLabels) return { left: 0, right: 0 };
+  const { visible } = xBottomAxisLayout(axis, scale, theme, plotWidth);
+  if (visible.length === 0) return { left: 0, right: 0 };
+  const tickLabelPt = theme.type.tickLabelPt;
+  const widthsOf = (tick: number): { sign: number; digits: number } => {
+    const runs = tickLabelRuns(scale, tick);
+    const full = estimateRunsWidthMm(runs, tickLabelPt);
+    const sign = leadingSignWidthMm(runs, tickLabelPt);
+    return { sign, digits: full - sign };
+  };
+  const first = widthsOf(visible[0]!);
+  const last = widthsOf(visible[visible.length - 1]!);
+  return { left: first.sign + first.digits / 2, right: last.digits / 2 };
+}
+
+/**
+ * The bottom-drawn numeric axis for a plot geometry, if it has one — `node.x`
+ * for a continuous plot, `node.y` once a horizontal categorical plot flips it
+ * to the bottom, or `null` for a vertical categorical plot's band axis, which
+ * has no numeric labels to overhang. Mirrors `renderAxisBreaks`'s own
+ * `valueAxisPhysical` split so the two never disagree about which axis is
+ * "the numeric one along the bottom" for a given geometry.
+ */
+function bottomNumericAxis(
+  node: PlotNode,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
+): { axis: AxisSpec; scale: NumericScale } | null {
+  if (geometry.kind === 'continuous') return { axis: node.x, scale: geometry.xScale };
+  if (geometry.orientation === 'horizontal') return { axis: node.y, scale: geometry.yScale };
+  return null;
+}
+
+/**
  * A numeric axis drawn along the bottom, ticks pointing down. Used by every
  * continuous plot's x axis, and by a horizontal categorical plot's value
  * axis (`node.y`, drawn along the bottom once orientation flips) — taking
@@ -3967,18 +4063,8 @@ function renderNumericBottomAxis(
   const tickLabelPt = theme.type.tickLabelPt;
   const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
 
-  const visible = scale.ticks.filter(
-    (tick) => scale.scale(tick) >= -0.01 && scale.scale(tick) <= plotWidth + 0.01,
-  );
+  const { visible, stride } = xBottomAxisLayout(axis, scale, theme, plotWidth);
   if (visible.length === 0) return out;
-
-  const widest = visible.reduce(
-    (max, tick) => Math.max(max, estimateRunsWidthMm(tickLabelRuns(scale, tick), tickLabelPt)),
-    0,
-  );
-  // A gap of a quarter of the widest label keeps neighbours from touching.
-  const maxLabels = widest > 0 ? Math.max(2, Math.floor(plotWidth / (widest * 1.25))) : visible.length;
-  const stride = visible.length > maxLabels ? Math.ceil(visible.length / maxLabels) : 1;
 
   if (axis.showTicks) {
     // Minor ticks first, so a major tick is never drawn over by one.
@@ -4009,19 +4095,14 @@ function renderNumericBottomAxis(
     // Ticks stay put; only their labels thin out, so the scale still reads.
     if (!axis.showLabels || index % stride !== 0) return;
 
-    /*
-     * Anchor the end labels inward. The theme reserves only 2 mm to the right of
-     * the plot, so a centred label on the last tick overhangs the panel and, on
-     * the rightmost panel of a figure, the page itself.
-     */
-    const isFirst = index === 0;
-    const isLast = index === visible.length - 1;
-    const anchor = isFirst ? 'start' : isLast ? 'end' : 'middle';
-
     const runs = tickLabelRuns(scale, tick);
+    // Centred on the tick, but on the *digits* alone: a leading sign hangs
+    // further left, outside the centred span, rather than pulling the whole
+    // label — sign included — off-centre from the tick it belongs to.
+    const signShift = leadingSignWidthMm(runs, tickLabelPt) / 2;
     out.push(
       tickLabelNode(runs, tickLabelPt, {
-        x,
+        x: x - signShift,
         // A superscript rises *above* the label's own baseline, so without
         // this the raised exponent on a wide power10 axis would grow upward
         // into the tick gap rather than sitting inside the label's own room.
@@ -4034,7 +4115,7 @@ function renderNumericBottomAxis(
         'font-family': theme.fontFamily,
         'font-size': ptToMm(tickLabelPt),
         fill: theme.foreground,
-        'text-anchor': anchor,
+        'text-anchor': 'middle',
       }),
     );
   });
@@ -4189,6 +4270,277 @@ function xLabelLayout(
 }
 
 /**
+ * The front→back displacement of a cascading line plot, read directly from
+ * the offset-baked `baselineMm`/`baselineXMm` already on the first and last
+ * series — never re-derived from `effectiveOffsetStepsMm`/`offsetReserveMm`
+ * internals, so this can't disagree with where the marks themselves drew.
+ * `{0,0}` for a single series, which callers never hit anyway (guarded by
+ * `hasCascadeOffset`, which already requires more than one series).
+ */
+function cascadeBackOffsetMm(
+  series: readonly { baselineMm: number | null; baselineXMm: number | null }[],
+): { x: number; y: number } {
+  const first = series[0]!;
+  const last = series[series.length - 1]!;
+  return {
+    x: (last.baselineXMm ?? 0) - (first.baselineXMm ?? 0),
+    y: (last.baselineMm ?? 0) - (first.baselineMm ?? 0),
+  };
+}
+
+/**
+ * The top and right lines that complete `node.boxed`'s rectangle. The same
+ * two segments regardless of orientation — they close the plot area, not
+ * either axis specifically — so `renderAxes` and `renderAxesHorizontal`
+ * share this rather than each drawing their own copy that could drift apart.
+ *
+ * `backOffset` shifts the box to the back plane of a cascading line plot —
+ * see `cascadeBackOffsetMm` — so the box encloses the *back-most* series'
+ * own window rather than the whole canvas. Defaults to `{0,0}`, which
+ * reduces both lines to exactly today's formula, so every non-cascading
+ * `boxed` figure is untouched.
+ */
+function renderBoxedBorder(
+  node: PlotNode,
+  plotWidth: number,
+  plotHeight: number,
+  axisStroke: SceneAttrs,
+  backOffset: { x: number; y: number } = { x: 0, y: 0 },
+): SceneNode[] {
+  if (!node.boxed) return [];
+  return [
+    el('path', { d: `M${round(backOffset.x)} 0 L${round(plotWidth)} 0`, ...axisStroke }, undefined, { role: 'axis' }),
+    el(
+      'path',
+      {
+        d: `M${round(plotWidth)} 0 L${round(plotWidth)} ${round(plotHeight + backOffset.y)}`,
+        ...axisStroke,
+      },
+      undefined,
+      { role: 'axis' },
+    ),
+  ];
+}
+
+/**
+ * A reference line at every visible tick of the value axis, beneath the
+ * marks. Reuses `yTickLayout`/`xBottomAxisLayout`'s own tick lists verbatim,
+ * the same ones `renderAxes`/`renderNumericBottomAxis` draw against, so a
+ * gridline can never drift from the tick it belongs to.
+ *
+ * Only the value axis is ever gridded — a categorical band axis has no
+ * continuous scale to grid against in either orientation, mirroring
+ * `renderAxisBreaks`'s own `valueAxisPhysical` split: this reads `yScale`
+ * (whichever physical direction the value axis currently maps to) and, on a
+ * continuous plot, `xScale` as well.
+ *
+ * On a cascading line plot, each of these lines is instead drawn diagonally
+ * — parallel to the cascade's own front→back offset (`cascadeBackOffsetMm`)
+ * — from its front-axis tick position to the matching position on the
+ * back-most series' plane. A flat line here would visibly drift from where
+ * the offset actually placed the data; the reference image this feature was
+ * built against (a 3D/oblique cascade chart) draws exactly this receding
+ * grid, at tick density rather than series density.
+ *
+ * That plane is then drawn as a wall: a flat line per value tick continuing
+ * each diagonal, closed along its top and right edges. The wall is grid
+ * chrome and takes the gridline colour/style; the second copy of the *axes*
+ * standing on it is not — see `renderCascadeBackAxes`.
+ */
+const GRIDLINE_BLEND = 0.15; // Lighter than offsetFill's 0.3 fill blend — a
+// hairline stroke has far less retinal area than a filled region, so it
+// needs a lower blend to read as equally "muted" without vanishing.
+
+/**
+ * `node.gridlineColor`'s resolved stroke. Absent/`'grey'` is exactly today's
+ * blend, so an existing figure is byte-identical; `'black'` is the theme's
+ * plain foreground, for a grid that reads as a firmer reference.
+ */
+function gridlineStrokeColor(node: Pick<PlotNode, 'gridlineColor'>, theme: Theme): string {
+  return node.gridlineColor === 'black'
+    ? theme.foreground
+    : interpolateColor(GRIDLINE_BLEND, [theme.background, theme.foreground]);
+}
+
+/**
+ * `node.gridlineStyle`'s resolved dash pattern. `'dashed'` is exactly
+ * today's literal (`'1.5 1'`, independent of stroke width, unlike
+ * `dashArrayFor`'s line-style formula) so the existing cascade default is
+ * byte-identical. `'dotted'` needs a round linecap to paint as dots rather
+ * than vanish — see `dashArrayFor`'s own note on the same idiom — added only
+ * for that style, so `'solid'`/`'dashed'` gain no new attribute.
+ */
+function gridlineDashArray(style: GridlineStyle): { dasharray?: string; linecap?: string } {
+  switch (style) {
+    case 'solid':
+      return {};
+    case 'dashed':
+      return { dasharray: '1.5 1' };
+    case 'dotted':
+      return { dasharray: '0 0.9', linecap: 'round' };
+  }
+}
+
+function renderGridlines(
+  node: PlotNode,
+  theme: Theme,
+  geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
+): SceneNode[] {
+  if (!node.showGridlines) return [];
+  const { plotWidth, plotHeight, yScale } = geometry;
+  const out: SceneNode[] = [];
+
+  // On a cascading line plot, a flat tick-aligned line would visibly drift
+  // from where the offset actually placed the data — see the module-level
+  // note on `cascadeBackOffsetMm`. Every tick instead gets one line running
+  // parallel to the cascade's own diagonal, from its front-axis position to
+  // the matching position on the back-most series' plane — reference lines
+  // for a 3D cascade, not a flat grid. Density follows tick count, not
+  // series count: this is a receding grid, not a per-series marker. Absent
+  // `gridlineStyle`, cascading defaults to dashed and an ordinary plot to
+  // solid — today's automatic choice, preserved for a figure that never sets
+  // the field.
+  const cascading = geometry.kind === 'continuous' && hasCascadeOffset(node, geometry.series.length);
+  const style = node.gridlineStyle ?? (cascading ? 'dashed' : 'solid');
+  const { dasharray, linecap } = gridlineDashArray(style);
+  const stroke = {
+    stroke: gridlineStrokeColor(node, theme),
+    'stroke-width': theme.stroke.hairlineMinMm,
+    fill: 'none',
+    ...(dasharray ? { 'stroke-dasharray': dasharray } : {}),
+    ...(linecap ? { 'stroke-linecap': linecap } : {}),
+  };
+  const line = (d: string): SceneNode => el('path', { d, ...stroke }, undefined, { role: 'gridline' });
+
+  const backOffset = cascading ? cascadeBackOffsetMm((geometry as ContinuousPlotGeometry).series) : null;
+
+  const horizontal = geometry.kind === 'categorical' && geometry.orientation === 'horizontal';
+  const { visibleTicks } = yTickLayout(node, theme, geometry);
+  /*
+   * Front tick positions, rounded once. The diagonals below, the back wall's
+   * flat lines and `renderCascadeBackAxes`' ticks all derive their back-plane
+   * coordinate from these same numbers, so the three land on each other
+   * *exactly* rather than a rounding step apart: `round(round(p) + offset)`
+   * and `round(p + offset)` are not the same number.
+   */
+  const yPos = visibleTicks.map((tick) => round(yScale.scale(tick)));
+  const xPos =
+    geometry.kind === 'continuous'
+      ? xBottomAxisLayout(node.x, geometry.xScale, theme, plotWidth).visible.map((tick) =>
+          round((geometry as ContinuousPlotGeometry).xScale.scale(tick)),
+        )
+      : [];
+
+  for (const pos of yPos) {
+    if (backOffset) {
+      out.push(line(`M0 ${pos} L${round(backOffset.x)} ${round(pos + backOffset.y)}`));
+    } else {
+      out.push(
+        line(
+          horizontal
+            ? `M${pos} 0 L${pos} ${round(plotHeight)}`
+            : `M0 ${pos} L${round(plotWidth)} ${pos}`,
+        ),
+      );
+    }
+  }
+
+  for (const x of xPos) {
+    if (backOffset) {
+      out.push(
+        line(`M${x} ${round(plotHeight)} L${round(x + backOffset.x)} ${round(plotHeight + backOffset.y)}`),
+      );
+    } else {
+      out.push(line(`M${x} 0 L${x} ${round(plotHeight)}`));
+    }
+  }
+
+  // The back wall, and then the second axes standing on it. Automatic
+  // whenever cascading, independent of `node.boxed`: that field draws its own
+  // (optionally back-offset) rectangle on request, which simply overdraws the
+  // frame below in the firmer axis stroke.
+  if (backOffset) {
+    const left = round(backOffset.x);
+    const right = round(plotWidth);
+    const bottom = round(plotHeight + backOffset.y);
+    const yBack = yPos.map((pos) => round(pos + backOffset.y));
+    const xBack = xPos.map((pos) => round(pos + backOffset.x));
+
+    // Flat lines across the wall, one per value tick — each the continuation
+    // of that tick's diagonal, which lands exactly on its left end. Only the
+    // value axis is gridded, here as on a flat plot: no verticals.
+    for (const y of yBack) out.push(line(`M${left} ${y} L${right} ${y}`));
+    // Top and right edges close it, so the receding grid reads as a 3D box
+    // rather than a loose fan of diagonals.
+    out.push(line(`M${left} 0 L${right} 0`));
+    out.push(line(`M${right} 0 L${right} ${bottom}`));
+
+    // Last, so the solid pair paints over the dashed wall it closes.
+    out.push(...renderCascadeBackAxes(node, theme, left, right, bottom, yBack, xBack));
+  }
+
+  return out;
+}
+
+/**
+ * A second copy of the front L-axis — left value axis and bottom x axis, with
+ * tick marks but no tick labels and no titles — standing on the back plane of
+ * a cascading line plot, which is exactly where every diagonal reference line
+ * from `renderGridlines` lands.
+ *
+ * Takes the already-rounded back-plane tick *positions* its caller computed
+ * for the diagonals rather than re-deriving them from the scales, so a back
+ * tick cannot end up anywhere other than at the far end of its own diagonal.
+ * Major visible ticks only, since that is the set the diagonals were drawn
+ * for: a minor tick has no diagonal, so one here would put a mark on the back
+ * axis with no counterpart in the grid.
+ *
+ * The spans are the back *plane*'s own window, not the translated front axis
+ * *lines*: those deliberately run the full canvas (`[0, plotHeight]`,
+ * `[0, plotWidth]`), which shifted by the cascade offset would hang off the
+ * panel. `left = backOffset.x`, `bottom = plotHeight + backOffset.y`,
+ * `top = 0` and `right = plotWidth` are the back-most series' real bounds —
+ * see `cascadeBackOffsetMm` — so nothing here needs a margin reservation
+ * beyond the outward tick overhang the front axes already reserve for.
+ */
+function renderCascadeBackAxes(
+  node: PlotNode,
+  theme: Theme,
+  left: number,
+  right: number,
+  bottom: number,
+  yTicks: readonly number[],
+  xTicks: readonly number[],
+): SceneNode[] {
+  const tickLen = theme.spacing.tickLengthMm;
+  const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
+  // One role for the lines and their ticks, the same way 'cascade-axis' covers
+  // the depth axis's spine, ticks and brackets. What matters is that it stays
+  // distinct from 'axis'/'tick'/'gridline', so a role-count assertion for any
+  // of those is never silently widened by this schematic second axis.
+  const seg = (d: string): SceneNode =>
+    el('path', { d, ...axisStroke }, undefined, { role: 'cascade-back-axis' });
+
+  const out: SceneNode[] = [];
+
+  // Gated per axis on the front axis's own switches: a second copy of an axis
+  // the author turned off would be a control that visibly does nothing.
+  if (node.y.showLine) out.push(seg(`M${left} 0 L${left} ${bottom}`));
+  if (node.y.showTicks) {
+    for (const y of yTicks) {
+      out.push(seg(`M${round(left - tickOffset(node.y, tickLen))} ${y} L${left} ${y}`));
+    }
+  }
+  if (node.x.showLine) out.push(seg(`M${left} ${bottom} L${right} ${bottom}`));
+  if (node.x.showTicks) {
+    for (const x of xTicks) {
+      out.push(seg(`M${x} ${bottom} L${x} ${round(bottom + tickOffset(node.x, tickLen))}`));
+    }
+  }
+  return out;
+}
+
+/**
  * Typed against the two axis-bearing kinds, not the full `PlotGeometry`
  * union — a heatmap draws its own row/column labels in `renderHeatmapPlot`
  * rather than sharing this function, since it has no numeric axis on either
@@ -4295,6 +4647,12 @@ function renderAxes(
       el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
+  const cascadeBoxOffset =
+    geometry.kind === 'continuous' && hasCascadeOffset(node, geometry.series.length)
+      ? cascadeBackOffsetMm(geometry.series)
+      : { x: 0, y: 0 };
+  out.push(...renderBoxedBorder(node, plotWidth, plotHeight, axisStroke, cascadeBoxOffset));
+
   // How far below the axis the labels reach, so the title clears them.
   const { angle, budget, depth: xLabelDepth } = xLabelLayout(node, theme, geometry);
 
@@ -4441,6 +4799,8 @@ function renderAxesHorizontal(
       el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
+  out.push(...renderBoxedBorder(node, plotWidth, plotHeight, axisStroke));
+
   out.push(...renderNumericBottomAxis(theme, node.y, yScale, plotWidth, plotHeight));
 
   if (node.y.title) {
