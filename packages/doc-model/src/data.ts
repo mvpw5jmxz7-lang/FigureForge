@@ -1160,6 +1160,27 @@ export function rowNames(ds: Dataset): string[] {
  * point onto an x it was never measured at; `xyMarks` already applies exactly
  * this rule downstream, too late to help.
  */
+/**
+ * Which column carries a row's point-label identity, for a format that has
+ * one — `null` otherwise.
+ *
+ * Spelled once here rather than left implicit in each `toSeries` case's own
+ * `numericPairsAt(ds, 1, 2, 0)` call, so a caller that needs to map a row
+ * back to the label `Series.pointLabels` would carry (the data grid's
+ * row-to-label lookup for volcano point selection) reads the same fact
+ * `toSeries` itself acts on, rather than a second guess at it.
+ */
+export function pointLabelColumnIndex(ds: Dataset): number | null {
+  switch (ds.format) {
+    case 'differential':
+    case 'pca':
+    case 'umap':
+      return 0;
+    default:
+      return null;
+  }
+}
+
 function numericPairsAt(
   ds: Dataset,
   xIndex: number,

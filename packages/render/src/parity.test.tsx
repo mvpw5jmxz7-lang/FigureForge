@@ -31,6 +31,7 @@ import { MAX_VECTOR_POINTS, planPointClouds, renderDocument } from './render-doc
 import { toSvgString } from './svg-string.js';
 import { toReact } from './react.js';
 import { collectAttr, collectByRole, walkScene, walkWithOwner } from './scene.js';
+import { SUPERSCRIPT_MIN_PT } from './text-width.js';
 
 const CSV = `Treatment,Rep1,Rep2,Rep3
 Vehicle,98.2,95.4,101.3
@@ -299,6 +300,155 @@ describe('adapter parity', () => {
     }
   });
 
+  it('draws a superscripted axis label identically through both adapters', () => {
+    // The one shape neither adapter had to handle before Feature 3: a <text>
+    // that is a <tspan> container rather than a leaf, carrying the exponent
+    // at a reduced size on its own <tspan>.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      'Dose,Response\n1,100\n2,1000\n3,10000\n4,100000',
+    );
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-power10',
+        name: 'Dose response',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/power10.csv',
+        sourceFilename: 'power10.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Dose response',
+        datasetId: dataset.id,
+        plotType: 'scatter',
+        xTitle: 'Dose (mg)',
+        yTitle: 'Response',
+      });
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.y.scale = 'log10';
+          node.y.labelFormat = 'power10';
+        }
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'tick-label-sup').length).toBeGreaterThan(0);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws a range-clipped line plot identically through both adapters, with the out-of-range point dropped', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8\n5,10.1\n6,12.4');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-clipped',
+        name: 'Dose response',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/clipped.csv',
+        sourceFilename: 'clipped.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Dose response',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.x.max = 4;
+          node.x.clipToRange = true;
+        }
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // Doses 5 and 6 fall past max=4 and are dropped, leaving four.
+    expect(collectByRole(scene, 'point')).toHaveLength(4);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('draws a symlog axis identically through both adapters, negative values and all', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,-500\n2,0\n3,87000\n4,150000');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-symlog',
+        name: 'Dose response',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/symlog.csv',
+        sourceFilename: 'symlog.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Dose response',
+        datasetId: dataset.id,
+        plotType: 'scatter',
+        xTitle: 'Dose (mg)',
+        yTitle: 'Response',
+      });
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.y.scale = 'symlog';
+          node.y.labelFormat = 'power10';
+        }
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // Every row drawn, including the negative one — the property a log10 axis
+    // could not have offered at all.
+    expect(collectByRole(scene, 'point')).toHaveLength(4);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
   it('rasterizes a scatter or line plot above MAX_VECTOR_POINTS instead of drawing every point', () => {
     const newId = createIdFactory();
     const base = createDocument({
@@ -472,6 +622,150 @@ describe('adapter parity', () => {
       .replace(/ data-role="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
+  });
+
+  it('draws a labelled volcano plot identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Gene,log2FC,p\nTP53,2.5,0.001\nMYC,-3.0,0.0005\nEGFR,0.1,0.8');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-volcano-labelled',
+        name: 'Differential expression',
+        format: 'differential',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/volcano-labelled.csv',
+        sourceFilename: 'volcano-labelled.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Volcano',
+        datasetId: dataset.id,
+        plotType: 'volcano',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.volcanoLabels = ['TP53', 'MYC'];
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'point-label')).toHaveLength(2);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws a manually-offset, custom-sized volcano label identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Gene,log2FC,p\nTP53,2.5,0.001\nMYC,-3.0,0.0005\nEGFR,0.1,0.8');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-volcano-offset',
+        name: 'Differential expression',
+        format: 'differential',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/volcano-offset.csv',
+        sourceFilename: 'volcano-offset.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Volcano',
+        datasetId: dataset.id,
+        plotType: 'volcano',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.volcanoLabels = ['TP53', 'MYC'];
+        node.pointLabelOffsets = { TP53: { x: 8, y: -4 } };
+        node.pointLabelSizePt = 7;
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'point-label')).toHaveLength(2);
+    expect(collectByRole(scene, 'point-label-leader')).toHaveLength(1); // only the offset one
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('draws point labels over a rasterized point cloud above MAX_VECTOR_POINTS, identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const rows = Array.from({ length: MAX_VECTOR_POINTS + 500 }, (_, i) => {
+      const fc = i % 2 === 0 ? 2 + i * 0.001 : -2 - i * 0.001;
+      const p = i % 3 === 0 ? 0.5 : 0.0001;
+      return `G${i},${fc},${p}`;
+    });
+    const parsed = parseDelimited(`Gene,log2FC,p\n${rows.join('\n')}`);
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-volcano-cloud-labelled',
+        name: 'Differential expression',
+        format: 'differential',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/volcano-cloud-labelled.csv',
+        sourceFilename: 'volcano-cloud-labelled.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Volcano cloud',
+        datasetId: dataset.id,
+        plotType: 'volcano',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.volcanoLabels = ['G0', 'G1', 'G2'];
+    });
+
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const baked = renderDocument(doc, {
+      theme: NATURE_THEME,
+      pointRasters: new Map([[plotNode.id, 'data:image/png;base64,AAAA']]),
+    });
+    // One raster standing in for every marker, plus the three labels drawn
+    // as ordinary vector text over it — the case a real gene list needs,
+    // since it is routinely well past this threshold.
+    expect(collectByRole(baked, 'point-cloud')).toHaveLength(1);
+    expect(collectByRole(baked, 'point')).toEqual([]);
+    expect(collectByRole(baked, 'point-label')).toHaveLength(3);
+
+    const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
+    expect(() => renderToStaticMarkup(toReact(baked))).not.toThrow();
   });
 
   it('draws a heatmap identically through both adapters, cells and colourbar alike', () => {
@@ -674,6 +968,109 @@ describe('adapter parity', () => {
 
     expect(chromeCount).toBeGreaterThan(cleanCount);
     expect(toSvgString(clean)).not.toContain('#0a84ff');
+  });
+
+  it('draws a cascaded line plot with a fill identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      ['X1\tY1\tX2\tY2\tX3\tY3', '1\t2\t1\t2\t1\t2', '2\t4\t2\t4\t2\t4', '3\t6\t3\t6\t3\t6'].join(
+        '\n',
+      ),
+    );
+
+    const cascadeDoc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-cascade',
+        name: 'Cascade',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/cascade.csv',
+        sourceFilename: 'cascade.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Cascade',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.offsetStepMm = 10;
+        node.offsetFill = 'tint';
+      }
+    });
+
+    const scene = renderDocument(cascadeDoc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'area')).toHaveLength(3);
+    expect(collectByRole(scene, 'line')).toHaveLength(3);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('draws a cascade depth axis with a captioned group identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      ['X1\tY1\tX2\tY2\tX3\tY3', '1\t2\t1\t2\t1\t2', '2\t4\t2\t4\t2\t4', '3\t6\t3\t6\t3\t6'].join(
+        '\n',
+      ),
+    );
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-cascade-axis',
+        name: 'Cascade',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/cascade-axis.csv',
+        sourceFilename: 'cascade-axis.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Cascade',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.offsetStepMm = 10;
+        node.offsetStepXMm = 2;
+        node.showCascadeAxis = true;
+        node.cascadeAxisTitle = 'Concentration (mg/mL)';
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'cascade-axis-label')).toHaveLength(3);
+    expect(collectByRole(scene, 'cascade-axis-title')).toHaveLength(1);
+    expect(collectByRole(scene, 'cascade-axis').length).toBeGreaterThan(0);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
   });
 });
 
@@ -945,13 +1342,26 @@ describe('typography', () => {
 
   it('keeps every text element within the journal size range', () => {
     const MM_PER_PT = 25.4 / 72;
-    const sizes = collectAttr(scene, 'font-size').filter(
-      (v): v is number => typeof v === 'number',
-    );
-    for (const mm of sizes) {
-      const pt = mm / MM_PER_PT;
-      expect(pt).toBeGreaterThanOrEqual(NATURE_THEME.type.minimumPt - 0.01);
-      expect(pt).toBeLessThanOrEqual(NATURE_THEME.type.panelLabelPt + 0.01);
+    const sized: { role?: string; pt: number }[] = [];
+    walkScene(scene, (node) => {
+      const raw = node.attrs?.['font-size'];
+      if (typeof raw === 'number') sized.push({ role: node.role, pt: raw / MM_PER_PT });
+    });
+    expect(sized.length).toBeGreaterThan(0);
+
+    for (const { role, pt } of sized) {
+      /*
+       * A tick label's superscript exponent is deliberately set below the
+       * journal's reading-text floor — the same way a footnote mark is
+       * smaller than the sentence it marks — so it is held to its own floor
+       * rather than `minimumPt`. `checkTextSize` in quality.ts makes the
+       * identical exemption for the identical reason.
+       */
+      const floor = role === 'tick-label-sup' ? SUPERSCRIPT_MIN_PT : NATURE_THEME.type.minimumPt;
+      expect(pt).toBeGreaterThanOrEqual(floor - 0.01);
+      if (role !== 'tick-label-sup') {
+        expect(pt).toBeLessThanOrEqual(NATURE_THEME.type.panelLabelPt + 0.01);
+      }
     }
   });
 
@@ -972,15 +1382,26 @@ describe('typography', () => {
    * actually be lost: a future mark family drawing its own labels as paths.
    */
   it('gives every text-bearing node exactly one <text>, and none of them empty', () => {
-    const textNodes: { role?: string; text?: string }[] = [];
+    const textNodes: { role?: string; text?: string; hasChildText: boolean }[] = [];
     walkScene(scene, (node) => {
-      if (node.tag === 'text') textNodes.push({ role: node.role, text: node.text });
+      if (node.tag !== 'text') return;
+      textNodes.push({
+        role: node.role,
+        text: node.text,
+        hasChildText: (node.children ?? []).some((child) => (child.text ?? '') !== ''),
+      });
     });
 
     expect(textNodes.length).toBeGreaterThan(0);
     for (const node of textNodes) {
-      // A <text> with nothing in it is a label that silently went missing.
-      expect(node.text ?? '').not.toBe('');
+      /*
+       * A <text> with nothing in it anywhere is a label that silently went
+       * missing. A <text> that is instead a <tspan> *container* — multi-line
+       * text (`renderText`), or a superscripted tick label — has no text of
+       * its own by construction; the content lives on its tspan children, and
+       * that is what this assertion actually means to require.
+       */
+      expect((node.text ?? '') !== '' || node.hasChildText).toBe(true);
     }
 
     // Every document node that carries text is represented, and once only.

@@ -10,8 +10,13 @@ Electron, an AI layout assistant). It was deliberately cut to one complete
 vertical slice — data in, publication-ready vector out — so the architecture
 could be proven before breadth was added. **Phases 1–7 are done — six rounds of
 reported fixes, the DOM-volume mechanism phase 7 needed first, and all five of
-phase 7's chart types (volcano plots, heatmaps, survival curves, PCA, UMAP);
-phase 8 and 9 are not.**
+phase 7's chart types (volcano plots, heatmaps, survival curves, PCA, UMAP) —
+plus a seventh round adding volcano point labels, cascade/offset line plots,
+scientific axis label formatting (including a symlog scale), and
+save-to-disk with directory selection and a `.ffg` extension, and an eighth
+round adding volcano label dragging with an auto-following leader, an
+axis-range clipping toggle, and a cascade plot's schematic depth (z) axis.
+Phase 8 and 9 are not started.**
 
 ---
 
@@ -195,6 +200,16 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after round 8 (volcano label dragging, axis range clipping,
+cascade depth axis) — all three stages merged:** 644 TypeScript tests, 139
+Python tests unchanged, typecheck and lint clean, 46-check acceptance run
+unaffected — see "Round 8" below.
+
+**Verified after round 7 (volcano labels, cascade lines, scientific axes,
+save-to-disk) — all six stages merged:** 598 TypeScript tests, 139 Python
+tests unchanged, typecheck and lint clean, 46-check acceptance run
+unaffected — see "Round 7" below.
 
 **Verified after phase 7 stage 5 (UMAP) — phase 7 is now complete:** 453
 TypeScript tests, 139 Python tests, typecheck and lint clean, 46-check
@@ -1944,6 +1959,333 @@ degenerate case, neighbour-clamping and validation suites in
 unaffected (no existing fixture uses the new format). This closes phase 7:
 all five chart types (volcano, heatmap, survival, PCA, UMAP) are done.
 
+### Round 7 — volcano labels, cascade lines, scientific axes, save-to-disk
+
+Four features reported from real use, each backed by a reference figure in
+`TestFiles/`, taken as six independently-verified stages — none of them
+touches `services/api`, and none bumps `SCHEMA_VERSION`: every new field is
+optional, and the one enum change (`AxisSpec.scale`) only widens.
+
+- **Stage 1 — save with directory selection and `.ffg`.** `ARCHIVE_EXTENSION`
+  is now `.ffg`; `.figureforge` still opens (`ARCHIVE_EXTENSIONS`,
+  `loadArchive` identifies a file by its MANIFEST marker, never its name, so
+  nothing inside the archive format changed). `apps/web/src/projectFiles.ts`
+  is a `ProjectFileSystem` interface over the File System Access API,
+  injected into `App` as a prop rather than sniffed inline — the same reason
+  `bakePointCloud`'s `OffscreenCanvas` dependency stays untested while this
+  one has a real unit suite against a memory-backed double. Bytes are built
+  synchronously inside the click handler before the first `await` — the File
+  System Access API's permission prompt silently no-ops if a user gesture
+  doesn't reach it first. Firefox/Safari fall back to the pre-existing
+  `SaveDialog` + anonymous download, unchanged.
+- **Stage 2 — superscript tick labels and a number-format control.** Two
+  latent bugs were fixed first, both only tripped by this stage: a `<text>`
+  that is a `<tspan>` *container* has no text of its own, which
+  `parity.test.tsx`'s "every text-bearing node" check read as empty; and a
+  superscript at 6 pt broke the theme's 5 pt floor, resolved by
+  `superscriptSizePt(basePt) = max(4, basePt * 0.65)` and an explicit
+  exemption for the new `'tick-label-sup'` role at both the measurement and
+  the assertion. `NumericScale` gained an optional `formatRuns`, so a label
+  needing a real superscript (`dy`, never the deprecated `baseline-shift`)
+  travels as structured `TickLabelRun[]` rather than a marked-up string that
+  both the renderer and `text-width.ts` would have to parse. `AxisSpec.labelFormat`
+  (`'auto' | 'plain' | 'scientific' | 'power10'`) defers entirely to the
+  unchanged `formatTick` when absent or `'auto'` — not modifying that
+  function and proving equivalence is a much weaker guarantee than never
+  touching it. `power10` falls back to `'scientific'` for a tick that is not
+  itself a clean decade, so a mislabelled `10⁵` next to `487` can't happen.
+- **Stage 3 — log-spaced minor ticks.** `minorTickValues` moved from `render`
+  into `packages/plots` (choosing where a minor tick sits is scale maths, and
+  its old home was already a mild erosion of the split) and grew a log
+  branch: the conventional 2×..9× pattern between decade-apart majors,
+  geometric interpolation otherwise. The Inspector's minor-ticks spinner
+  becomes a checkbox on a non-linear axis — the *count* is meaningless there,
+  and a spinner that adjusts nothing is the standing "control that visibly
+  does nothing" defect.
+- **Stage 4 — volcano point labels.** `PlotNode.volcanoLabels?: readonly
+  string[]`, keyed on the **label string**, not a row index — the data grid
+  reorders rows and `numericPairsAt` drops incomplete ones, so a row index
+  and a series point index are already different numbers. A duplicate label
+  names *every* matching point, since labelling one of two identical names
+  would draw a name beside a point the reader cannot tell from the unlabelled
+  duplicate. `packages/render/src/point-labels.ts` is a small, n-independent
+  geometric placement engine (`MAX_POINT_LABELS = 25`): candidates are
+  truncated to the cap first so it never depends on placement, eight
+  adjacent directions are tried before an eight-step push-out ladder, and
+  anything still unplaceable is **dropped, never overprinted** — an
+  overprinted name is both unreadable and misattributable. It lives in
+  `render`, not `plots`, because it needs `estimateTextWidthMm` and `plots`
+  may not import `render`; its only import is `text-width.js`, so the
+  DOM-free/no-cycle invariants hold. Candidates are ordered by descending
+  significance (`-log10(p)`, then `|fold change|`, then label) rather than by
+  click order, so the canvas and the export agree and re-selecting the same
+  set in a different order changes nothing on the page. Selection has two
+  routes: click a point directly (`pickablePointsForPlot`, HTML chrome above
+  the SVG exactly like the crop/measure overlays, hit-tested through a 2 mm
+  bucket grid so a real gene list costs no per-point DOM) or select a
+  row range in the data grid (`pointLabelColumnIndex` in `data.ts` spells
+  "column 0 names a `differential`/`pca`/`umap` row" once, rather than
+  leaving it hardcoded only inside `numericPairsAt`). Both routes, and the
+  Inspector's own remove button, funnel through the same 25-label cap.
+  Labels are emitted between the marks and the axis-break marks in
+  `renderPlot`'s continuous branch — after the marks so a label always paints
+  over its neighbour, and this needs no extra code above
+  `MAX_VECTOR_POINTS`, since `planPointClouds` only gates the *drawing loop*
+  and `geometry.series[].points` (and every label) stays fully populated
+  either way.
+- **Stage 5 — cascade/offset line plots.** Three optional fields
+  (`offsetStepMm`, `offsetStepXMm`, `offsetFill`), gated to a line plot with
+  more than one series and no second y axis (`isCascadable`/
+  `hasCascadeOffset` in `render-document.ts`, composed once and read by both
+  the geometry builder and the drawing function — the same "one place"
+  discipline `y2WidthMm` already follows). The offset is **baked into
+  `xyMarks`' coordinates**, never an SVG `transform`: `planPointClouds` reads
+  `s.points` straight out of geometry with no transform anywhere on that
+  path, so a transform would move the vectors and leave a large cascaded
+  raster behind. `XySeriesMarks` gained `baselineMm`/`offsetMm`, and
+  `offsetReserveMm` shrinks the **scale ranges** (never `plotWidth`/
+  `plotHeight`, which would lift the x axis off the panel edge) by a
+  quantity derived from a *count* of series and the requested step — a
+  quantity that does not depend on the geometry it is used to build, the
+  same termination argument the two-pass margin rule already rests on — and
+  clamped to `0.7×plotHeight`/`0.5×plotWidth` so a large step over many
+  series compresses the cascade's pitch rather than collapsing the range to
+  zero. The fill (`'tint'`/`'solid'`, new `SceneRole: 'area'`) is **always
+  opaque**: a translucent fill meant to occlude the traces behind it is a
+  contradiction, and opacity is also what keeps the PostScript-alpha question
+  round 6 already measured once from ever coming back. Paint order reverses
+  to furthest-offset-first only when `hasCascadeOffset` is true, so a nearer
+  trace occludes the ones behind it while an ordinary overlay's DOM order —
+  and therefore its exported markup — is untouched.
+- **Stage 6 — symlog axis.** A third `AxisScaleKind`, so a true `0` prints on
+  an otherwise logarithmic axis (flow cytometry's biexponential convention).
+  `t(v) = v` for `|v| ≤ linthresh`, `t(v) = sign(v)·linthresh·(1 +
+  log10(|v|/linthresh))` beyond it — continuous at the threshold, exact at
+  zero, and each further decade occupies exactly `linthresh` of transformed
+  space. `AxisSpec.linthresh` auto-derives three decades below the domain's
+  extreme when absent (`defaultLinthresh`) rather than storing a computed
+  value: unlike `log10`'s threshold, which decides which *data* are dropped,
+  this one is purely presentational, so an unhelpful auto value is cosmetic
+  and one field fixes it. `resolveDomain`'s symlog branch keeps negative
+  values rather than filtering them the way `log10` does, and snaps the
+  non-zero extreme outward to the next decade instead of padding by a
+  fraction, which would be invisible at 1e5 and everything at 0. Breaks are
+  refused for free — they are consulted only inside `makeScale`'s
+  `kind === 'linear'` branch — with the Inspector's reason stated as "already
+  contains one compression boundary." The Inspector writes
+  `labelFormat: 'power10'` in the same patch as the scale change, so a new
+  symlog axis reads its powers of ten immediately while an existing log10
+  figure, whose `labelFormat` is absent, is untouched. Deliberately the
+  lowest-priority stage of the six — stages 2 and 3 alone already deliver
+  most of the reference figure's visual value.
+
+Every stage was driven in a real browser, light and dark: a `.ffg` save
+overwrote in place on a second click while Save as… re-prompted, and an
+existing `.figureforge` project still opened; a log axis read `10²…10⁵` as
+real superscripts with the Quality tab reporting no text-size finding; a
+30-gene selection correctly capped the Inspector list at 25 while the canvas
+drew 17 of them — the rest genuinely unplaceable in that tight a cluster —
+and a >2,000-row import drew its requested labels over the rasterized point
+cloud; a three-trace cascade separated its series by exactly the requested
+step, reversed its line paint order, and reported "Uses 16.0 mm of the
+59.0 mm plot height" in the Inspector matching the Quality tab's own
+disclosure; and a `0…1.5×10⁵` symlog axis printed a real `0` tick with a
+negative point drawn below it and the axis ending on a decade. Each stage's
+export stayed a single, non-trivial page with no console errors.
+
+**Verified:** 598 TypeScript tests (453 + 145 new, across doc-model schema/
+round-trip tests, `packages/plots`' scale/mark tests, a new
+`point-labels.test.ts`, and parity/quality/continuous-axis suites for every
+stage), 139 Python tests unchanged (no stage touches `services/api`),
+typecheck and lint clean, 46-check acceptance run unaffected (no existing
+fixture uses any of the new fields, and the one shared change — the `.ffg`
+constant — is a rename, not a behaviour change).
+
+---
+
+### Round 8 — volcano label dragging, axis range clipping, cascade depth axis
+
+Three more items reported from real use. Two were investigated before being
+built and turned out to need a different shape than requested: "choose which
+folder to save to" was already true on Chromium — `showSaveFilePicker`'s
+native OS dialog already lets the user navigate to any folder on every save —
+so the only gap was a visible confirmation that it happened, not a new
+picking mechanism; and the requested "avoid overlapping labels" already
+existed in `layoutPointLabels`, missing only unlabelled points from its
+obstacle set. No `SCHEMA_VERSION` bump: every new field is optional, and the
+one grouping concept touches nothing outside `packages/render`.
+
+- **Save-location readout.** `apps/web/src/App.tsx` gained `saveConfirmation`
+  state, shown for 4 seconds after a successful save (`"Saved \"name\" — the
+  browser remembers this folder for next time."` on Chromium,
+  `"Downloaded \"name\" to your browser's downloads folder."` on the
+  Firefox/Safari fallback) — the one place a folder choice is acknowledged on
+  screen, since the File System Access API deliberately exposes no path for
+  the existing `.file-target` readout to show instead.
+
+- **Volcano label dragging, and a stricter obstacle set.** Three related
+  changes, all in the label-editing surface stage 1 of round 7 built:
+  - **`PlotNode.pointLabelOffsets?: Readonly<Record<string, {x,y}>>`**, keyed
+    on label TEXT like `volcanoLabels` itself — the same accepted limitation
+    that two identically-named points already share one auto-placement slot
+    and one colour. A delta on top of a freshly recomputed auto placement,
+    the same "auto base, stored delta" split `BracketNode.userOffsetMm`
+    already uses, so adding or removing other labels re-flows this one's
+    neighbours correctly rather than pinning it to a page position. A new
+    `resolvePointLabels` in `render-document.ts` is the one place both the
+    drawing path (`renderPointLabels`) and a new exported
+    `placedPointLabelsForPlot` (the drag analogue of `pickablePointsForPlot`,
+    same one-place-composition discipline `y2WidthMm` already follows) go
+    through — neither can compute a different placement from the other.
+    **The leader is never stored, always recomputed** from the point to the
+    nearest edge of the *offset* label rect (`point-labels.ts`'s
+    `nearestRectPoint`, exported for this), and once a manual offset exists a
+    leader always draws — simpler and more honest than re-deriving the
+    original adjacent/pushed-out distinction after a drag, and it's what
+    makes "the connecting line moves with it" concretely true.
+    Canvas.tsx's existing `PointPickOverlay` — already scoped to one plot,
+    already the only interactive surface a placed label has — is extended
+    rather than given a second mode: a pointer-down hit-testing a placed
+    label's rect starts a drag, `pointermove` commits `pointLabelOffsets`
+    every frame (matching how an ordinary node drag already commits every
+    frame, not the batched crop-drag pattern — there is no absolute frame
+    here to convert back into a delta afterward, the delta *is* the field),
+    and a `suppressClickRef` swallows the synthetic `click` a browser fires
+    after the `pointerup` that ends the drag, so releasing a label over a
+    point never also toggles that point's own label.
+  - **`layoutPointLabels` gained `otherPointsMm?: readonly {x,y}[]`** on
+    `LabelLayoutOptions` — extra marker squares to avoid that are not
+    themselves candidates, so a label can no longer land on top of a gene it
+    isn't naming. Additive (default `[]`), so every existing call and figure
+    is untouched. The caller (`resolvePointLabels`) pre-filters the plot's
+    point cloud to a bounding box around the candidates expanded by
+    `maxPushMm` before passing it in — a label's rect can only ever land that
+    close to its own point, so this stays `O(labels)` rather than
+    `O(labels × plot size)`, preserving the module's own stated invariant on
+    a real 10,000-row gene list.
+  - **`PlotNode.pointLabelSizePt?: number`** (absent is `theme.type.annotationPt`,
+    today's behaviour), read in the one place `resolvePointLabels` already
+    resolves font size. `checkTextSize`'s `overriddenIds` helper decided
+    "author override vs. theme value" via `'style' in owner` — `PlotNode` has
+    no `style`, so a too-small `pointLabelSizePt` would have silently fallen
+    into the no-fix theme bucket even though the author set it. A new
+    `ownFontSizePt(owner, role)` generalises that one check for the
+    `point-label` role specifically; `clampFontSize` (`fixes.ts`) gained the
+    matching write path (`node.pointLabelSizePt = targetPt` when the owner
+    carries no `style`), so the override finding's fix button isn't a
+    "control that visibly does nothing" for this one role.
+
+- **Axis range clipping.** `AxisSpec.clipToRange?: boolean` (absent/false is
+  today's behaviour: a scale extrapolates for an out-of-domain input, so a
+  point outside a narrowed `min`/`max` currently overflows the panel
+  uncontained). `packages/plots/src/marks.ts`'s `xyMarks` gained
+  `clipToXRange?: boolean` and a **per-series** `clipToYRange?: readonly
+  boolean[]` (indexed like `ySeries`/`offsets`, so a y2-assigned series clips
+  against `node.y2`'s own range, never `node.y`'s) — extending the same four
+  existing NaN-filters a broken axis already relies on
+  (`points`/`band`/`linePath`/`drawnPoints`), so a clipped point is dropped
+  the same way a break-hidden one already is, checked against the *scaled*
+  position (not the raw value, since d3 extrapolates rather than producing
+  NaN outside the domain). `replicatePoints` is covered for free, since it's
+  already derived from the filtered `points`. A cascaded series clips against
+  its *already-offset* position, matching the break precedent exactly. Only
+  `scatter`/`line`/`volcano` thread it through `continuousGeometry` — the
+  only plot types that call `xyMarks` at all; histogram and survival never
+  do. **Volcano labels need zero code changes**: `volcanoLabelCandidates`
+  reads the already-filtered `series[0].points`, so a clipped point silently
+  stops being a label candidate too, the same "for free" propagation an axis
+  break's NaN already gets. The Inspector's `AxisFields` gained a
+  `clipRelevant` prop and a "Hide points outside min/max" checkbox, rendered
+  only when `clipRelevant && (min set || max set)` — meaningless, and hidden,
+  with neither bound set, the same convention the log-axis minor-tick
+  checkbox already established in round 7.
+
+- **Cascade depth (z) axis**, matching the reference figure
+  (`TestFiles/offset line graphs.png` — two diagonal axes, one per data
+  group, each with its own tick labels and an end bracket naming the group).
+  `PlotNode.showCascadeAxis?: boolean` and `cascadeAxisTitle?: string` (the
+  freeform caption used only when no series carries a `category` at all —
+  the common single-group case, ignored the instant any series has one,
+  where each group is captioned by that category string instead).
+  - **Grouping is `cascadeAxisGroups` in `render-document.ts`**: no series
+    with a category at all is one implicit group covering everything (needing
+    no per-series setup); once any series has one, contiguous runs by
+    category — **including** a run of series with no category of their own
+    in an otherwise-categorised list, which still draws ticks/names but is
+    never captioned. Inventing a caption for data that doesn't have one is
+    exactly the approximation `PlotType` choices already refuse elsewhere.
+  - **`Series.category` needed to travel to where the axis is built and
+    drawn.** `XySeriesMarks` gained an optional `category` field, set from a
+    new `categories?: readonly (string|undefined)[]` option on `XyMarkOptions`
+    (indexed like `ySeries`/`offsets`) — the same "compose it once, travel
+    with the series" precedent `offsetMm`/`baselineMm` already set, so
+    neither the margin reservation nor the draw function need a second
+    plumbing path back to the raw `series` array.
+  - **The spine is schematic, not the real (already-clamped) offset
+    geometry** — a fixed pitch derived from `plotHeight`/series count, and,
+    only when the cascade leans sideways at all, a lean distributed evenly
+    across steps from a small **fixed** `CASCADE_AXIS_LEAN_MM` (6 mm) budget.
+    Fixed rather than proportional to the real `offsetStepXMm` is what keeps
+    `cascadeAxisReserveMm`'s reserved width a pure function of label text and
+    series count — never of plotHeight or the real offset's own (separately
+    clamped) magnitude — preserving the two-pass margin termination argument
+    every other reserve in this file rests on. Available because `isCascadable`
+    already refuses `y2`, so a cascade's right margin is otherwise unused
+    beyond an optional legend; the two compose additively
+    (`y2 + cascade + legend`), never double-reserving, since a cascade and a
+    y2 axis are mutually exclusive by construction.
+  - **New `SceneRole`s**: `'cascade-axis'` (spine, ticks and brackets — one
+    role for all three, since this is a single decorative axis, not a
+    first-class one), `'cascade-axis-label'`, `'cascade-axis-title'`, each
+    kept distinct from `'axis'`/`'tick-label'`/`'axis-title'` so a role-count
+    assertion for the real axis is never silently widened.
+    `THEME_SIZE_KEYS` maps the two text roles onto the existing
+    `tickLabelPt`/`axisTitlePt` sizes — no new `Theme.type` field.
+  - **Inspector**: a "Show depth axis" checkbox inside the existing
+    `CascadeControls` block, gated the same way its own reserve-usage hint
+    already is (only once `hasCascadeOffset` is true) — then *either* the
+    freeform title field (only when no series has a category) *or* an
+    explanatory note that group brackets come from the data, never both,
+    since showing the freeform field when it does nothing would be exactly
+    the "control that visibly does nothing" defect this convention exists to
+    avoid.
+  - **No real import path produces a categorised cascade yet** — `Series.category`
+    is set only by the two-factor row×group×replicate formats
+    (`grouped-replicates`/`prism`-with-groups), none of which carry the paired
+    `x` a line plot needs, so the two-category behaviour is verified directly
+    against `cascadeAxisGroups`/`cascadeAxisReserveMm`/`renderCascadeAxis`
+    with hand-built series rather than through a real dataset import — the
+    same "verified as a pure function" treatment `xyMarks` itself already
+    gets in `plots.test.ts`.
+
+Driven in a real browser, light and dark: a save showed "Saved
+\"figure.ffg\" — the browser remembers this folder for next time." for four
+seconds and then cleared; entering label-pick mode, labelling three points
+and dragging one away from its cluster kept its leader connected to its
+original point while the other two labels' auto placement was undisturbed,
+and the Inspector's "Label size (pt)" field resized it live with the Quality
+tab reporting the override finding only below the 5 pt floor; setting an
+axis `Max` below the data's own maximum first showed the cut-off point
+overflowing the panel as before, then "Hide points outside min/max" removed
+it with no orphaned error-bar cap, and unchecking it brought the point back
+exactly where it was; and a three-series cascade's "Show depth axis" drew a
+diagonal spine with one tick and name per trace in that trace's own colour,
+plus a rotated caption once a freeform title was typed in (no categories on
+that dataset, so the caption field was offered rather than the data-driven
+note). Each stage's export stayed a single, non-trivial page with no console
+errors.
+
+**Verified:** 644 TypeScript tests (598 + 46 new: `point-labels.test.ts`'s
+`otherPointsMm`/rect-exposure cases, a new `point-label-edit`-style suite
+inside `continuous-axis.test.ts` for dragging/font-size, a range-clipping
+suite in both `plots.test.ts` and `continuous-axis.test.ts`, and a
+cascade-z-axis suite covering `cascadeAxisGroups`/`cascadeAxisReserveMm`/
+`renderCascadeAxis` directly plus end-to-end margin/scene-node assertions,
+with parity/quality/doc-model round-trip coverage for all three features),
+139 Python tests unchanged (no stage touches `services/api`), typecheck and
+lint clean, 46-check acceptance run unaffected (no existing fixture uses any
+of the new fields).
+
 ---
 
 ## What's next
@@ -1997,7 +2339,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

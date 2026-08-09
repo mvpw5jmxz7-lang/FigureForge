@@ -23,6 +23,7 @@ import {
   addPanelWithPlot,
   addScaleBar,
   applyAutoLayout,
+  ARCHIVE_EXTENSION,
   buildArchiveContents,
   createDocument,
   createIdFactory,
@@ -408,7 +409,7 @@ async function main(): Promise<void> {
       new Map([[assetPath, pngBytes]]),
     ),
   );
-  writeFileSync(`${OUT}figure.figureforge`, archive);
+  writeFileSync(`${OUT}figure${ARCHIVE_EXTENSION}`, archive);
 
   const reopened = loadArchive(archive);
   // Compared with sorted keys: validation rebuilds objects in schema order, so

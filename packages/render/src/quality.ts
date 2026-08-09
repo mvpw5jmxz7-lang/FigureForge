@@ -40,8 +40,9 @@ import {
   relabelAllPanels,
   type Fix,
 } from './fixes.js';
-import { MAX_VECTOR_POINTS, planPointClouds } from './render-document.js';
+import { hasCascadeOffset, MAX_VECTOR_POINTS, planPointClouds } from './render-document.js';
 import { walkScene, walkWithOwner, type SceneNode } from './scene.js';
+import { SUPERSCRIPT_MIN_PT } from './text-width.js';
 
 export type Severity = 'error' | 'warning' | 'info';
 
@@ -119,10 +120,14 @@ const CATEGORY_WEIGHTS: Record<string, number> = {
  */
 const THEME_SIZE_KEYS: Partial<Record<string, keyof Theme['type']>> = {
   'tick-label': 'tickLabelPt',
+  'tick-label-sup': 'tickLabelPt',
   'axis-title': 'axisTitlePt',
   'panel-label': 'panelLabelPt',
   'bracket-label': 'statisticPt',
   'scale-bar-label': 'scaleBarPt',
+  'point-label': 'annotationPt',
+  'cascade-axis-label': 'tickLabelPt',
+  'cascade-axis-title': 'axisTitlePt',
   legend: 'legendPt',
 };
 
@@ -164,9 +169,34 @@ const checkTextSize: Rule = ({ scene, theme, document }) => {
     const entry: SizedText = { pt, role: node.role ?? 'text', ownerId };
     // Panel labels are legitimately larger than body text.
     const isPanelLabel = node.role === 'panel-label';
-    if (pt < theme.type.minimumPt - 0.01) small.push(entry);
-    else if (!isPanelLabel && pt > theme.type.maximumPt + 0.01) large.push(entry);
+    /*
+     * A tick label's superscript exponent is not body text — it is set at
+     * `superscriptSizePt`, deliberately below the journal's reading-text
+     * floor, the same way a footnote mark is smaller than the sentence it
+     * marks. Flagging it here would report a defect the renderer creates on
+     * purpose every time an axis uses scientific or power-of-ten notation, so
+     * it is held to `SUPERSCRIPT_MIN_PT` instead of `theme.type.minimumPt`.
+     */
+    const isSuperscript = node.role === 'tick-label-sup';
+    if (isSuperscript ? pt < SUPERSCRIPT_MIN_PT - 0.01 : pt < theme.type.minimumPt - 0.01) {
+      small.push(entry);
+    } else if (!isPanelLabel && !isSuperscript && pt > theme.type.maximumPt + 0.01) {
+      large.push(entry);
+    }
   });
+
+  /**
+   * The font size an owning node claims for `role`, if any. Generalises
+   * `'style' in owner` to the one role — a volcano's point labels — whose
+   * override lives on a field of its own (`PlotNode.pointLabelSizePt`) rather
+   * than inside a shared `style` object, the same way `PlotNode` has no
+   * `style` at all for `checkTextSize`'s other roles to read.
+   */
+  const ownFontSizePt = (owner: FigureDocument['nodes'][string], role: string): number | undefined => {
+    if ('style' in owner) return owner.style.fontSizePt;
+    if (role === 'point-label' && owner.type === 'plot') return owner.pointLabelSizePt;
+    return undefined;
+  };
 
   /**
    * Does this element's size come from its own node, or from the theme?
@@ -180,8 +210,8 @@ const checkTextSize: Rule = ({ scene, theme, document }) => {
     for (const entry of entries) {
       if (!entry.ownerId) continue;
       const owner = document.nodes[entry.ownerId];
-      if (!owner || !('style' in owner)) continue;
-      const own = owner.style.fontSizePt;
+      if (!owner) continue;
+      const own = ownFontSizePt(owner, entry.role);
       if (own !== undefined && Math.abs(own - entry.pt) < 0.01) ids.add(entry.ownerId);
     }
     return [...ids];
@@ -811,6 +841,128 @@ const checkVolcanoDroppedPoints: Rule = ({ document }) => {
 };
 
 /**
+ * A selected point label that did not make it onto the plot — the row no
+ * longer has a valid label/fold change/p-value, the plot was too dense to fit
+ * it even pushed out, or the 25-label cap was reached.
+ *
+ * Disclosure, not a defect — the same stance as `checkPointCloudRasterization`:
+ * every value is still drawn, only the *name* beside it is missing, and the
+ * author could not otherwise tell. Read from the rendered scene rather than
+ * recomputing `layoutPointLabels`, so this can never disagree with what was
+ * actually drawn — the same reasoning `checkPanelLabels` already documents
+ * for reading panel labels off the scene instead of the document.
+ */
+const checkPointLabelPlacement: Rule = ({ document, scene }) => {
+  const drawnByOwner = new Map<string, number>();
+  walkWithOwner(scene, (node, ownerId) => {
+    if (node.role !== 'point-label' || !ownerId) return;
+    drawnByOwner.set(ownerId, (drawnByOwner.get(ownerId) ?? 0) + 1);
+  });
+
+  const findings: Finding[] = [];
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    const requested = node.volcanoLabels?.length ?? 0;
+    if (requested === 0) continue;
+
+    const drawn = drawnByOwner.get(node.id) ?? 0;
+    if (drawn >= requested) continue;
+
+    const missing = requested - drawn;
+    findings.push({
+      id: `point-label-missing-${node.id}`,
+      severity: 'info',
+      title: `${missing} of ${requested} point label${requested === 1 ? '' : 's'} not shown`,
+      detail:
+        `${missing} selected label${missing === 1 ? '' : 's'} ${missing === 1 ? 'is' : 'are'} not ` +
+        'drawn — the row may no longer have a valid label, fold change or p-value, the plot may ' +
+        'be too dense to fit it even pushed out, or the 25-label maximum was reached. Every value ' +
+        'is still drawn; only the name beside it is missing.',
+      nodeIds: [node.id],
+    });
+  }
+  return findings;
+};
+
+/**
+ * A selected label that names more than one point.
+ *
+ * Not a defect: a differential table can legitimately repeat a feature name
+ * (two probes for one gene), and `renderPointLabels` labels every match on
+ * purpose — labelling only one would draw a name beside a point a reader
+ * cannot tell apart from the unlabelled duplicate. Disclosed so the author
+ * knows why a name appears to sit beside more than one marker.
+ */
+const checkDuplicatePointLabels: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    const wanted = node.volcanoLabels;
+    if (!wanted || wanted.length === 0) continue;
+    const dataset = findDataset(document, node.datasetId);
+    if (!dataset) continue;
+
+    const wantedSet = new Set(wanted);
+    const pointLabels = toSeries(dataset)[0]?.pointLabels;
+    if (!pointLabels) continue;
+
+    const counts = new Map<string, number>();
+    for (const label of pointLabels) {
+      if (!wantedSet.has(label)) continue;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    const duplicated = [...counts.entries()].filter(([, n]) => n > 1);
+    if (duplicated.length === 0) continue;
+
+    findings.push({
+      id: `point-label-duplicate-${node.id}`,
+      severity: 'info',
+      title: `${duplicated.length} selected label${duplicated.length === 1 ? '' : 's'} name more than one point`,
+      detail:
+        `${duplicated.map(([label, n]) => `"${label}" (${n})`).join(', ')} match more than one row ` +
+        '— every matching point is labelled, since labelling only one would draw a name beside a ' +
+        'point indistinguishable from the unlabelled duplicate.',
+      nodeIds: [node.id],
+    });
+  }
+  return findings;
+};
+
+/**
+ * A cascaded line plot spends its y axis on separation, not just value — a
+ * legitimate, common presentation (sedimentation runs, spectra), but one a
+ * reader can misjudge if they assume every trace shares the axis the way an
+ * ordinary overlay would. Disclosure, not a defect, the same stance as
+ * `checkPointCloudRasterization`: nothing is hidden or distorted, only
+ * repositioned by a fixed amount stated here.
+ */
+const checkCascadeOffset: Rule = ({ document }) => {
+  const findings: Finding[] = [];
+
+  for (const node of Object.values(document.nodes)) {
+    if (node.type !== 'plot') continue;
+    const dataset = findDataset(document, node.datasetId);
+    if (!dataset) continue;
+    const seriesCount = toSeries(dataset).length;
+    if (!hasCascadeOffset(node, seriesCount)) continue;
+
+    const first = toSeries(dataset)[0]?.name ?? 'the first series';
+    findings.push({
+      id: `cascade-offset-${node.id}`,
+      severity: 'info',
+      title: `${seriesCount} traces are offset for display`,
+      detail:
+        `Each series is shifted ${node.offsetStepMm ?? 0} mm from the next for readability — the ` +
+        `y axis reads only for "${first}"; every other trace's true position is displaced by its ` +
+        'own offset, which a legend or label should make clear rather than the axis alone.',
+      nodeIds: [node.id],
+    });
+  }
+  return findings;
+};
+
+/**
  * A heatmap's colour scale is hard to read once its two (or three, for a
  * diverging scale) extremes fall too close together under a colour-vision
  * simulation.
@@ -879,7 +1031,10 @@ const RULES: { category: string; rule: Rule }[] = [
   { category: 'Panel spacing', rule: checkPanelSpacing },
   { category: 'Point cloud rendering', rule: checkPointCloudRasterization },
   { category: 'Volcano plot coverage', rule: checkVolcanoDroppedPoints },
+  { category: 'Point label placement', rule: checkPointLabelPlacement },
+  { category: 'Point label duplicates', rule: checkDuplicatePointLabels },
   { category: 'Heatmap colour contrast', rule: checkHeatmapColorContrast },
+  { category: 'Cascade offset', rule: checkCascadeOffset },
 ];
 
 // ---------------------------------------------------------------------------

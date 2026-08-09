@@ -9,8 +9,9 @@
 
 import { scaleBand, scaleLinear, scaleLog } from 'd3-scale';
 import { extent } from 'd3-array';
+import type { LabelFormat } from '@figureforge/doc-model';
 
-export type AxisScaleKind = 'linear' | 'log10';
+export type AxisScaleKind = 'linear' | 'log10' | 'symlog';
 
 export interface ScaleDomain {
   min: number;
@@ -29,6 +30,17 @@ export interface NumericScale {
   ticks: number[];
   format: (value: number) => string;
   /**
+   * The same label, split into runs a superscript can be marked on.
+   *
+   * Optional so every existing construction site and every existing consumer
+   * is unchanged: absent means one plain run of `format(value)`, which
+   * `tickLabelRuns` supplies. Only set when an axis's `labelFormat` asks for
+   * something other than `format`'s own output — `format` is never modified,
+   * so an axis that never touches this control renders exactly the bytes it
+   * always has.
+   */
+  formatRuns?: (value: number) => TickLabelRun[];
+  /**
    * Where the axis is cut, in millimetres, when it carries breaks.
    *
    * Present only on a broken scale, so `scale()` returning `NaN` and this being
@@ -37,6 +49,30 @@ export interface NumericScale {
    */
   breaks?: readonly { startMm: number; endMm: number }[];
 }
+
+/**
+ * One run of a tick label. `sup` marks an exponent that must be set as a real
+ * superscript rather than as the literal text "10^5".
+ *
+ * A structured form rather than a marked-up string because two consumers need
+ * it: the renderer emits `<tspan>`s from it, and `text-width.ts` must measure
+ * the superscript at its own reduced size. A caret-in-a-string would make both
+ * of them parse.
+ */
+export interface TickLabelRun {
+  text: string;
+  sup?: boolean;
+}
+
+/**
+ * A tick's label as runs, whether or not its scale carries `formatRuns`.
+ *
+ * The one place a renderer reads a label, so a plot type that forgets to ask
+ * for runs specifically still gets the right (single-run) answer instead of
+ * silently calling `.format` and dropping any superscript.
+ */
+export const tickLabelRuns = (scale: NumericScale, value: number): TickLabelRun[] =>
+  scale.formatRuns?.(value) ?? [{ text: scale.format(value) }];
 
 export interface DomainOptions {
   /** Explicit bound, or null to derive from the data. */
@@ -51,6 +87,8 @@ export interface DomainOptions {
 
 export function resolveDomain(values: readonly number[], options: DomainOptions): ScaleDomain {
   const finite = values.filter((v) => Number.isFinite(v));
+  // Unlike log10, a symlog axis draws negative and zero values by design — the
+  // whole point of it is a true zero — so nothing is filtered out here.
   const positiveOnly = options.kind === 'log10' ? finite.filter((v) => v > 0) : finite;
 
   const [dataMin, dataMax] = extent(positiveOnly.length > 0 ? positiveOnly : [0, 1]) as [
@@ -65,6 +103,26 @@ export function resolveDomain(values: readonly number[], options: DomainOptions)
     // A log axis cannot contain zero; clamp to a decade below the smallest datum.
     if (lo <= 0) lo = dataMin > 0 ? dataMin / 10 : 0.1;
     if (hi <= lo) hi = lo * 10;
+    return { min: lo, max: hi };
+  }
+
+  if (options.kind === 'symlog') {
+    // Zero is always representable — the property this scale exists for — so
+    // the domain is pinned to include it rather than padded by a fraction,
+    // which would be invisible at 1e5 and everything at 0. The non-zero
+    // extreme snaps *outward* to the next whole decade instead: a fractional
+    // pad there is equally pointless once the axis is log-shaped past its
+    // linear threshold, and a decade boundary is what the reference figure's
+    // axis actually ends on.
+    if (lo === hi) {
+      const magnitude = Math.abs(hi) || 1;
+      lo = 0;
+      hi = magnitude;
+    }
+    const snapOutward = (v: number): number =>
+      v === 0 ? 0 : Math.sign(v) * 10 ** Math.ceil(Math.log10(Math.abs(v)) - 1e-9);
+    if (options.max === null) hi = hi > 0 ? snapOutward(hi) : Math.max(0, hi);
+    if (options.min === null) lo = lo < 0 ? snapOutward(lo) : Math.min(0, lo);
     return { min: lo, max: hi };
   }
 
@@ -113,6 +171,126 @@ export function formatTick(value: number, step: number): string {
   // only characters either branch can produce are digits, '.', 'e' and '-',
   // so a blanket replace is exact, not a heuristic.
   return formatted.replace(/-/g, '–');
+}
+
+/** `10ⁿ`'s exponent, and 'scientific's default when the author sets none. */
+const SCIENTIFIC_DEFAULT_DECIMALS = 1;
+
+/**
+ * A tick value as runs, under an axis's explicit `LabelFormat`.
+ *
+ * `'auto'`/absent defers entirely to `formatTick` — this function never
+ * changes what that one produces, so an axis that has not touched the format
+ * control renders exactly the bytes it always has.
+ */
+export function formatRunsFor(
+  value: number,
+  step: number,
+  mode: LabelFormat | undefined,
+  decimals: number | undefined,
+): TickLabelRun[] {
+  if (!Number.isFinite(value)) return [{ text: '' }];
+  if (!mode || mode === 'auto') return [{ text: formatTick(value, step) }];
+  if (value === 0) return [{ text: '0' }];
+
+  const negative = value < 0;
+  const magnitude = Math.abs(value);
+
+  if (mode === 'plain') {
+    const digits =
+      decimals ?? Math.min(Math.max(0, -Math.floor(Math.log10(Math.abs(step || 1)))), 6);
+    const text = magnitude.toFixed(digits);
+    return [{ text: negative ? `–${text}` : text }];
+  }
+
+  // 'scientific' and 'power10' both read the value as mantissa × 10^exponent.
+  // The tiny epsilon guards `Math.log10` of an exact power of ten, which
+  // floating point can otherwise round a hair under the integer and floor to
+  // one exponent short (999.9999999999999 → exponent 2, not 3).
+  const exponent = Math.floor(Math.log10(magnitude) + 1e-9);
+  const mantissa = magnitude / 10 ** exponent;
+  // The same en-dash convention `formatTick` already applies to its own
+  // exponential fallback — journals set every negative sign this way, the
+  // exponent included, not only the mantissa's.
+  const exponentText = String(exponent).replace('-', '–');
+
+  if (mode === 'power10') {
+    // A tick that is not itself a clean power of ten falls back to
+    // 'scientific' — a bare "10ⁿ" would otherwise silently misstate it.
+    if (Math.abs(mantissa - 1) > 1e-6) return formatRunsFor(value, step, 'scientific', decimals);
+    return [{ text: negative ? '–10' : '10' }, { text: exponentText, sup: true }];
+  }
+
+  const digits = decimals ?? SCIENTIFIC_DEFAULT_DECIMALS;
+  return [
+    { text: `${negative ? '–' : ''}${mantissa.toFixed(digits)}×10` },
+    { text: exponentText, sup: true },
+  ];
+}
+
+/**
+ * Values between the major ticks, for the minor divisions.
+ *
+ * Derived from the majors rather than from the domain, so they line up with
+ * the grid the reader is already using and cannot drift out of phase with it.
+ *
+ * Takes the scale, not just its ticks, because a log axis's minor ticks are
+ * not evenly spaced the way a linear axis's are: choosing where one sits is
+ * scale maths, which is why this lives here rather than in `render`.
+ */
+export function minorTickValues(
+  scale: Pick<NumericScale, 'kind'>,
+  majors: readonly number[],
+  divisions: number | undefined,
+): number[] {
+  if (!divisions || divisions < 2 || majors.length < 2) return [];
+
+  if (scale.kind === 'linear') {
+    const out: number[] = [];
+    for (let i = 1; i < majors.length; i++) {
+      const from = majors[i - 1]!;
+      const step = (majors[i]! - from) / divisions;
+      for (let k = 1; k < divisions; k++) out.push(from + step * k);
+    }
+    return out;
+  }
+
+  /*
+   * `log10` and `symlog` both get log-shaped sub-decade minors — the `divisions`
+   * *count* is meaningless for either — a reader either wants the conventional
+   * 2×, 3×, …, 9× sub-decade ticks or does not, which is why the Inspector turns
+   * this into a checkbox for a log/symlog axis. `divisions >= 2` (already
+   * checked above) means "yes".
+   *
+   * Between majors one decade apart, that fixed 2..9 pattern; between any
+   * other pair — a short axis, where `makeScale` fell back to `rawTicks`
+   * rather than clean decades — a geometric interpolation instead, so a
+   * minor tick is still spaced proportionally rather than overshooting into
+   * a value the major interval never claimed. A pair straddling (or touching)
+   * zero is skipped: that span is symlog's genuinely linear region, which has
+   * no log-shaped sub-decade structure to place a minor tick at.
+   */
+  const out: number[] = [];
+  for (let i = 1; i < majors.length; i++) {
+    const from = majors[i - 1]!;
+    const to = majors[i]!;
+    if (from === 0 || to === 0 || Math.sign(from) !== Math.sign(to)) continue;
+    const sign = Math.sign(from);
+    // The smaller-magnitude endpoint is the base a decade multiplies from,
+    // regardless of whether majors ascend by magnitude (the positive side) or
+    // descend by it (the negative side, since majors themselves ascend by
+    // value there — e.g. [-100, -10]).
+    const lo = Math.min(Math.abs(from), Math.abs(to));
+    const hi = Math.max(Math.abs(from), Math.abs(to));
+    const decadeApart = Math.abs(Math.log10(hi / lo) - 1) < 1e-9;
+    if (decadeApart) {
+      for (let k = 2; k <= 9; k++) out.push(sign * lo * k);
+    } else {
+      const ratio = hi / lo;
+      for (let k = 1; k < divisions; k++) out.push(sign * lo * ratio ** (k / divisions));
+    }
+  }
+  return out;
 }
 
 export interface AxisBreak {
@@ -169,6 +347,8 @@ function makeBrokenScale(
   rangeMm: [number, number],
   breaks: AxisBreak[],
   tickStep: number | null,
+  labelFormat: LabelFormat | undefined,
+  labelDecimals: number | undefined,
 ): NumericScale {
   const segments: { from: number; to: number }[] = [];
   let cursor = domain.min;
@@ -186,7 +366,7 @@ function makeBrokenScale(
   // Not enough room for the gaps: fall back to an unbroken scale rather than
   // producing a reversed or zero-length axis.
   if (totalSpan <= 0 || usableMm <= 0) {
-    return makeScale({ domain, rangeMm, tickStep, kind: 'linear' });
+    return makeScale({ domain, rangeMm, tickStep, kind: 'linear', labelFormat, labelDecimals });
   }
 
   const placed = segments.map((s, index) => {
@@ -249,6 +429,7 @@ function makeBrokenScale(
     invert,
     ticks,
     format: (v) => formatTick(v, step),
+    formatRuns: labelFormat ? (v) => formatRunsFor(v, step, labelFormat, labelDecimals) : undefined,
     breaks: placed.slice(0, -1).map((s) => ({
       // Where the axis is cut, in millimetres: the end of one segment and the
       // start of the next, which is what the renderer draws the marks between.
@@ -263,18 +444,79 @@ export interface LinearScaleOptions {
   rangeMm: [number, number];
   tickStep: number | null;
   kind: AxisScaleKind;
-  /** Ranges to cut out. Ignored on a log axis — see `AxisSpec.breaks`. */
+  /** Ranges to cut out. Ignored on a log or symlog axis — see `AxisSpec.breaks`.
+   *  A symlog axis already contains one compression boundary (its linear
+   *  threshold); compressing what is already compressed leaves nothing left
+   *  to measure a break against. */
   breaks?: readonly AxisBreak[];
+  /** See `AxisSpec.labelFormat`. Absent leaves `format`/`formatRuns` exactly
+   *  as they were before this field existed. */
+  labelFormat?: LabelFormat;
+  labelDecimals?: number;
+  /** See `AxisSpec.linthresh`. Symlog only; ignored otherwise. */
+  linthresh?: number;
+}
+
+/**
+ * A symlog axis's default linear-region half-width, three decades below its
+ * most extreme bound — auto-derived rather than a fixed constant, so a
+ * 0…2×10^5 axis and a 0…20 axis each land somewhere sensible without an
+ * author having to set anything. Unlike `log10`'s threshold, which decides
+ * which *data* are dropped, this is purely presentational — every value is
+ * drawn either way — so an unhelpful auto value is cosmetic and one field
+ * (`AxisSpec.linthresh`) fixes it.
+ */
+function defaultLinthresh(domain: ScaleDomain): number {
+  const extreme = Math.max(Math.abs(domain.min), Math.abs(domain.max));
+  if (extreme <= 0) return 1;
+  return 10 ** (Math.floor(Math.log10(extreme)) - 3);
+}
+
+/**
+ * Decades outward from the linear threshold on each side that the domain
+ * actually reaches, plus zero always, plus the threshold itself when it is
+ * not already a decade boundary — the split point is real axis structure a
+ * reader needs to see even off the decade grid. Thinned by stride, the same
+ * "keep the axis readable" rule `log10`'s own branch applies, but never
+ * dropping zero or the outermost tick on either side.
+ */
+function symlogTicks(domain: ScaleDomain, linthresh: number, lengthMm: number): number[] {
+  const maxCount = tickCountForLength(lengthMm);
+  const thin = (decades: number[]): number[] => {
+    if (decades.length <= maxCount) return decades;
+    const stride = Math.ceil(decades.length / maxCount);
+    return decades.filter((_, i) => i % stride === 0 || i === decades.length - 1);
+  };
+
+  const startExp = Math.round(Math.log10(linthresh));
+  const positive: number[] = [];
+  if (domain.max > linthresh) {
+    const endExp = Math.ceil(Math.log10(domain.max) - 1e-9);
+    for (let e = startExp; e <= endExp; e++) positive.push(10 ** e);
+  }
+  const negative: number[] = [];
+  if (domain.min < -linthresh) {
+    const endExp = Math.ceil(Math.log10(-domain.min) - 1e-9);
+    for (let e = startExp; e <= endExp; e++) negative.push(-(10 ** e));
+  }
+
+  const ticks = new Set<number>([...thin(negative).reverse(), 0, ...thin(positive)]);
+  const linthreshIsDecade = Math.abs(startExp - Math.log10(linthresh)) < 1e-9;
+  if (!linthreshIsDecade) {
+    if (linthresh < domain.max) ticks.add(linthresh);
+    if (-linthresh > domain.min) ticks.add(-linthresh);
+  }
+  return [...ticks].sort((a, b) => a - b);
 }
 
 export function makeScale(options: LinearScaleOptions): NumericScale {
-  const { domain, rangeMm, kind } = options;
+  const { domain, rangeMm, kind, labelFormat, labelDecimals } = options;
   const lengthMm = Math.abs(rangeMm[1] - rangeMm[0]);
 
   if (kind === 'linear') {
     const breaks = normaliseBreaks(options.breaks, domain);
     if (breaks.length > 0) {
-      return makeBrokenScale(domain, rangeMm, breaks, options.tickStep);
+      return makeBrokenScale(domain, rangeMm, breaks, options.tickStep, labelFormat, labelDecimals);
     }
   }
 
@@ -292,6 +534,39 @@ export function makeScale(options: LinearScaleOptions): NumericScale {
       invert: (mm) => d3s.invert(mm),
       ticks,
       format: (v) => formatTick(v, v),
+      formatRuns: labelFormat ? (v) => formatRunsFor(v, v, labelFormat, labelDecimals) : undefined,
+    };
+  }
+
+  if (kind === 'symlog') {
+    const linthresh = options.linthresh ?? defaultLinthresh(domain);
+    /*
+     * Continuous at ±linthresh (both branches agree there: log10(1) = 0), and
+     * exact at 0 rather than `-Infinity` — unlike a plain log transform, this
+     * one has to accept every real number, since the whole point is a true
+     * zero. Each further decade past the threshold occupies exactly
+     * `linthresh` of transformed space, so the linear region reads as two
+     * decades wide on the page, which is what a biexponential axis looks like.
+     */
+    const t = (v: number): number => {
+      const av = Math.abs(v);
+      return av <= linthresh ? v : Math.sign(v) * linthresh * (1 + Math.log10(av / linthresh));
+    };
+    const tInverse = (u: number): number => {
+      const au = Math.abs(u);
+      return au <= linthresh ? u : Math.sign(u) * linthresh * 10 ** (au / linthresh - 1);
+    };
+    const d3s = scaleLinear().domain([t(domain.min), t(domain.max)]).range(rangeMm);
+    const ticks = symlogTicks(domain, linthresh, lengthMm);
+    return {
+      kind,
+      domain,
+      range: rangeMm,
+      scale: (v) => d3s(t(v)),
+      invert: (mm) => tInverse(d3s.invert(mm)),
+      ticks,
+      format: (v) => formatTick(v, v),
+      formatRuns: labelFormat ? (v) => formatRunsFor(v, v, labelFormat, labelDecimals) : undefined,
     };
   }
 
@@ -314,6 +589,7 @@ export function makeScale(options: LinearScaleOptions): NumericScale {
     range: rangeMm,
     scale: (v) => d3s(v),
     invert: (mm) => d3s.invert(mm),
+    formatRuns: labelFormat ? (v) => formatRunsFor(v, step, labelFormat, labelDecimals) : undefined,
     ticks,
     format: (v) => formatTick(v, step),
   };

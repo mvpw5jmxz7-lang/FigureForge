@@ -454,6 +454,40 @@ export interface XySeriesMarks {
   errorLabel: string;
   n: number;
   topMm: number;
+  /**
+   * This series' own zero line in mm, offset included. `null` only where a
+   * geometry builder assembles `XySeriesMarks` by hand and zero has no
+   * meaning — survival's Kaplan–Meier curve, whose y is a probability, not a
+   * quantity with a baseline. The renderer needs this rather than
+   * re-deriving it: once an offset is baked into `points`/`linePath`, the
+   * "which value is zero" fact is gone unless it travels with the series.
+   */
+  baselineMm: number | null;
+  /**
+   * This series' own x=0 line in mm, offset included — the horizontal-lean
+   * counterpart to `baselineMm`, for a cascade whose `offsetStepXMm` is
+   * nonzero. `null` under the same conditions `baselineMm` is.
+   */
+  baselineXMm: number | null;
+  /**
+   * The cascade offset actually baked into this series' coordinates, `{x:0,
+   * y:0}` when none was requested. Kept alongside the offset numbers rather
+   * than requiring a caller to recompute it from `PlotNode.offsetStepMm` and
+   * the series index — the same "compose it once" discipline
+   * `analysisInputHash`/`scaleBarWidthMm` already follow.
+   */
+  offsetMm: { x: number; y: number };
+  /**
+   * This series' own `Series.category`, carried alongside the geometry
+   * rather than requiring a caller to re-zip it back in from the original
+   * `series` array by index — the same "compose it once, travel with the
+   * series" discipline `offsetMm`/`baselineMm` already follow. Used by the
+   * cascade depth axis to group contiguous series sharing one category;
+   * `undefined` for a series with no category, or wherever this type is
+   * built by hand rather than through `xyMarks` (survival's curves have no
+   * comparable data-source concept).
+   */
+  category?: string;
 }
 
 export interface XyMarkOptions {
@@ -493,6 +527,50 @@ export interface XyMarkOptions {
    * measurement, and a summarised point is several.
    */
   classify?: (xValue: number, yValue: number) => string;
+  /**
+   * A cascade/ridgeline offset in mm, indexed by series order — the same key
+   * `ySeries`/`pointShapes`/`seriesAxis` already use, so it needs no names
+   * and cannot go stale when a series is renamed. Baked into every scaled
+   * coordinate this function produces (points, line, band, tops) rather than
+   * left for the renderer to apply as a transform: the point-cloud raster
+   * path reads `points` directly with no transform anywhere on it, so a
+   * transform would move the vectors and leave the raster behind. Absent or
+   * `{x:0, y:0}` for a series leaves it byte-identical to no offset at all.
+   */
+  offsets?: readonly { x: number; y: number }[];
+  /**
+   * Drop a mark whose SCALED position falls outside the x scale's own range
+   * bounds, the same "check the drawn position, not the raw value" rule a
+   * broken axis's NaN already follows — a value outside the domain does not
+   * itself become NaN (d3 extrapolates), so this is an explicit bound check
+   * rather than a `Number.isFinite` reuse. There is only one x axis, so this
+   * applies to every series alike. Absent is today's behaviour: a scale
+   * extrapolates for an out-of-domain input, so such a point currently
+   * overflows the plot rectangle uncontained.
+   */
+  clipToXRange?: boolean;
+  /**
+   * The y equivalent, but per series (indexed like `ySeries`/`offsets`):
+   * a series on the secondary axis is clipped against `node.y2`'s own
+   * range, never `node.y`'s, since they can disagree about whether to clip
+   * at all. Checked against the *already-offset* position on a cascaded
+   * plot, so a point pushed out of range by its own offset is dropped
+   * rather than shown floating past the axis.
+   */
+  clipToYRange?: readonly boolean[];
+  /**
+   * Each series' `Series.category`, indexed by series order like `ySeries`/
+   * `offsets` — copied straight onto `XySeriesMarks.category` for the
+   * cascade depth axis to read, since `xyMarks` otherwise has no reason to
+   * carry this data-source concept through its geometry.
+   */
+  categories?: readonly (string | undefined)[];
+}
+
+function withinRange(v: number, range: readonly [number, number]): boolean {
+  const lo = Math.min(range[0], range[1]) - 1e-9;
+  const hi = Math.max(range[0], range[1]) + 1e-9;
+  return v >= lo && v <= hi;
 }
 
 /**
@@ -515,6 +593,12 @@ export function xyMarks(
   return series.map((s, index) => {
     const color = options.colors[index % Math.max(1, options.colors.length)] ?? '#000000';
     const y = options.ySeries?.[index] ?? options.y;
+    const off = options.offsets?.[index];
+    const xScale = off ? (v: number) => options.x.scale(v) + off.x : (v: number) => options.x.scale(v);
+    const yScale = off ? (v: number) => y.scale(v) + off.y : (v: number) => y.scale(v);
+    const clipY = options.clipToYRange?.[index] ?? false;
+    const inRange = (px: number, py: number): boolean =>
+      (!options.clipToXRange || withinRange(px, options.x.range)) && (!clipY || withinRange(py, y.range));
 
     // Only pairs where both coordinates are real. Dropping the pair rather than
     // the value keeps x and y aligned; dropping one side would shift every
@@ -535,13 +619,13 @@ export function xyMarks(
      */
     const points: PointGeometry[] = pairs
       .map((p) => ({
-        x: options.x.scale(p.xValue),
-        y: y.scale(p.yValue),
+        x: xScale(p.xValue),
+        y: yScale(p.yValue),
         value: p.yValue,
         ...(p.label !== undefined ? { label: p.label } : {}),
         ...(options.classify ? { category: options.classify(p.xValue, p.yValue) } : {}),
       }))
-      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && inRange(p.x, p.y));
 
     /*
      * Replicates at one x, summarised.
@@ -575,11 +659,18 @@ export function xyMarks(
         centres = intervals.map((i) => ({ xValue: i.xValue, yValue: i.interval.center }));
         band = intervals
           .map((i) => ({
-            x: options.x.scale(i.xValue),
-            lowY: y.scale(i.interval.low),
-            highY: y.scale(i.interval.high),
+            x: xScale(i.xValue),
+            lowY: yScale(i.interval.low),
+            highY: yScale(i.interval.high),
           }))
-          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.lowY) && Number.isFinite(p.highY));
+          .filter(
+            (p) =>
+              Number.isFinite(p.x) &&
+              Number.isFinite(p.lowY) &&
+              Number.isFinite(p.highY) &&
+              inRange(p.x, p.lowY) &&
+              inRange(p.x, p.highY),
+          );
         if (band.length < 2) band = null;
       }
     }
@@ -587,16 +678,16 @@ export function xyMarks(
     const linePath = options.showLine
       ? [...centres]
           .sort((a, b) => a.xValue - b.xValue)
-          .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue) }))
-          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+          .map((p) => ({ x: xScale(p.xValue), y: yScale(p.yValue) }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && inRange(p.x, p.y))
       : null;
 
     // Summarised, the drawn points are the centres, not every replicate.
     const summarised = summary !== undefined && band !== null;
     const drawnPoints: PointGeometry[] = summarised
       ? centres
-          .map((p) => ({ x: options.x.scale(p.xValue), y: y.scale(p.yValue), value: p.yValue }))
-          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+          .map((p) => ({ x: xScale(p.xValue), y: yScale(p.yValue), value: p.yValue }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && inRange(p.x, p.y))
       : points;
 
     /*
@@ -630,6 +721,10 @@ export function xyMarks(
       n: pairs.length,
       // y is inverted, so the visual top is the minimum.
       topMm: Math.min(tops.length > 0 ? Math.min(...tops) : 0, bandTop),
+      baselineMm: y.scale(clampToDomain(0, y)) + (off?.y ?? 0),
+      baselineXMm: options.x.scale(clampToDomain(0, options.x)) + (off?.x ?? 0),
+      offsetMm: { x: off?.x ?? 0, y: off?.y ?? 0 },
+      ...(options.categories?.[index] !== undefined ? { category: options.categories[index] } : {}),
     };
   });
 }

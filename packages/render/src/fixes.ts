@@ -73,13 +73,22 @@ function restyle(
 /**
  * Bring an explicitly-sized label back inside the journal's range.
  *
- * Only ever applied to nodes whose *own* `style.fontSizePt` is out of range.
- * A tick label drawn at the theme's size is a different defect with a different
+ * Only ever applied to nodes whose *own* `style.fontSizePt` (or, for a
+ * volcano's point labels, `PlotNode.pointLabelSizePt` — the one role sized by
+ * a field of its own rather than a shared `style` object) is out of range. A
+ * tick label drawn at the theme's size is a different defect with a different
  * repair — see `checkTextSize`, which refuses to offer a fix for it.
  */
 export function clampFontSize(ids: readonly NodeId[], targetPt: number): FixRecipe {
   return (draft) => {
-    for (const id of ids) restyle(draft, id, (style) => ({ ...style, fontSizePt: targetPt }));
+    for (const id of ids) {
+      const node = draft.nodes[id];
+      if (node && 'style' in node) {
+        restyle(draft, id, (style) => ({ ...style, fontSizePt: targetPt }));
+      } else if (node?.type === 'plot') {
+        node.pointLabelSizePt = targetPt;
+      }
+    }
   };
 }
 

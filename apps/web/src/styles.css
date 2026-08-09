@@ -188,6 +188,29 @@ button.icon.danger:hover { color: var(--danger); }
   pointer-events: none;
 }
 
+/* Volcano point picking. No per-point DOM — only the hovered point gets a
+   ring and a tooltip, the rest is a bucketed hit test in JS. */
+.point-pick-overlay { position: absolute; z-index: 4; cursor: crosshair; touch-action: none; }
+.point-pick-ring {
+  position: absolute;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+.point-pick-ring.labelled { border-color: #d73027; background: rgba(215, 48, 39, 0.2); }
+.point-pick-tooltip {
+  position: absolute;
+  transform: translate(8px, -100%);
+  max-width: 160px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+}
+
 [data-node-id] { cursor: pointer; }
 [data-selected='true'] { outline: none; }
 /* Resize cursors by compass direction. Kept in CSS rather than on the scene
@@ -454,6 +477,23 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 }
 .file-button input { display: none; }
 
+/* The currently held save target's name — deliberately not a path, since the
+   File System Access API does not expose one. */
+.file-target {
+  font-size: 12px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Brief confirmation shown right after a save completes, then auto-clears —
+   the one place a folder choice is acknowledged on screen. */
+.save-confirmation {
+  font-size: 12px;
+  color: var(--accent, #3b82f6);
+}
+
 /* --- Data grid -----------------------------------------------------------
    An editable table over one dataset. Ordinary HTML above everything else, so
    none of it can reach a scene node and therefore an export. */
@@ -495,6 +535,15 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 }
 .grid thead th button:hover { color: var(--fg); }
 .grid button.danger:hover { color: var(--danger); }
+
+.row-marker {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background: #d73027;
+}
 
 .grid .row-head {
   background: var(--surface);

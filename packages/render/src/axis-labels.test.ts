@@ -21,7 +21,15 @@ import {
 import { NATURE_THEME } from '@figureforge/theme';
 import { renderDocument } from './render-document.js';
 import { collectByRole } from './scene.js';
-import { estimateTextHeightMm, estimateTextWidthMm, truncateToWidth } from './text-width.js';
+import {
+  estimateRunsWidthMm,
+  estimateTextHeightMm,
+  estimateTextWidthMm,
+  superscriptRiseMm,
+  superscriptSizePt,
+  SUPERSCRIPT_MIN_PT,
+  truncateToWidth,
+} from './text-width.js';
 
 /** Long category names, of the kind real treatment labels actually have. */
 const CSV = `Treatment,R1,R2,R3
@@ -274,5 +282,41 @@ describe('negative tick labels', () => {
     // reaches an actual drawn scene node, not only `formatTick` in isolation.
     expect(labels.some((t) => t.includes('–'))).toBe(true);
     expect(labels.some((t) => t.includes('-'))).toBe(false);
+  });
+});
+
+describe('superscript sizing', () => {
+  it('sizes a superscript at 65% of the base, down to a 4 pt floor', () => {
+    // 4 / 0.65 ≈ 6.15 pt is where the floor starts binding, so an 8 pt base
+    // is comfortably above it and a 6 pt tick label (below it) is not.
+    expect(superscriptSizePt(8)).toBeCloseTo(8 * 0.65, 6);
+    expect(superscriptSizePt(6)).toBe(SUPERSCRIPT_MIN_PT);
+    expect(superscriptSizePt(5)).toBe(SUPERSCRIPT_MIN_PT);
+    expect(superscriptSizePt(4)).toBe(SUPERSCRIPT_MIN_PT);
+  });
+
+  it('measures a multi-run label as the sum of each run at its own size', () => {
+    const plain = [{ text: '1.2×10' }];
+    const withSup = [{ text: '1.2×10' }, { text: '3', sup: true }];
+    const plainWidth = estimateRunsWidthMm(plain, 6);
+    const supWidth = estimateRunsWidthMm(withSup, 6);
+
+    expect(supWidth).toBeGreaterThan(plainWidth);
+    expect(supWidth).toBeCloseTo(
+      plainWidth + estimateTextWidthMm('3', superscriptSizePt(6)),
+      6,
+    );
+  });
+
+  it('a single unraised run measures identically to the plain estimator', () => {
+    expect(estimateRunsWidthMm([{ text: 'Cell viability (%)' }], 7)).toBeCloseTo(
+      estimateTextWidthMm('Cell viability (%)', 7),
+      6,
+    );
+  });
+
+  it('rise is zero unless some run is raised', () => {
+    expect(superscriptRiseMm([{ text: '10' }], 6)).toBe(0);
+    expect(superscriptRiseMm([{ text: '10' }, { text: '5', sup: true }], 6)).toBeGreaterThan(0);
   });
 });

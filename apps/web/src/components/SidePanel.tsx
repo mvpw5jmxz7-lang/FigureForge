@@ -28,6 +28,7 @@ import {
   contingencyCategories,
   isStale,
   nextPanelFrame,
+  pointLabelColumnIndex,
   relabelPanels,
   removeAsset,
   removeBracketsForPlot,
@@ -53,6 +54,7 @@ import {
   measureAllPlots,
   measurePlot,
   bracketStepMm,
+  MAX_POINT_LABELS,
   reflowBrackets,
   type Finding,
   type QualityReport,
@@ -187,6 +189,9 @@ export interface SidePanelProps {
   /** Length of the last ruler drag, in source pixels; null until one happens. */
   measuredPx: number | null;
   onMeasureNodeChange: (id: NodeId | null) => void;
+  /** Volcano plot whose points are being picked directly on the canvas. */
+  labelPickNodeId: NodeId | null;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
 }
 
 export function SidePanel(props: SidePanelProps) {
@@ -217,6 +222,8 @@ export function SidePanel(props: SidePanelProps) {
             measureNodeId={props.measureNodeId}
             measuredPx={props.measuredPx}
             onMeasureNodeChange={props.onMeasureNodeChange}
+            labelPickNodeId={props.labelPickNodeId}
+            onLabelPickNodeChange={props.onLabelPickNodeChange}
           />
         )}
         {tab === 'stats' && <StatsTab {...props} />}
@@ -289,6 +296,12 @@ function DataTab({
    */
   const [editingId, setEditingId] = useState<NodeId | null>(null);
   const editing = editingId ? doc.datasets.find((d) => d.id === editingId) : undefined;
+  /** Rows currently selected in the open grid — read by the volcano
+   *  point-labelling row action below, kept as state (not a ref) since it
+   *  drives whether that action's button is enabled. */
+  const [selectedRowRange, setSelectedRowRange] = useState<{ r0: number; r1: number } | null>(
+    null,
+  );
 
   const importDataset = (): void => {
     if (!preview) return;
@@ -670,7 +683,90 @@ function DataTab({
   // reading mid-edit, and a spreadsheet squeezed into a 340 px column is not a
   // spreadsheet.
   if (editing) {
-    return <DataGrid api={api} dataset={editing} onClose={() => setEditingId(null)} />;
+    /*
+     * The volcano-labelling row action, when this dataset feeds one.
+     *
+     * `pointLabelColumnIndex` is the single spelling of "column 0 carries the
+     * point label" that `toSeries`'s own `differential`/`pca`/`umap` cases
+     * already act on — reading it here rather than re-deriving the fact is
+     * what keeps a row's label the same one the plot itself would draw.
+     */
+    const labelColumn = pointLabelColumnIndex(editing);
+    const volcanoPlot =
+      labelColumn !== null
+        ? Object.values(doc.nodes).find(
+            (n): n is PlotNode =>
+              n.type === 'plot' && n.plotType === 'volcano' && n.datasetId === editing.id,
+          )
+        : undefined;
+
+    const rowLabelAt = (r: number): string | null => {
+      if (labelColumn === null) return null;
+      const value = editing.rows[r]?.[labelColumn];
+      return value === null || value === undefined ? null : String(value);
+    };
+
+    const currentLabels = volcanoPlot?.volcanoLabels ?? [];
+    const markedRows =
+      volcanoPlot &&
+      new Set(
+        editing.rows
+          .map((_, r) => r)
+          .filter((r) => {
+            const rowLabel = rowLabelAt(r);
+            return rowLabel !== null && currentLabels.includes(rowLabel);
+          }),
+      );
+
+    let disabledReason: string | null = null;
+    if (volcanoPlot) {
+      if (currentLabels.length >= MAX_POINT_LABELS) {
+        disabledReason =
+          '25 labels is the maximum — past that a key stops being readable and the leaders cross.';
+      } else if (selectedRowRange) {
+        const usable = [];
+        for (let r = selectedRowRange.r0; r <= selectedRowRange.r1; r++) {
+          const rowLabel = rowLabelAt(r);
+          if (rowLabel !== null && !currentLabels.includes(rowLabel)) usable.push(rowLabel);
+        }
+        if (usable.length === 0) {
+          disabledReason =
+            'None of the selected rows have a usable label, fold change and p-value, or they are already on the plot.';
+        }
+      }
+    }
+
+    return (
+      <DataGrid
+        api={api}
+        dataset={editing}
+        onClose={() => setEditingId(null)}
+        onRowRangeChange={setSelectedRowRange}
+        markedRows={markedRows}
+        rowAction={
+          volcanoPlot
+            ? {
+                label: 'Label these rows on the plot',
+                disabledReason,
+                onApply: (r0, r1) => {
+                  const toAdd: string[] = [];
+                  for (let r = r0; r <= r1; r++) {
+                    const rowLabel = rowLabelAt(r);
+                    if (rowLabel !== null && !currentLabels.includes(rowLabel) && !toAdd.includes(rowLabel)) {
+                      toAdd.push(rowLabel);
+                    }
+                  }
+                  const next = [...currentLabels, ...toAdd].slice(0, MAX_POINT_LABELS);
+                  commit('Label points', (draft) => {
+                    const target = draft.nodes[volcanoPlot.id];
+                    if (target?.type === 'plot') target.volcanoLabels = next;
+                  });
+                },
+              }
+            : undefined
+        }
+      />
+    );
   }
 
   return (

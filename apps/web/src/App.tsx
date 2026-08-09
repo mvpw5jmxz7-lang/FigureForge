@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ARCHIVE_EXTENSION,
+  ARCHIVE_EXTENSIONS,
+  ARCHIVE_MIME,
   buildArchiveContents,
   loadArchive,
   saveArchive,
@@ -23,9 +25,23 @@ import {
 import { useAssets, type AssetStore } from './assets.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
+import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
 import { createSampleDocument } from './sample.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
+
+/**
+ * Strip whichever archive extension a picked filename carries, so the name
+ * offered back for the figure's title is "my figure", not "my figure.ffg".
+ * Case-insensitive: filesystems that hand back a picked name unchanged still
+ * commonly differ in case from what this app writes.
+ */
+function stripArchiveExtension(name: string): string {
+  for (const ext of ARCHIVE_EXTENSIONS) {
+    if (name.toLowerCase().endsWith(ext)) return name.slice(0, name.length - ext.length);
+  }
+  return name;
+}
 
 /**
  * Refuse to POST an export beyond this size.
@@ -104,7 +120,13 @@ function fitZoom(widthMm: number): number {
   return Math.max(0.5, Math.min(5, available / (widthMm * PX_PER_MM)));
 }
 
-export function App() {
+export interface AppProps {
+  /** Injectable so the native-picker/fallback choice is testable — see
+   *  `projectFiles.ts`. Defaults to the real browser implementation. */
+  fileSystem?: ProjectFileSystem;
+}
+
+export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   const api = useDocument(createSampleDocument);
   useUndoShortcuts(api);
 
@@ -127,14 +149,44 @@ export function App() {
   const [measureNodeId, setMeasureNodeId] = useState<NodeId | null>(null);
   /** What the last ruler drag measured, in source pixels, awaiting a length. */
   const [measuredPx, setMeasuredPx] = useState<number | null>(null);
+  /** Volcano plot whose points are being picked directly on the canvas. */
+  const [labelPickNodeId, setLabelPickNodeId] = useState<NodeId | null>(null);
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [apiUp, setApiUp] = useState<boolean | null>(null);
   const [dpi, setDpi] = useState<150 | 300 | 450 | 600>(300);
-  /** Filename being confirmed before a save; null means the dialog is closed. */
+  /** Filename being confirmed before a save; null means the dialog is closed.
+   *  Only ever opened on a browser without the File System Access API. */
   const [saveName, setSaveName] = useState<string | null>(null);
+  /**
+   * The file this figure was last saved to or opened from, so a plain Save
+   * can overwrite it in place with no dialog. Session state, deliberately not
+   * in the document: `store.ts` records every edit *and its inverse*, so a
+   * handle living there would be cloned into the undo history on every
+   * unrelated edit — the same reason asset bytes live outside it (`assets.ts`).
+   * Not persisted across a reload either; a fresh permission prompt on load
+   * would be needed regardless, so there is nothing to gain by trying.
+   */
+  const [saveTarget, setSaveTarget] = useState<SaveTarget | null>(null);
+  /**
+   * A brief confirmation shown right after a save completes — the File
+   * System Access API deliberately exposes no path (see `.file-target`'s own
+   * title text below), so this is the one place a folder choice is
+   * acknowledged on screen at all, rather than only ever assumed from a
+   * dialog that already closed.
+   */
+  const [saveConfirmation, setSaveConfirmation] = useState<string | null>(null);
+  const saveConfirmationTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showSaveConfirmation = useCallback((message: string) => {
+    if (saveConfirmationTimeout.current !== null) clearTimeout(saveConfirmationTimeout.current);
+    setSaveConfirmation(message);
+    saveConfirmationTimeout.current = setTimeout(() => setSaveConfirmation(null), 4000);
+  }, []);
+  useEffect(() => () => {
+    if (saveConfirmationTimeout.current !== null) clearTimeout(saveConfirmationTimeout.current);
+  }, []);
   const [tab, setTab] = useState<Tab>('data');
   /** Format waiting on the author's confirmation; null means nothing pending. */
   const [pendingExport, setPendingExport] = useState<ExportFormat | null>(null);
@@ -183,6 +235,18 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [cropNodeId, measureNodeId]);
+
+  // Escape leaves point-picking mode, the same "no visible way out otherwise"
+  // reasoning as crop/measure above — a separate effect since the modes are
+  // independent and never active together.
+  useEffect(() => {
+    if (labelPickNodeId === null) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setLabelPickNodeId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [labelPickNodeId]);
 
   // --- export -------------------------------------------------------------
 
@@ -274,41 +338,118 @@ export function App() {
   // --- project file -------------------------------------------------------
 
   /*
-   * Saving asks for a name rather than deriving one silently. The name also
-   * becomes the figure's title, so the next save offers it again and the
-   * document and the file on disk stop disagreeing about what this figure is.
+   * The figure's title lags the document by one commit when a rename and a
+   * save happen in the same click — `api.document` is a value captured at
+   * render time, and `commit()` cannot retroactively change what that
+   * variable already points to. Reading `api.store.getDocument()` instead,
+   * here and in every save path below, is what keeps the saved title in step
+   * with a rename made in the same gesture.
    */
-  const saveProject = useCallback(
-    (chosen: string) => {
-      const name = safeFilename(chosen);
-      if (name !== api.document.title) {
+  const currentDocument = useCallback((): FigureDocument => api.store.getDocument(), [api.store]);
+
+  /*
+   * A rename made through the save flow rather than a dedicated title field —
+   * see "Round 4" in CLAUDE.md. The name also becomes the figure's title, so
+   * the next save offers it again and the document and the file on disk stop
+   * disagreeing about what this figure is.
+   */
+  const renameIfNeeded = useCallback(
+    (rawName: string): string => {
+      const name = safeFilename(rawName);
+      if (name !== currentDocument().title) {
         api.commit('Rename figure', (draft) => {
           draft.title = name;
         });
       }
-
-      const bytes = saveArchive(
-        // Both side-stores go in, or the archive keeps the metadata and loses
-        // the thing it describes: a project whose micrographs are grey boxes and
-        // whose "verbatim" CSV was re-serialised on the way out.
-        buildArchiveContents(
-          api.document,
-          dataOriginals.current,
-          assets.store.archiveMap(api.document),
-        ),
-      );
-      // Copy into a fresh buffer: the zip may sit in a larger pooled ArrayBuffer.
-      download(
-        new Blob([new Uint8Array(bytes)], { type: 'application/zip' }),
-        `${name}${ARCHIVE_EXTENSION}`,
-      );
-      setSaveName(null);
+      return name;
     },
-    [api, assets.store],
+    [api, currentDocument],
   );
 
-  const openProject = useCallback(
-    async (file: File) => {
+  const buildArchiveBytes = useCallback((): Uint8Array => {
+    const document = currentDocument();
+    return saveArchive(
+      // Both side-stores go in, or the archive keeps the metadata and loses
+      // the thing it describes: a project whose micrographs are grey boxes and
+      // whose "verbatim" CSV was re-serialised on the way out.
+      buildArchiveContents(document, dataOriginals.current, assets.store.archiveMap(document)),
+    );
+  }, [currentDocument, assets.store]);
+
+  const downloadArchive = useCallback(
+    (name: string) => {
+      // Copy into a fresh buffer: the zip may sit in a larger pooled ArrayBuffer.
+      download(
+        new Blob([new Uint8Array(buildArchiveBytes())], { type: ARCHIVE_MIME }),
+        `${name}${ARCHIVE_EXTENSION}`,
+      );
+    },
+    [buildArchiveBytes],
+  );
+
+  /** The Firefox/Safari path: no File System Access API, so a name and a
+   *  browser download stand in for both a location picker and a write. */
+  const saveViaDialog = useCallback(
+    (chosen: string) => {
+      const name = renameIfNeeded(chosen);
+      downloadArchive(name);
+      setSaveName(null);
+      showSaveConfirmation(`Downloaded "${name}${ARCHIVE_EXTENSION}" to your browser's downloads folder.`);
+    },
+    [renameIfNeeded, downloadArchive, showSaveConfirmation],
+  );
+
+  /**
+   * Write to an already-picked file, falling back to a download if the
+   * permission prompt is denied — a save must never simply vanish.
+   */
+  const writeToTarget = useCallback(
+    async (target: SaveTarget) => {
+      setBusy('Saving');
+      try {
+        const result = await fileSystem.write(target, buildArchiveBytes());
+        if (result === 'denied') {
+          setError(`Could not write to "${target.name}"; the file was downloaded instead.`);
+          downloadArchive(stripArchiveExtension(target.name));
+          setSaveTarget(null);
+          return;
+        }
+        setSaveTarget(target);
+        showSaveConfirmation(`Saved "${target.name}" — the browser remembers this folder for next time.`);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [fileSystem, buildArchiveBytes, downloadArchive, showSaveConfirmation],
+  );
+
+  /** Always re-prompts, even when a target is already held. */
+  const saveAs = useCallback(async () => {
+    if (!fileSystem.supported()) {
+      setSaveName(safeFilename(currentDocument().title));
+      return;
+    }
+    const picked = await fileSystem.pickSave(`${safeFilename(currentDocument().title)}${ARCHIVE_EXTENSION}`);
+    if (!picked) return; // the user cancelled the picker
+    renameIfNeeded(stripArchiveExtension(picked.name));
+    await writeToTarget(picked);
+  }, [fileSystem, currentDocument, renameIfNeeded, writeToTarget]);
+
+  /** Overwrites a held target in place; behaves as Save as… with none held. */
+  const save = useCallback(async () => {
+    if (!fileSystem.supported()) {
+      setSaveName(safeFilename(currentDocument().title));
+      return;
+    }
+    if (saveTarget) {
+      await writeToTarget(saveTarget);
+      return;
+    }
+    await saveAs();
+  }, [fileSystem, currentDocument, saveTarget, writeToTarget, saveAs]);
+
+  const openFromFile = useCallback(
+    async (file: File, target: SaveTarget | null) => {
       try {
         const result = loadArchive(new Uint8Array(await file.arrayBuffer()));
 
@@ -332,6 +473,10 @@ export function App() {
         dataOriginals.current = new Map(result.dataFiles);
         api.store.reset(result.document);
         setSelectedIds([]);
+        // Retained even when null: opening a project through the plain file
+        // input (no handle available) must clear a stale target from a
+        // previous project, or "Save" would silently overwrite the wrong file.
+        setSaveTarget(target);
         setError(result.warnings.length > 0 ? result.warnings.join(' ') : null);
 
         await rehydrateProxies(result.document, assets.store, setError);
@@ -341,6 +486,30 @@ export function App() {
     },
     [api.store, assets.store],
   );
+
+  const openProject = useCallback((file: File) => void openFromFile(file, null), [openFromFile]);
+
+  const openViaPicker = useCallback(async () => {
+    const picked = await fileSystem.pickOpen();
+    if (!picked) return; // the user cancelled the picker
+    await openFromFile(picked.file, picked.target);
+  }, [fileSystem, openFromFile]);
+
+  // Ctrl/Cmd+S and Ctrl/Cmd+Shift+S. Bound in App's own effect, not Canvas's —
+  // that one returns early for anything focused inside `.side-panel`, which
+  // would silently swallow the shortcut while the Data or Inspector tab has
+  // focus. `preventDefault` always fires, or Chromium's own save-page dialog
+  // opens over the top.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
+      event.preventDefault();
+      if (event.shiftKey) void saveAs();
+      else void save();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [save, saveAs]);
 
   return (
     <div className="app">
@@ -383,6 +552,7 @@ export function App() {
               setMeasureNodeId(null);
               setMeasuredPx(null);
             }
+            if (ids[0] !== labelPickNodeId) setLabelPickNodeId(null);
           }}
           zoom={zoom}
           showGrid={showGrid}
@@ -391,6 +561,7 @@ export function App() {
           cropNodeId={cropNodeId}
           measureNodeId={measureNodeId}
           onMeasured={setMeasuredPx}
+          labelPickNodeId={labelPickNodeId}
         />
 
         <SidePanel
@@ -414,25 +585,51 @@ export function App() {
             setMeasureNodeId(id);
             setMeasuredPx(null);
           }}
+          labelPickNodeId={labelPickNodeId}
+          onLabelPickNodeChange={setLabelPickNodeId}
         />
       </main>
 
       <footer className="statusbar">
         <div className="group">
-          <button onClick={() => setSaveName(safeFilename(api.document.title))}>
-            Save project…
-          </button>
-          <label className="file-button">
-            Open project
-            <input
-              type="file"
-              accept={ARCHIVE_EXTENSION}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void openProject(file);
-              }}
-            />
-          </label>
+          {fileSystem.supported() ? (
+            <>
+              <button disabled={busy !== null} onClick={() => void save()}>
+                Save
+              </button>
+              <button disabled={busy !== null} onClick={() => void saveAs()}>
+                Save as…
+              </button>
+              <button disabled={busy !== null} onClick={() => void openViaPicker()}>
+                Open project
+              </button>
+              <span
+                className="muted file-target"
+                title="Not a path — the browser deliberately does not expose one"
+              >
+                {saveTarget ? saveTarget.name : '— unsaved'}
+              </span>
+              {saveConfirmation && <span className="save-confirmation">{saveConfirmation}</span>}
+            </>
+          ) : (
+            <>
+              <button onClick={() => setSaveName(safeFilename(api.document.title))}>
+                Save project…
+              </button>
+              <label className="file-button">
+                Open project
+                <input
+                  type="file"
+                  accept={ARCHIVE_EXTENSIONS.join(',')}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) openProject(file);
+                  }}
+                />
+              </label>
+              {saveConfirmation && <span className="save-confirmation">{saveConfirmation}</span>}
+            </>
+          )}
         </div>
 
         <div className="group">
@@ -476,7 +673,7 @@ export function App() {
           <SaveDialog
             name={saveName}
             onNameChange={setSaveName}
-            onSave={() => saveProject(saveName)}
+            onSave={() => saveViaDialog(saveName)}
             onCancel={() => setSaveName(null)}
           />
         )}

@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   analysisInputHash,
+  ARCHIVE_EXTENSION,
+  ARCHIVE_EXTENSIONS,
+  ARCHIVE_FILE_TYPE,
+  ARCHIVE_MIME,
   ArchiveError,
   buildArchiveContents,
   checkReferentialIntegrity,
+  LEGACY_ARCHIVE_EXTENSION,
   createDocument,
   createIdFactory,
   blocksOfSize,
@@ -1921,6 +1926,25 @@ describe('.figureforge archive', () => {
     expect(loaded.manifest.format).toBe('figureforge');
   });
 
+  // The extension is a filesystem affordance only — the archive is identified
+  // by its MANIFEST marker, never by a name, so shortening it changes nothing
+  // about what a save/load round trip produces.
+  it('writes the short .ffg extension and still reads the legacy long form', () => {
+    expect(ARCHIVE_EXTENSION).toBe('.ffg');
+    expect(LEGACY_ARCHIVE_EXTENSION).toBe('.figureforge');
+    expect(ARCHIVE_EXTENSIONS).toEqual(['.ffg', '.figureforge']);
+    expect(ARCHIVE_FILE_TYPE.accept[ARCHIVE_MIME]).toEqual(['.ffg', '.figureforge']);
+
+    const { doc } = sampleDocument();
+    const bytes = saveArchive(buildArchiveContents(doc));
+    // A save has no filename in it at all; the manifest marker is the only
+    // thing `loadArchive` checks. Renaming the file this came from — the
+    // scenario a `.figureforge` project being opened after the switch models
+    // — cannot affect what unzips.
+    const loaded = loadArchive(bytes);
+    expect(loaded.manifest.format).toBe('figureforge');
+  });
+
   it('round-trips a volcano plot with its new optional fields', () => {
     const newId = createIdFactory();
     const base = createDocument({
@@ -1953,6 +1977,170 @@ describe('.figureforge archive', () => {
     const bytes = saveArchive(buildArchiveContents(doc));
     const loaded = loadArchive(bytes);
     expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips volcanoLabels, with no cap enforced at the schema layer', () => {
+    // Deliberately not `.max(25)` in schema.ts — a hand-edited file with more
+    // than the UI's cap must still load, or `loadArchive`'s validation would
+    // make it unopenable. The cap is enforced in the UI and by
+    // `layoutPointLabels`'s own truncation, not here.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'volcano';
+        plotNode.volcanoLabels = Array.from({ length: 30 }, (_, i) => `Gene${i}`);
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.volcanoLabels).toHaveLength(30);
+  });
+
+  it('round-trips pointLabelOffsets and pointLabelSizePt, absent when never set', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'volcano';
+        plotNode.volcanoLabels = ['TP53'];
+        plotNode.pointLabelOffsets = { TP53: { x: 3.5, y: -2 } };
+        plotNode.pointLabelSizePt = 7;
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.pointLabelOffsets).toEqual({ TP53: { x: 3.5, y: -2 } });
+    expect(plot?.type === 'plot' && plot.pointLabelSizePt).toBe(7);
+
+    // An older archive without either field loads with both undefined.
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p\nTP53,2.1,0.001', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot: p } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[p.id];
+      if (plotNode?.type === 'plot') plotNode.plotType = 'volcano';
+    });
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'pointLabelOffsets' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'pointLabelSizePt' in untouchedPlot).toBe(false);
+  });
+
+  it("round-trips an axis's labelFormat/labelDecimals, and leaves both absent when never set", () => {
+    // The same schema trap as `orientation`: a field on the TS type but not in
+    // schema.ts is silently dropped by zod on save.
+    const { doc } = sampleDocument();
+    const formatted = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.y.labelFormat = 'scientific';
+          node.y.labelDecimals = 2;
+        }
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(formatted));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(formatted);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.y.labelFormat).toBe('scientific');
+    expect(plot?.type === 'plot' && plot.y.labelDecimals).toBe(2);
+
+    // Unset stays absent, not defaulted to 'auto' by the schema — otherwise a
+    // figure saved before this feature existed would gain a new key on open.
+    const untouchedPlot = Object.values(doc.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && untouchedPlot.y.labelFormat).toBeUndefined();
+  });
+
+  it("round-trips a symlog axis's scale and linthresh, and leaves linthresh absent when never set", () => {
+    const { doc } = sampleDocument();
+    const symlog = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.y.scale = 'symlog';
+          node.y.linthresh = 50;
+        }
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(symlog));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(symlog);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.y.scale).toBe('symlog');
+    expect(plot?.type === 'plot' && plot.y.linthresh).toBe(50);
+
+    const untouchedPlot = Object.values(doc.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && untouchedPlot.y.linthresh).toBeUndefined();
+  });
+
+  it("round-trips an axis's clipToRange, and leaves it absent when never set", () => {
+    const { doc } = sampleDocument();
+    const clipped = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.x.max = 10;
+          node.x.clipToRange = true;
+        }
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(clipped));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(clipped);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.x.clipToRange).toBe(true);
+
+    const untouchedPlot = Object.values(doc.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && untouchedPlot.x.clipToRange).toBeUndefined();
   });
 
   it('round-trips a horizontal plot, and leaves orientation absent when never set', () => {
@@ -2081,6 +2269,124 @@ describe('.figureforge archive', () => {
     const bytes = saveArchive(buildArchiveContents(doc));
     const loaded = loadArchive(bytes);
     expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a cascaded line plot with its new optional fields', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2\n2\t4\t2\t4', newId()),
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Cascade',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.offsetStepMm = 10;
+        plotNode.offsetStepXMm = 2;
+        plotNode.offsetFill = 'tint';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips showCascadeAxis/cascadeAxisTitle, absent when never set', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2\n2\t4\t2\t4', newId()),
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Cascade',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.offsetStepMm = 10;
+        plotNode.showCascadeAxis = true;
+        plotNode.cascadeAxisTitle = 'Concentration (mg/mL)';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.showCascadeAxis).toBe(true);
+    expect(plot?.type === 'plot' && plot.cascadeAxisTitle).toBe('Concentration (mg/mL)');
+
+    // An older cascade figure without either field loads with both absent,
+    // and hasCascadeOffset (offsetStepMm alone) is unaffected.
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2', newId()) };
+      draft.datasets = [ds];
+      const { plot: p } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Cascade',
+      });
+      const plotNode = draft.nodes[p.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.offsetStepMm = 5;
+      }
+    });
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'showCascadeAxis' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'cascadeAxisTitle' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && untouchedPlot.offsetStepMm).toBe(5);
+  });
+
+  it('leaves an ordinary line plot without the offset fields at all', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\n1\t2\n2\t4', newId()) };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Line',
+      });
+    });
+
+    const untouchedPlot = Object.values(doc.nodes).find(
+      (n) => n.type === 'plot',
+    );
+    expect(untouchedPlot?.type === 'plot' && 'offsetStepMm' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'offsetStepXMm' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'offsetFill' in untouchedPlot).toBe(false);
   });
 
   it('round-trips a pca dataset with a null source path', () => {

@@ -6,7 +6,7 @@
  * canvas concerns only — none of them touch the scene.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   absoluteFrame,
   ancestorsOf,
@@ -30,10 +30,21 @@ import {
   type FigureDocument,
   type FigureNode,
   type NodeId,
+  type PlotNode,
   type RectMm,
   type ResizeHandle,
 } from '@figureforge/doc-model';
-import { measureAllPlots, reflowBrackets, renderDocument, toReact } from '@figureforge/render';
+import {
+  MAX_POINT_LABELS,
+  measureAllPlots,
+  pickablePointsForPlot,
+  placedPointLabelsForPlot,
+  reflowBrackets,
+  renderDocument,
+  toReact,
+  type PickablePoint,
+  type PlacedPointLabel,
+} from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
 
@@ -55,6 +66,8 @@ export interface CanvasProps {
   /** Scale bar being calibrated by measuring a feature, or null. */
   measureNodeId: NodeId | null;
   onMeasured: (imagePixels: number) => void;
+  /** Volcano plot whose points are being picked directly on the canvas. */
+  labelPickNodeId: NodeId | null;
 }
 
 interface DragState {
@@ -145,6 +158,7 @@ export function Canvas({
   cropNodeId,
   measureNodeId,
   onMeasured,
+  labelPickNodeId,
 }: CanvasProps) {
   const { document: doc } = api;
   const [guides, setGuides] = useState<AlignmentGuide[]>([]);
@@ -166,6 +180,12 @@ export function Canvas({
       ? doc.nodes[measureBar.parentId]
       : undefined;
   const measureTarget = measureImage?.type === 'image' ? measureImage : null;
+
+  const labelPickCandidate = labelPickNodeId ? doc.nodes[labelPickNodeId] : undefined;
+  const labelPickTarget =
+    labelPickCandidate?.type === 'plot' && labelPickCandidate.plotType === 'volcano'
+      ? labelPickCandidate
+      : null;
 
   const resolveAsset = useCallback((assetId: string) => assetUrls[assetId], [assetUrls]);
 
@@ -624,6 +644,16 @@ export function Canvas({
           <MeasureOverlay doc={doc} node={measureTarget} zoom={zoom} onMeasured={onMeasured} />
         )}
 
+        {labelPickTarget && (
+          <PointPickOverlay
+            key={labelPickTarget.id}
+            api={api}
+            theme={theme}
+            node={labelPickTarget}
+            zoom={zoom}
+          />
+        )}
+
         {/* Editing overlay: an HTML input above the SVG, never in the scene. */}
         {textEdit && (
           <input
@@ -973,6 +1003,218 @@ function MeasureOverlay({
       <span className="measure-readout">
         {line ? `${Math.round(lengthPx)} px` : 'Drag across a feature of known length'}
       </span>
+    </div>
+  );
+}
+
+/**
+ * Millimetre side of the grid cell used to bucket points for hit-testing.
+ *
+ * A real gene list is 10,000+ rows; testing every one on every pointermove
+ * would be the same DOM/CPU-volume problem `MAX_VECTOR_POINTS` rasterization
+ * exists to avoid on the drawing side. Bucketing once per mount and touching
+ * only the neighbouring cells on a move keeps picking cheap without that.
+ */
+const PICK_BUCKET_MM = 2;
+
+/**
+ * Direct point-picking for a volcano plot's labels.
+ *
+ * HTML above the SVG, never scene nodes — the crop/measure precedent: this is
+ * editor state, not part of the drawing, and picking chrome would have no
+ * parity guard against leaking into an export the way scene-node chrome does.
+ *
+ * Deliberately renders no per-point DOM at all below the hover ring and its
+ * tooltip — a real gene list would otherwise put exactly the volume of nodes
+ * on screen that the bake-to-raster mechanism exists to prevent.
+ */
+function PointPickOverlay({
+  api,
+  theme,
+  node,
+  zoom,
+}: {
+  api: DocumentApi;
+  theme: Theme;
+  node: PlotNode;
+  zoom: number;
+}) {
+  const { document: doc } = api;
+  const [hovered, setHovered] = useState<PickablePoint | null>(null);
+
+  const points = useMemo(() => pickablePointsForPlot(node, doc, theme), [node, doc, theme]);
+  const placedLabels = useMemo(() => placedPointLabelsForPlot(node, doc, theme), [node, doc, theme]);
+  /**
+   * A drag in progress on a placed label, or null. Dragging only ever makes
+   * sense while this plot's picking mode is already open — the label isn't
+   * an interactive target otherwise — so it's handled here rather than as a
+   * second overlay/mode. `suppressClickRef` swallows the `click` a browser
+   * fires right after the `pointerup` that ends a drag, or releasing the
+   * label over a point would also toggle that point's own label.
+   */
+  const dragRef = useRef<{ text: string; startXmm: number; startYmm: number; base: { x: number; y: number } } | null>(
+    null,
+  );
+  const suppressClickRef = useRef(false);
+  const buckets = useMemo(() => {
+    const map = new Map<string, PickablePoint[]>();
+    for (const p of points) {
+      const key = `${Math.floor(p.xMm / PICK_BUCKET_MM)}:${Math.floor(p.yMm / PICK_BUCKET_MM)}`;
+      const bucket = map.get(key);
+      if (bucket) bucket.push(p);
+      else map.set(key, [p]);
+    }
+    return map;
+  }, [points]);
+
+  const frame = absoluteFrame(doc.nodes, node.id);
+  if (!frame) return null;
+
+  const pxPerMm = PX_PER_MM * zoom;
+  const box = {
+    left: frame.x * pxPerMm,
+    top: frame.y * pxPerMm,
+    width: frame.width * pxPerMm,
+    height: frame.height * pxPerMm,
+  };
+
+  const atCap = (node.volcanoLabels?.length ?? 0) >= MAX_POINT_LABELS;
+
+  const nearest = (event: {
+    clientX: number;
+    clientY: number;
+    currentTarget: EventTarget & HTMLDivElement;
+  }): PickablePoint | null => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const xMm = (event.clientX - rect.left) / pxPerMm;
+    const yMm = (event.clientY - rect.top) / pxPerMm;
+    const cx = Math.floor(xMm / PICK_BUCKET_MM);
+    const cy = Math.floor(yMm / PICK_BUCKET_MM);
+    let best: PickablePoint | null = null;
+    let bestDist = Infinity;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const p of buckets.get(`${cx + dx}:${cy + dy}`) ?? []) {
+          const dist = Math.hypot(p.xMm - xMm, p.yMm - yMm);
+          if (dist <= Math.max(p.radiusMm, 1.2) && dist < bestDist) {
+            best = p;
+            bestDist = dist;
+          }
+        }
+      }
+    }
+    return best;
+  };
+
+  const labelAt = (event: {
+    clientX: number;
+    clientY: number;
+    currentTarget: EventTarget & HTMLDivElement;
+  }): PlacedPointLabel | null => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const xMm = (event.clientX - rect.left) / pxPerMm;
+    const yMm = (event.clientY - rect.top) / pxPerMm;
+    return (
+      placedLabels.find(
+        (l) => xMm >= l.rectMm.x0 && xMm <= l.rectMm.x1 && yMm >= l.rectMm.y0 && yMm <= l.rectMm.y1,
+      ) ?? null
+    );
+  };
+
+  // Cap enforced here too, not just in the Inspector's list: a click at the
+  // cap is a no-op, and the tooltip already states why before the click.
+  const toggle = (point: PickablePoint): void => {
+    if (!point.labelled && atCap) return;
+    api.commit(point.labelled ? 'Unlabel point' : 'Label point', (draft) => {
+      const target = draft.nodes[node.id];
+      if (target?.type !== 'plot') return;
+      const current = target.volcanoLabels ?? [];
+      target.volcanoLabels = point.labelled
+        ? current.filter((l) => l !== point.label)
+        : [...current, point.label];
+    });
+  };
+
+  return (
+    <div
+      className="point-pick-overlay"
+      style={box}
+      onPointerDown={(e) => {
+        const label = labelAt(e);
+        if (label) {
+          e.stopPropagation();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          const rect = e.currentTarget.getBoundingClientRect();
+          dragRef.current = {
+            text: label.text,
+            startXmm: (e.clientX - rect.left) / pxPerMm,
+            startYmm: (e.clientY - rect.top) / pxPerMm,
+            base: node.pointLabelOffsets?.[label.text] ?? { x: 0, y: 0 },
+          };
+          suppressClickRef.current = true;
+          return;
+        }
+        e.stopPropagation();
+      }}
+      onPointerMove={(e) => {
+        const drag = dragRef.current;
+        if (drag) {
+          const rect = e.currentTarget.getBoundingClientRect();
+          const xMm = (e.clientX - rect.left) / pxPerMm;
+          const yMm = (e.clientY - rect.top) / pxPerMm;
+          const x = drag.base.x + (xMm - drag.startXmm);
+          const y = drag.base.y + (yMm - drag.startYmm);
+          // Committed every frame, matching how an ordinary node drag already
+          // commits every pointermove — the offset is a plain accumulator
+          // field, not an absolute frame needing a single final commit.
+          api.commit('Move label', (draft) => {
+            const target = draft.nodes[node.id];
+            if (target?.type !== 'plot') return;
+            target.pointLabelOffsets = { ...(target.pointLabelOffsets ?? {}), [drag.text]: { x, y } };
+          });
+          return;
+        }
+        setHovered(nearest(e));
+      }}
+      onPointerUp={() => {
+        dragRef.current = null;
+      }}
+      onPointerCancel={() => {
+        dragRef.current = null;
+      }}
+      onPointerLeave={() => {
+        if (!dragRef.current) setHovered(null);
+      }}
+      onClick={(e) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          return;
+        }
+        const point = nearest(e);
+        if (point) toggle(point);
+      }}
+    >
+      {hovered && (
+        <>
+          <div
+            className={`point-pick-ring${hovered.labelled ? ' labelled' : ''}`}
+            style={{
+              left: hovered.xMm * pxPerMm - hovered.radiusMm * pxPerMm,
+              top: hovered.yMm * pxPerMm - hovered.radiusMm * pxPerMm,
+              width: hovered.radiusMm * 2 * pxPerMm,
+              height: hovered.radiusMm * 2 * pxPerMm,
+            }}
+          />
+          <div
+            className="point-pick-tooltip"
+            style={{ left: hovered.xMm * pxPerMm, top: hovered.yMm * pxPerMm }}
+          >
+            {!hovered.labelled && atCap
+              ? '25 labels is the maximum — past that a key stops being readable and the leaders cross.'
+              : hovered.label}
+          </div>
+        </>
+      )}
     </div>
   );
 }

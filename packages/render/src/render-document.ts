@@ -60,21 +60,33 @@ import {
   makeBandScale,
   makeGroupedBandScale,
   makeScale,
+  minorTickValues,
   negLog10,
   normalizeCellValue,
   resolveDomain,
   resolveHeatmapDomain,
   tickCountForLength,
+  tickLabelRuns,
   volcanoCategory,
   xyMarks,
+  type LinearScaleOptions,
   type MarkOrientation,
   type NumericScale,
   type PointGeometry,
   type SurvivalStep,
+  type TickLabelRun,
   type XySeriesMarks,
 } from '@figureforge/plots';
-import { el, group, round, text, translate, type SceneNode, type SceneRole } from './scene.js';
-import { estimateTextHeightMm, estimateTextWidthMm, truncateToWidth } from './text-width.js';
+import { el, group, round, text, translate, type SceneAttrs, type SceneNode, type SceneRole } from './scene.js';
+import {
+  estimateRunsWidthMm,
+  estimateTextHeightMm,
+  estimateTextWidthMm,
+  superscriptRiseMm,
+  superscriptSizePt,
+  truncateToWidth,
+} from './text-width.js';
+import { layoutPointLabels, nearestRectPoint, type LabelCandidate, type Rect } from './point-labels.js';
 
 /**
  * Above this many points, a continuous plot's marks are drawn as one raster
@@ -725,6 +737,345 @@ export type PlotGeometry = CategoricalPlotGeometry | ContinuousPlotGeometry | Gr
  * Drawing *something* here is how the five unimplemented types shipped wrong
  * output for two phases.
  */
+/**
+ * `LinearScaleOptions`'s number-format fields, read from an `AxisSpec` and
+ * spread in beside `tickStep`/`kind`/`breaks` at every `makeScale` call —
+ * composed once so passing `labelFormat` and forgetting `labelDecimals` (or
+ * the reverse) can't happen at one call site and not another.
+ */
+function labelFormatOptions(
+  axis: AxisSpec,
+): Pick<LinearScaleOptions, 'labelFormat' | 'labelDecimals'> {
+  return axis.labelFormat ? { labelFormat: axis.labelFormat, labelDecimals: axis.labelDecimals } : {};
+}
+
+/** See `AxisSpec.linthresh`. Ignored by `makeScale` on anything but symlog. */
+function linthreshOptions(axis: AxisSpec): Pick<LinearScaleOptions, 'linthresh'> {
+  return axis.linthresh !== undefined ? { linthresh: axis.linthresh } : {};
+}
+
+/**
+ * Whether this axis's `clipToRange` should actually take effect. Meaningless
+ * with neither bound set — there is no range to clip to — so a hand-edited
+ * file that sets the flag with no bounds clips against nothing rather than
+ * the auto-derived, padded domain, the same defence-in-depth the Inspector's
+ * own gating already provides on the honest path.
+ */
+function clipsToRange(axis: AxisSpec): boolean {
+  return Boolean(axis.clipToRange) && (axis.min !== null || axis.max !== null);
+}
+
+/**
+ * Whether a plot's cascade/ridgeline offset can apply at all — a line plot
+ * with more than one series and no second y axis, since a cascade already
+ * spends the vertical axis on separation and a second axis would spend it on
+ * something else at the same time.
+ */
+export function isCascadable(node: Pick<PlotNode, 'plotType' | 'y2' | 'seriesAxis'>, seriesCount: number): boolean {
+  if (node.plotType !== 'line' || seriesCount <= 1) return false;
+  const axisFor = node.seriesAxis ?? [];
+  const usesY2 = node.y2 !== undefined && axisFor.some((a) => a === 'y2');
+  return !usesY2;
+}
+
+/**
+ * Whether a cascade offset is actually in effect — `isCascadable` plus a
+ * non-zero step. Composed once and read by both `continuousGeometry` (to
+ * shrink the ranges and bake the offsets) and `renderContinuousMarks` (to
+ * reverse paint order and draw the fill), the same "one place" discipline
+ * `y2WidthMm`/`scaleBarWidthMm` already follow — two derivations of this fact
+ * could otherwise disagree about whether a plot is cascading at all.
+ */
+export function hasCascadeOffset(
+  node: Pick<PlotNode, 'plotType' | 'y2' | 'seriesAxis' | 'offsetStepMm' | 'offsetStepXMm'>,
+  seriesCount: number,
+): boolean {
+  return (
+    isCascadable(node, seriesCount) &&
+    ((node.offsetStepMm ?? 0) !== 0 || (node.offsetStepXMm ?? 0) !== 0)
+  );
+}
+
+/**
+ * Millimetres of headroom/sideroom a cascade needs, derived from the *count*
+ * of series and the requested step — never from a measured position, so it
+ * cannot depend on the geometry it is itself used to build (the same
+ * termination argument `annotationReserveMm` rests on).
+ *
+ * Clamped well short of the full plot area: a large step over many series
+ * compresses the cascade's actual pitch (see `effectiveOffsetStepsMm`) rather
+ * than collapsing the usable range to zero and drawing every trace on one
+ * line. Exported so the Inspector can show the same number it is about to
+ * spend.
+ */
+export function offsetReserveMm(
+  node: Pick<PlotNode, 'offsetStepMm' | 'offsetStepXMm'>,
+  seriesCount: number,
+  plotWidth: number,
+  plotHeight: number,
+): { x: number; y: number } {
+  if (seriesCount <= 1) return { x: 0, y: 0 };
+  const steps = seriesCount - 1;
+  const rawY = Math.abs(node.offsetStepMm ?? 0) * steps;
+  const rawX = Math.abs(node.offsetStepXMm ?? 0) * steps;
+  return {
+    y: Math.min(rawY, plotHeight * 0.7),
+    x: Math.min(rawX, plotWidth * 0.5),
+  };
+}
+
+function signOf(v: number): number {
+  return v < 0 ? -1 : v > 0 ? 1 : 0;
+}
+
+/**
+ * The per-series step actually applied, after `offsetReserveMm`'s clamp has
+ * possibly compressed it — direction preserved from the requested step, only
+ * the magnitude ever shrinks.
+ */
+function effectiveOffsetStepsMm(
+  node: Pick<PlotNode, 'offsetStepMm' | 'offsetStepXMm'>,
+  seriesCount: number,
+  reserve: { x: number; y: number },
+): { x: number; y: number } {
+  const steps = Math.max(1, seriesCount - 1);
+  return {
+    x: (reserve.x / steps) * signOf(node.offsetStepXMm ?? 0),
+    y: (reserve.y / steps) * signOf(node.offsetStepMm ?? 0),
+  };
+}
+
+/** Small fixed layout constants for the cascade depth axis — shared between
+ *  `cascadeAxisReserveMm` (which must reserve exactly what gets drawn) and
+ *  `renderCascadeAxis` (which draws it), the same one-place discipline every
+ *  other margin/geometry pairing in this file follows. */
+const CASCADE_AXIS_TICK_MM = 1.5;
+const CASCADE_AXIS_GAP_MM = 2;
+const CASCADE_AXIS_LABEL_GAP_MM = 1;
+const CASCADE_AXIS_BRACKET_GAP_MM = 1.5;
+const CASCADE_AXIS_BRACKET_MM = 1.5;
+/**
+ * Total sideways drift the depth axis leans across every series when the
+ * cascade has a sideways (`offsetStepXMm`) component — a small FIXED budget,
+ * never proportional to plotHeight or series count, so it can be reserved
+ * once by `cascadeAxisReserveMm` and then simply divided evenly across steps
+ * at draw time. This schematic axis is a legend-like device, not a literal
+ * continuation of the real cascade's (already-clamped) offset angle: keeping
+ * its own lean fixed is what keeps its reserved width a pure function of
+ * label text and series count, preserving the two-pass margin termination
+ * argument every other reserve in this file already rests on.
+ */
+const CASCADE_AXIS_LEAN_MM = 6;
+
+export interface CascadeAxisGroup {
+  seriesIndices: number[];
+  category: string | undefined;
+}
+
+/**
+ * Partitions cascaded series into contiguous runs sharing a `category`, for
+ * the depth axis's end brackets.
+ *
+ * No series carrying a category at all is one implicit group covering
+ * everything, so the common single-group case needs no per-series setup —
+ * captioned by `PlotNode.cascadeAxisTitle` in that case. Once any series
+ * does carry one, a run of series with none of their own (in an otherwise
+ * categorised list) still gets its own group — its ticks and names still
+ * draw — but is never captioned: inventing a caption for data that doesn't
+ * have one is exactly the kind of approximation this codebase refuses
+ * elsewhere (see `PlotType` choices in CLAUDE.md).
+ */
+export function cascadeAxisGroups(series: readonly { category?: string }[]): CascadeAxisGroup[] {
+  if (!series.some((s) => s.category !== undefined)) {
+    return [{ seriesIndices: series.map((_, i) => i), category: undefined }];
+  }
+  const groups: CascadeAxisGroup[] = [];
+  series.forEach((s, i) => {
+    const current = groups[groups.length - 1];
+    if (current && current.category === s.category) current.seriesIndices.push(i);
+    else groups.push({ seriesIndices: [i], category: s.category });
+  });
+  return groups;
+}
+
+/**
+ * Whether any group drawn from `cascadeAxisGroups` will actually carry a
+ * caption — composed once so the reserve and the draw function agree on
+ * whether the caption's depth needs reserving/drawing at all.
+ */
+function cascadeAxisHasCaption(
+  node: Pick<PlotNode, 'cascadeAxisTitle'>,
+  groups: readonly CascadeAxisGroup[],
+  hasAnyCategory: boolean,
+): boolean {
+  return groups.some((g) => g.category !== undefined || (!hasAnyCategory && node.cascadeAxisTitle));
+}
+
+/**
+ * Width the cascade depth axis needs to the right of the plot: one tick
+ * label per series (its name) plus, if any group ends up captioned, an end
+ * bracket and a caption's depth.
+ *
+ * A pure function of counts, text and the fixed `CASCADE_AXIS_LEAN_MM`
+ * budget — never of the diagonal's actual drawn position — so it terminates
+ * the same two-pass margin loop `y2WidthMm` already relies on.
+ */
+export function cascadeAxisReserveMm(
+  node: Pick<PlotNode, 'showCascadeAxis' | 'cascadeAxisTitle' | 'offsetStepXMm'>,
+  theme: Theme,
+  series: readonly { name: string; category?: string }[],
+): number {
+  if (!node.showCascadeAxis || series.length < 2) return 0;
+
+  const tickLabelWidth = series.reduce(
+    (max, s) => Math.max(max, estimateTextWidthMm(s.name, theme.type.tickLabelPt)),
+    0,
+  );
+  const lean = (node.offsetStepXMm ?? 0) !== 0 ? CASCADE_AXIS_LEAN_MM : 0;
+  const hasAnyCategory = series.some((s) => s.category !== undefined);
+  const hasCaption = cascadeAxisHasCaption(node, cascadeAxisGroups(series), hasAnyCategory);
+  const captionDepth = hasCaption
+    ? CASCADE_AXIS_BRACKET_GAP_MM +
+      CASCADE_AXIS_BRACKET_MM +
+      theme.spacing.axisTitleGapMm +
+      estimateTextHeightMm(theme.type.axisTitlePt)
+    : 0;
+
+  return (
+    CASCADE_AXIS_GAP_MM +
+    CASCADE_AXIS_TICK_MM +
+    CASCADE_AXIS_LABEL_GAP_MM +
+    tickLabelWidth +
+    lean +
+    captionDepth
+  );
+}
+
+/**
+ * Draws the cascade depth axis: a spine through one tick per series
+ * (labelled with the series name in that series' own colour), and, per
+ * captioned group from `cascadeAxisGroups`, an end bracket and a rotated
+ * caption — the same `rotate(-90)` convention the ordinary y-axis title
+ * already uses.
+ *
+ * The spine's positions are schematic, not the real (already-clamped)
+ * cascade geometry: a fixed pitch derived from `plotHeight`/series count,
+ * and — only when the cascade leans sideways at all — a lean distributed
+ * evenly across steps from the same fixed `CASCADE_AXIS_LEAN_MM` budget
+ * `cascadeAxisReserveMm` reserved. That is what keeps this function's
+ * horizontal extent bounded by the same reserve regardless of how large the
+ * plot's own (separately clamped) `offsetStepMm`/`offsetStepXMm` are.
+ */
+export function renderCascadeAxis(node: PlotNode, theme: Theme, geometry: ContinuousPlotGeometry): SceneNode[] {
+  const series = geometry.series;
+  const n = series.length;
+  if (!node.showCascadeAxis || !hasCascadeOffset(node, n) || n < 2) return [];
+
+  const steps = n - 1;
+  const pitchMm = (geometry.plotHeight * 0.6) / steps;
+  const leanSign = signOf(node.offsetStepXMm ?? 0);
+  const leanPerStep = leanSign !== 0 ? (CASCADE_AXIS_LEAN_MM / steps) * leanSign : 0;
+
+  const baseX = geometry.plotWidth + CASCADE_AXIS_GAP_MM;
+  const baseY = geometry.plotHeight;
+  const ticks = series.map((_, i) => ({ x: baseX + i * leanPerStep, y: baseY - i * pitchMm }));
+
+  const dx = ticks[n - 1]!.x - ticks[0]!.x;
+  const dy = ticks[n - 1]!.y - ticks[0]!.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const dir = { x: dx / len, y: dy / len };
+  // Rotated 90°, then flipped if necessary so it always points away from the
+  // plot (+x-ish) — ticks, labels and brackets read outward into the margin.
+  const perpRaw = { x: -dir.y, y: dir.x };
+  const perp = perpRaw.x < 0 ? { x: -perpRaw.x, y: -perpRaw.y } : perpRaw;
+
+  const out: SceneNode[] = [];
+  const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
+
+  out.push(
+    el(
+      'path',
+      { d: ticks.map((t, i) => `${i === 0 ? 'M' : 'L'}${round(t.x)} ${round(t.y)}`).join(' '), ...axisStroke },
+      undefined,
+      { role: 'cascade-axis' },
+    ),
+  );
+
+  const labelOffset = CASCADE_AXIS_TICK_MM + CASCADE_AXIS_LABEL_GAP_MM;
+  series.forEach((s, i) => {
+    const t = ticks[i]!;
+    const tickEnd = { x: t.x + perp.x * CASCADE_AXIS_TICK_MM, y: t.y + perp.y * CASCADE_AXIS_TICK_MM };
+    out.push(
+      el(
+        'path',
+        { d: `M${round(t.x)} ${round(t.y)} L${round(tickEnd.x)} ${round(tickEnd.y)}`, ...axisStroke },
+        undefined,
+        { role: 'cascade-axis' },
+      ),
+    );
+    out.push(
+      text(
+        s.name,
+        {
+          x: t.x + perp.x * labelOffset,
+          y: t.y + perp.y * labelOffset,
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(theme.type.tickLabelPt),
+          fill: s.color,
+          'text-anchor': 'start',
+          'dominant-baseline': 'central',
+        },
+        { role: 'cascade-axis-label' },
+      ),
+    );
+  });
+
+  const tickLabelWidth = series.reduce(
+    (max, s) => Math.max(max, estimateTextWidthMm(s.name, theme.type.tickLabelPt)),
+    0,
+  );
+  const bracketOffset = labelOffset + tickLabelWidth + CASCADE_AXIS_BRACKET_GAP_MM;
+  const hasAnyCategory = series.some((s) => s.category !== undefined);
+
+  for (const group of cascadeAxisGroups(series)) {
+    const caption = group.category ?? (hasAnyCategory ? undefined : node.cascadeAxisTitle);
+    if (!caption) continue;
+
+    const first = ticks[group.seriesIndices[0]!]!;
+    const last = ticks[group.seriesIndices[group.seriesIndices.length - 1]!]!;
+    const p0 = { x: first.x + perp.x * bracketOffset, y: first.y + perp.y * bracketOffset };
+    const p1 = { x: last.x + perp.x * bracketOffset, y: last.y + perp.y * bracketOffset };
+    out.push(
+      el('path', { d: `M${round(p0.x)} ${round(p0.y)} L${round(p1.x)} ${round(p1.y)}`, ...axisStroke }, undefined, {
+        role: 'cascade-axis',
+      }),
+    );
+
+    const mid = {
+      x: (p0.x + p1.x) / 2 + perp.x * CASCADE_AXIS_BRACKET_MM,
+      y: (p0.y + p1.y) / 2 + perp.y * CASCADE_AXIS_BRACKET_MM,
+    };
+    out.push(
+      text(
+        caption,
+        {
+          x: 0,
+          y: 0,
+          transform: `translate(${round(mid.x)} ${round(mid.y)}) rotate(-90)`,
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(theme.type.axisTitlePt),
+          fill: theme.foreground,
+          'text-anchor': 'middle',
+          'dominant-baseline': 'alphabetic',
+        },
+        { role: 'cascade-axis-title' },
+      ),
+    );
+  }
+
+  return out;
+}
+
 function continuousGeometry(
   node: PlotNode,
   series: ReturnType<typeof toSeries>,
@@ -750,6 +1101,8 @@ function continuousGeometry(
       rangeMm: [0, plotWidth],
       tickStep: node.x.tickStep,
       kind: 'linear',
+      ...labelFormatOptions(node.x),
+      ...linthreshOptions(node.x),
     });
 
     /*
@@ -774,6 +1127,8 @@ function continuousGeometry(
       tickStep: node.y.tickStep ?? countStep,
       kind: node.y.scale,
       ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+      ...labelFormatOptions(node.y),
+      ...linthreshOptions(node.y),
     });
 
     return {
@@ -827,6 +1182,8 @@ function continuousGeometry(
       tickStep: node.x.tickStep,
       kind: node.x.scale,
       ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+      ...labelFormatOptions(node.x),
+      ...linthreshOptions(node.x),
     });
 
     const yScale = makeScale({
@@ -844,6 +1201,8 @@ function continuousGeometry(
       tickStep: node.y.tickStep,
       kind: node.y.scale,
       ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+      ...labelFormatOptions(node.y),
+      ...linthreshOptions(node.y),
     });
 
     return {
@@ -861,6 +1220,8 @@ function continuousGeometry(
         pointSizeMm: node.pointSizeMm,
         colors,
         classify: (xValue, yValue) => volcanoCategory(xValue, yValue, thresholds),
+        clipToXRange: clipsToRange(node.x),
+        clipToYRange: [clipsToRange(node.y)],
       }),
       bins: [],
     };
@@ -869,34 +1230,6 @@ function continuousGeometry(
   // scatter and line: every series must carry its own paired x values.
   const xValues = series.flatMap((s) => [...(s.x ?? [])]).filter(Number.isFinite);
   if (xValues.length === 0) return null;
-
-  const xScale = makeScale({
-    domain: resolveDomain(xValues, {
-      min: node.x.min,
-      max: node.x.max,
-      includeZero: false,
-      padFraction: 0.08,
-      kind: node.x.scale,
-    }),
-    rangeMm: [0, plotWidth],
-    tickStep: node.x.tickStep,
-    kind: node.x.scale,
-    ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
-  });
-
-  const yScale = makeScale({
-    domain: resolveDomain(series.flatMap((s) => s.values), {
-      min: node.y.min,
-      max: node.y.max,
-      includeZero: false,
-      padFraction: 0.08,
-      kind: node.y.scale,
-    }),
-    rangeMm: [plotHeight, 0],
-    tickStep: node.y.tickStep,
-    kind: node.y.scale,
-    ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
-  });
 
   /*
    * The secondary axis is offered on continuous plots only. On a categorical
@@ -907,6 +1240,57 @@ function continuousGeometry(
    */
   const axisFor = node.seriesAxis ?? [];
   const usesY2 = node.y2 !== undefined && series.some((_, i) => axisFor[i] === 'y2');
+
+  /*
+   * Cascade / offset line plots. `reserve` is {0,0} whenever `cascading` is
+   * false, so the range bounds below are exactly `[0, plotWidth]`/
+   * `[plotHeight, 0]` on every figure that does not use this — the same
+   * "absent draws exactly as today" guarantee every optional field here
+   * carries.
+   */
+  const cascading = hasCascadeOffset(node, series.length);
+  const reserve = cascading
+    ? offsetReserveMm(node, series.length, plotWidth, plotHeight)
+    : { x: 0, y: 0 };
+  const effSteps = cascading ? effectiveOffsetStepsMm(node, series.length, reserve) : { x: 0, y: 0 };
+  // Later series cascade up (negative pixel y) and right (positive pixel x);
+  // a negative requested step reverses the direction via `effSteps`' own sign.
+  const offsets = cascading
+    ? series.map((_, i) => ({ x: i * effSteps.x, y: -i * effSteps.y }))
+    : undefined;
+
+  const xScale = makeScale({
+    domain: resolveDomain(xValues, {
+      min: node.x.min,
+      max: node.x.max,
+      includeZero: false,
+      padFraction: 0.08,
+      kind: node.x.scale,
+    }),
+    rangeMm: [0, plotWidth - reserve.x],
+    tickStep: node.x.tickStep,
+    kind: node.x.scale,
+    ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+    ...labelFormatOptions(node.x),
+    ...linthreshOptions(node.x),
+  });
+
+  const yScale = makeScale({
+    domain: resolveDomain(series.flatMap((s) => s.values), {
+      min: node.y.min,
+      max: node.y.max,
+      includeZero: false,
+      padFraction: 0.08,
+      kind: node.y.scale,
+    }),
+    rangeMm: [plotHeight, reserve.y],
+    tickStep: node.y.tickStep,
+    kind: node.y.scale,
+    ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+    ...labelFormatOptions(node.y),
+    ...linthreshOptions(node.y),
+  });
+
   const y2Scale = usesY2
     ? makeScale({
         domain: resolveDomain(
@@ -923,6 +1307,8 @@ function continuousGeometry(
         tickStep: node.y2!.tickStep,
         kind: node.y2!.scale,
         ...(node.y2!.breaks ? { breaks: node.y2!.breaks } : {}),
+        ...labelFormatOptions(node.y2!),
+        ...linthreshOptions(node.y2!),
       })
     : undefined;
 
@@ -945,6 +1331,12 @@ function continuousGeometry(
       showPoints: node.plotType === 'scatter' || node.showPoints,
       pointSizeMm: node.pointSizeMm,
       colors,
+      ...(offsets ? { offsets } : {}),
+      clipToXRange: clipsToRange(node.x),
+      clipToYRange: series.map((_, i) =>
+        usesY2 && axisFor[i] === 'y2' ? clipsToRange(node.y2!) : clipsToRange(node.y),
+      ),
+      categories: series.map((s) => s.category),
       /*
        * Replicates collapse to a centre and an interval on any line plot that
        * asks for an error interval — as bars or as a band. A scatter is the raw
@@ -1007,6 +1399,8 @@ function geometryForMargin(
     tickStep: node.y.tickStep,
     kind: node.y.scale,
     ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+    ...labelFormatOptions(node.y),
+    ...linthreshOptions(node.y),
   });
 
   /*
@@ -1589,9 +1983,13 @@ function requiredMargin(
    * the key straight over the right-hand tick labels.
    */
   const y2 = y2WidthMm(node, theme, geometry);
+  // Mutually exclusive with y2 by construction (`isCascadable` already
+  // refuses a second y axis), so this never double-reserves the same room.
+  const cascade = geometry.kind === 'continuous' ? cascadeAxisReserveMm(node, theme, geometry.series) : 0;
   const right = Math.max(
     theme.spacing.plotMarginMm.right,
     y2 +
+      cascade +
       (placement === 'right'
         ? theme.spacing.tickLabelGapMm + legendWidthMm(legendEntries(geometry), theme)
         : 0),
@@ -1687,6 +2085,11 @@ function survivalSeriesMarks(
       linePath.length > 0 ? Math.min(...linePath.map((p) => p.y)) : 0,
       band && band.length > 0 ? Math.min(...band.map((p) => p.highY)) : Infinity,
     ),
+    // A survival probability has no "zero" quantity a fill would close
+    // against — see the field's own doc comment.
+    baselineMm: null,
+    baselineXMm: null,
+    offsetMm: { x: 0, y: 0 },
   };
 }
 
@@ -1714,6 +2117,8 @@ function survivalGeometryForMargin(
     tickStep: node.x.tickStep,
     kind: node.x.scale,
     ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+    ...labelFormatOptions(node.x),
+    ...linthreshOptions(node.x),
   });
 
   /*
@@ -1727,6 +2132,8 @@ function survivalGeometryForMargin(
     rangeMm: [plotHeight, 0],
     tickStep: node.y.tickStep,
     kind: 'linear',
+    ...labelFormatOptions(node.y),
+    ...linthreshOptions(node.y),
   });
 
   const colors = paletteColors(node.palette, groups.length);
@@ -1792,7 +2199,12 @@ function survivalGeometry(
   return survivalGeometryForMargin(node, groups, grown) ?? first;
 }
 
-function computePlotGeometry(
+/**
+ * Exported so the Inspector's cascade control can show the same plot area
+ * `offsetReserveMm` is about to spend, rather than approximating it from the
+ * panel frame and a guessed margin.
+ */
+export function computePlotGeometry(
   node: PlotNode,
   doc: FigureDocument,
   theme: Theme,
@@ -2139,7 +2551,10 @@ function y2WidthMm(node: PlotNode, theme: Theme, geometry: PlotGeometry): number
     ? scale.ticks.reduce((max, tick) => {
         const y = scale.scale(tick);
         if (!Number.isFinite(y) || y < -0.01 || y > geometry.plotHeight + 0.01) return max;
-        return Math.max(max, estimateTextWidthMm(scale.format(tick), theme.type.tickLabelPt));
+        return Math.max(
+          max,
+          estimateRunsWidthMm(tickLabelRuns(scale, tick), theme.type.tickLabelPt),
+        );
       }, 0)
     : 0;
 
@@ -2365,8 +2780,14 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
       { transform: translate(margin.left, margin.top) },
       [
         ...renderAxes(node, theme, geometry),
+        ...renderCascadeAxis(node, theme, geometry),
         ...renderVolcanoThresholds(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
+        // After every mark, including the raster: a label emitted inside a
+        // series group would paint under a baked point cloud, which is the
+        // case that matters most — a real gene list is routinely over
+        // MAX_VECTOR_POINTS.
+        ...renderPointLabels(node, theme, geometry),
         // Break marks last: the gap is painted in the page colour, so it has to
         // land over the marks it interrupts rather than under them.
         ...renderAxisBreaks(node, theme, geometry),
@@ -2681,6 +3102,236 @@ function renderVolcanoThresholds(
   return lines;
 }
 
+/**
+ * Which points get a label, in the order `layoutPointLabels` should place
+ * them — sorted by the DATA, never by the order the author clicked: most
+ * significant first, so it wins the best slot and survives the cap if one
+ * binds. So canvas and export agree, and re-selecting the same set in a
+ * different order changes nothing on the page.
+ */
+function volcanoLabelCandidates(node: PlotNode, geometry: ContinuousPlotGeometry): LabelCandidate[] {
+  if (node.plotType !== 'volcano') return [];
+  const wanted = node.volcanoLabels;
+  if (!wanted || wanted.length === 0) return [];
+  const wantedSet = new Set(wanted);
+
+  const series = geometry.series[0];
+  if (!series) return [];
+
+  const matches = series.points.filter((p) => p.label !== undefined && wantedSet.has(p.label));
+  matches.sort((a, b) => {
+    if (b.value !== a.value) return b.value - a.value; // descending -log10(p)
+    const aFc = Math.abs(geometry.xScale.invert(a.x));
+    const bFc = Math.abs(geometry.xScale.invert(b.x));
+    if (bFc !== aFc) return bFc - aFc; // descending |fold change|
+    return (a.label ?? '').localeCompare(b.label ?? '');
+  });
+
+  return matches.map((p) => ({
+    x: p.x,
+    y: p.y,
+    text: p.label!,
+    color: node.pointFill ?? resolveVolcanoColor(node, p.category) ?? series.color,
+  }));
+}
+
+/** A placed label after any manual `pointLabelOffsets` displacement has been
+ *  applied and its leader recomputed against the final position. */
+interface ResolvedPointLabel {
+  text: string;
+  color: string;
+  x: number;
+  y: number;
+  anchor: 'start' | 'middle' | 'end';
+  leader: { x1: number; y1: number; x2: number; y2: number } | null;
+  /** Plot-area-local mm — the box collision was (or, for a manually-offset
+   *  label, would have been) checked against. */
+  rect: Rect;
+}
+
+/**
+ * Auto-places this volcano plot's requested point labels, then applies any
+ * manual `pointLabelOffsets` on top — the "auto base, stored delta" split
+ * `BracketNode.userOffsetMm` already uses, so a later change to which labels
+ * are shown re-runs the collision search cleanly and a dragged label's own
+ * nudge re-applies to whatever slot it lands in.
+ *
+ * The single place both the drawing path (`renderPointLabels`) and the
+ * canvas's drag hit-testing (`placedPointLabelsForPlot`) go through, so
+ * neither can compute a different answer from the other.
+ */
+function resolvePointLabels(node: PlotNode, theme: Theme, geometry: ContinuousPlotGeometry): ResolvedPointLabel[] {
+  const candidates = volcanoLabelCandidates(node, geometry);
+  if (candidates.length === 0) return [];
+
+  const fontSizePt = node.pointLabelSizePt ?? theme.type.annotationPt;
+  const pointRadiusMm = node.pointSizeMm / 2;
+
+  // A label can only ever land within `pointRadiusMm + GAP + maxPushMm` of its
+  // own point, so pre-filter the plot's (possibly 10,000+-row) point cloud
+  // down to that neighbourhood before handing it to `layoutPointLabels` as an
+  // obstacle set — cheap coordinate comparisons only, preserving that
+  // module's own "bounded by labels, never by plot size" invariant.
+  const maxPushMm = Math.min(12, 0.4 * Math.min(geometry.plotWidth, geometry.plotHeight));
+  const reach = pointRadiusMm + 0.6 + maxPushMm;
+  const x0 = Math.min(...candidates.map((c) => c.x)) - reach;
+  const x1 = Math.max(...candidates.map((c) => c.x)) + reach;
+  const y0 = Math.min(...candidates.map((c) => c.y)) - reach;
+  const y1 = Math.max(...candidates.map((c) => c.y)) + reach;
+  const wantedSet = new Set(candidates.map((c) => c.text));
+  const series = geometry.series[0];
+  const otherPointsMm = (series?.points ?? [])
+    .filter((p) => p.label === undefined || !wantedSet.has(p.label))
+    .filter((p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1)
+    .map((p) => ({ x: p.x, y: p.y }));
+
+  const { placed } = layoutPointLabels(candidates, {
+    fontSizePt,
+    plotWidth: geometry.plotWidth,
+    plotHeight: geometry.plotHeight,
+    pointRadiusMm,
+    otherPointsMm,
+  });
+
+  const offsets = node.pointLabelOffsets ?? {};
+  return placed.map((label): ResolvedPointLabel => {
+    const off = offsets[label.text];
+    if (!off) return label;
+    const rect: Rect = {
+      x0: label.rect.x0 + off.x,
+      x1: label.rect.x1 + off.x,
+      y0: label.rect.y0 + off.y,
+      y1: label.rect.y1 + off.y,
+    };
+    const x = label.x + off.x;
+    const y = label.y + off.y;
+    const candidate = candidates.find((c) => c.text === label.text);
+    const px = candidate?.x ?? label.x;
+    const py = candidate?.y ?? label.y;
+    // Never stored — always the segment from the point to the nearest edge
+    // of the *offset* rect, so dragging a label always moves its leader with
+    // it. Once a manual offset exists a leader always draws, regardless of
+    // whether the auto layout considered this placement "adjacent": showing
+    // which point a moved label belongs to matters more once it's been
+    // dragged away from the auto-chosen spot next to it.
+    const edge = nearestRectPoint(rect, px, py);
+    return { text: label.text, color: label.color, x, y, anchor: label.anchor, leader: { x1: px, y1: py, x2: edge.x, y2: edge.y }, rect };
+  });
+}
+
+/**
+ * Drawn point names — currently volcano only, gated inside
+ * `volcanoLabelCandidates` itself. Returns `[]` whenever `volcanoLabels` is
+ * absent, so an existing figure that never used this is untouched byte for
+ * byte.
+ *
+ * Above `MAX_VECTOR_POINTS` this still works with no extra code: rasterizing
+ * only skips the per-point *marker* loop in `renderContinuousMarks` —
+ * `geometry.series[].points` (and every point's `.label`) is fully populated
+ * either way, which is what a real gene list needs, since it is routinely
+ * well over that threshold.
+ */
+function renderPointLabels(node: PlotNode, theme: Theme, geometry: ContinuousPlotGeometry): SceneNode[] {
+  const fontSizePt = node.pointLabelSizePt ?? theme.type.annotationPt;
+  const out: SceneNode[] = [];
+  for (const label of resolvePointLabels(node, theme, geometry)) {
+    if (label.leader) {
+      out.push(
+        el(
+          'path',
+          {
+            d: `M${round(label.leader.x1)} ${round(label.leader.y1)} L${round(label.leader.x2)} ${round(label.leader.y2)}`,
+            fill: 'none',
+            stroke: label.color,
+            'stroke-width': theme.stroke.hairlineMinMm,
+            'stroke-dasharray': '0.5 0.5',
+          },
+          undefined,
+          { role: 'point-label-leader' },
+        ),
+      );
+    }
+    out.push(
+      text(
+        label.text,
+        {
+          x: label.x,
+          y: label.y,
+          'font-family': theme.fontFamily,
+          'font-size': ptToMm(fontSizePt),
+          fill: label.color,
+          'text-anchor': label.anchor,
+          'dominant-baseline': 'central',
+        },
+        { role: 'point-label' },
+      ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Every labellable point on a volcano plot, in PANEL-local millimetres — the
+ * plot's own margin already added, so the app never re-derives the
+ * plot-area transform, the same one-place rule `y2WidthMm`/`scaleBarWidthMm`
+ * already follow. Used by the canvas's point-picking overlay, which is HTML
+ * above the SVG and never scene nodes, per the crop/measure precedent.
+ */
+export interface PickablePoint {
+  xMm: number;
+  yMm: number;
+  label: string;
+  radiusMm: number;
+  labelled: boolean;
+}
+
+export function pickablePointsForPlot(node: PlotNode, doc: FigureDocument, theme: Theme): PickablePoint[] {
+  const geometry = computePlotGeometry(node, doc, theme);
+  if (!geometry || geometry.kind !== 'continuous' || node.plotType !== 'volcano') return [];
+  const series = geometry.series[0];
+  if (!series) return [];
+
+  const wanted = new Set(node.volcanoLabels ?? []);
+  const radiusMm = node.pointSizeMm / 2;
+  return series.points
+    .filter((p): p is typeof p & { label: string } => p.label !== undefined)
+    .map((p) => ({
+      xMm: geometry.margin.left + p.x,
+      yMm: geometry.margin.top + p.y,
+      label: p.label,
+      radiusMm,
+      labelled: wanted.has(p.label),
+    }));
+}
+
+/**
+ * Every currently-placed point label's bounding box, in PANEL-local mm — the
+ * drag analogue of `pickablePointsForPlot`. Goes through the same
+ * `resolvePointLabels` the drawing path uses, so the app never re-derives
+ * placement or manual-offset math, the same one-place rule
+ * `y2WidthMm`/`scaleBarWidthMm` already follow.
+ */
+export interface PlacedPointLabel {
+  text: string;
+  rectMm: Rect;
+  anchor: 'start' | 'middle' | 'end';
+}
+
+export function placedPointLabelsForPlot(node: PlotNode, doc: FigureDocument, theme: Theme): PlacedPointLabel[] {
+  const geometry = computePlotGeometry(node, doc, theme);
+  if (!geometry || geometry.kind !== 'continuous' || node.plotType !== 'volcano') return [];
+  return resolvePointLabels(node, theme, geometry).map((label) => ({
+    text: label.text,
+    anchor: label.anchor,
+    rectMm: {
+      x0: geometry.margin.left + label.rect.x0,
+      x1: geometry.margin.left + label.rect.x1,
+      y0: geometry.margin.top + label.rect.y0,
+      y1: geometry.margin.top + label.rect.y1,
+    },
+  }));
+}
+
 function markerNode(
   node: PlotNode,
   theme: Theme,
@@ -2871,10 +3522,47 @@ function renderContinuousMarks(
   const totalPoints = geometry.series.reduce((sum, s) => sum + s.points.length, 0);
   const rasterizePoints = totalPoints > MAX_VECTOR_POINTS;
 
-  for (const [index, s] of geometry.series.entries()) {
+  /*
+   * A cascade paints furthest-offset first, so a nearer trace occludes the
+   * ones behind it — reversed here rather than by building `geometry.series`
+   * in reverse, which would misindex the palette/`seriesAxis` lookups below.
+   * Guarded on `cascading`, so the emitted order — and therefore the exported
+   * markup — is untouched on every figure that does not use this.
+   */
+  const cascading = hasCascadeOffset(node, geometry.series.length);
+  const order = cascading
+    ? [...geometry.series.entries()].reverse()
+    : [...geometry.series.entries()];
+
+  for (const [index, s] of order) {
     const markChildren: SceneNode[] = [];
     // Indexed by series order, the key the palette and `seriesAxis` already use.
     const shape = shapeForSeries(node, index);
+
+    /*
+     * A cascade's own fill down to its baseline, first, so the band/line/
+     * points that follow paint on top of it. Opaque by construction — see
+     * `PlotNode.offsetFill`'s own doc comment for why a translucent fill
+     * would be self-defeating here.
+     */
+    if (
+      cascading &&
+      node.offsetFill &&
+      node.offsetFill !== 'none' &&
+      s.baselineMm !== null &&
+      s.linePath &&
+      s.linePath.length > 1
+    ) {
+      const fill =
+        node.offsetFill === 'solid' ? s.color : interpolateColor(0.3, [theme.background, s.color]);
+      const first = s.linePath[0]!;
+      const last = s.linePath[s.linePath.length - 1]!;
+      const d =
+        `M${round(first.x)} ${round(s.baselineMm)} ` +
+        s.linePath.map((p) => `L${round(p.x)} ${round(p.y)}`).join(' ') +
+        ` L${round(last.x)} ${round(s.baselineMm)} Z`;
+      markChildren.push(el('path', { d, fill, stroke: 'none' }, undefined, { role: 'area' }));
+    }
 
     /*
      * The error interval, first, so the line and its points sit on top of it.
@@ -3142,10 +3830,10 @@ function renderSecondaryAxis(
       );
     }
     if (spec.showLabels) {
-      const label = scale.format(tick);
-      widest = Math.max(widest, estimateTextWidthMm(label, tickLabelPt));
+      const runs = tickLabelRuns(scale, tick);
+      widest = Math.max(widest, estimateRunsWidthMm(runs, tickLabelPt));
       out.push(
-        text(label, {
+        tickLabelNode(runs, tickLabelPt, {
           x: plotWidth + tickLen + theme.spacing.tickLabelGapMm,
           y,
           'font-family': theme.fontFamily,
@@ -3153,7 +3841,7 @@ function renderSecondaryAxis(
           fill: theme.foreground,
           'text-anchor': 'start',
           'dominant-baseline': 'central',
-        }, { role: 'tick-label' }),
+        }),
       );
     }
   }
@@ -3214,20 +3902,50 @@ function tickOffset(axis: AxisSpec, tickLen: number): number {
 }
 
 /**
- * Values between the major ticks, for the minor divisions.
+ * A tick label as one `<text>` — plain when there is a single unraised run,
+ * and a `<text>` with `<tspan>` children when a run needs a superscript.
  *
- * Derived from the majors rather than from the domain, so they line up with the
- * grid the reader is already using and cannot drift out of phase with it.
+ * `dy` plus a reduced `font-size`, never `baseline-shift`: that attribute is
+ * deprecated in SVG 2 and Firefox has never implemented it, so a figure would
+ * look right in Chromium and print flat elsewhere — and the export path
+ * (headless Chromium) and the canvas would then disagree, which is exactly
+ * the divergence the DOM-free invariant exists to prevent. `renderText`
+ * already sets the `dy` precedent for multi-line text.
+ *
+ * The single-run branch emits literally what `text(...)` emitted before this
+ * function existed, so every label that never asks for a superscript is
+ * byte-identical.
  */
-function minorTickValues(majors: readonly number[], divisions: number | undefined): number[] {
-  if (!divisions || divisions < 2 || majors.length < 2) return [];
-  const out: number[] = [];
-  for (let i = 1; i < majors.length; i++) {
-    const from = majors[i - 1]!;
-    const step = (majors[i]! - from) / divisions;
-    for (let k = 1; k < divisions; k++) out.push(from + step * k);
+function tickLabelNode(
+  runs: readonly TickLabelRun[],
+  fontSizePt: number,
+  attrs: SceneAttrs,
+  role: SceneRole = 'tick-label',
+): SceneNode {
+  if (runs.length <= 1 && !runs[0]?.sup) {
+    return text(runs[0]?.text ?? '', attrs, { role });
   }
-  return out;
+
+  const supMm = ptToMm(superscriptSizePt(fontSizePt));
+
+  // `dy` is relative to the previous tspan's baseline, not absolute — a run
+  // after a superscript has to carry a compensating positive `dy` or it
+  // stays raised, and every run after that stairsteps further. `currentRise`
+  // is the only state this needs to get that right.
+  let currentRise = 0;
+  const children = runs.map((run) => {
+    const target = run.sup ? -superscriptRiseMm(runs, fontSizePt) : 0;
+    const dy = target - currentRise;
+    currentRise = target;
+    return el(
+      'tspan',
+      { ...(dy !== 0 ? { dy } : {}), ...(run.sup ? { 'font-size': supMm } : {}) },
+      undefined,
+      { text: run.text, ...(run.sup ? { role: 'tick-label-sup' as SceneRole } : {}) },
+    );
+  });
+
+  return el('text', attrs, children, { role });
 }
 
 /**
@@ -3255,7 +3973,7 @@ function renderNumericBottomAxis(
   if (visible.length === 0) return out;
 
   const widest = visible.reduce(
-    (max, tick) => Math.max(max, estimateTextWidthMm(scale.format(tick), tickLabelPt)),
+    (max, tick) => Math.max(max, estimateRunsWidthMm(tickLabelRuns(scale, tick), tickLabelPt)),
     0,
   );
   // A gap of a quarter of the widest label keeps neighbours from touching.
@@ -3264,7 +3982,7 @@ function renderNumericBottomAxis(
 
   if (axis.showTicks) {
     // Minor ticks first, so a major tick is never drawn over by one.
-    for (const value of minorTickValues(visible, axis.minorTicks)) {
+    for (const value of minorTickValues(scale, visible, axis.minorTicks)) {
       const x = scale.scale(value);
       if (x < -0.01 || x > plotWidth + 0.01) continue;
       out.push(
@@ -3300,15 +4018,24 @@ function renderNumericBottomAxis(
     const isLast = index === visible.length - 1;
     const anchor = isFirst ? 'start' : isLast ? 'end' : 'middle';
 
+    const runs = tickLabelRuns(scale, tick);
     out.push(
-      text(scale.format(tick), {
+      tickLabelNode(runs, tickLabelPt, {
         x,
-        y: plotHeight + tickLen + theme.spacing.tickLabelGapMm + ptToMm(tickLabelPt) * 0.8,
+        // A superscript rises *above* the label's own baseline, so without
+        // this the raised exponent on a wide power10 axis would grow upward
+        // into the tick gap rather than sitting inside the label's own room.
+        y:
+          plotHeight +
+          tickLen +
+          theme.spacing.tickLabelGapMm +
+          ptToMm(tickLabelPt) * 0.8 +
+          superscriptRiseMm(runs, tickLabelPt),
         'font-family': theme.fontFamily,
         'font-size': ptToMm(tickLabelPt),
         fill: theme.foreground,
         'text-anchor': anchor,
-      }, { role: 'tick-label' }),
+      }),
     );
   });
 
@@ -3345,7 +4072,10 @@ function yTickLayout(
   let maxLabelWidth = 0;
   visibleTicks.forEach((tick, index) => {
     if (index % stride !== 0) return;
-    maxLabelWidth = Math.max(maxLabelWidth, estimateTextWidthMm(yScale.format(tick), tickLabelPt));
+    maxLabelWidth = Math.max(
+      maxLabelWidth,
+      estimateRunsWidthMm(tickLabelRuns(yScale, tick), tickLabelPt),
+    );
   });
 
   return { visibleTicks, stride, maxLabelWidth };
@@ -3391,7 +4121,20 @@ function xLabelLayout(
   const oneLine = estimateTextHeightMm(tickLabelPt);
 
   if (geometry.kind !== 'categorical' || !node.x.showLabels) {
-    return { angle: 0, budget: Infinity, depth: node.x.showLabels ? oneLine : 0 };
+    // A numeric x axis's superscript (a 'scientific'/'power10' exponent)
+    // grows *upward* from the label's own baseline — `renderNumericBottomAxis`
+    // pushes the label down to compensate, so the gutter has to be sized for
+    // that same extra reach, or the reserved room and the drawn label disagree.
+    const rise =
+      geometry.kind === 'continuous' && node.x.showLabels
+        ? Math.max(
+            0,
+            ...geometry.xScale.ticks.map((t) =>
+              superscriptRiseMm(tickLabelRuns(geometry.xScale, t), tickLabelPt),
+            ),
+          )
+        : 0;
+    return { angle: 0, budget: Infinity, depth: node.x.showLabels ? oneLine + rise : 0 };
   }
 
   // The band the labels are *drawn* against: for a two-factor plot that is the
@@ -3481,7 +4224,7 @@ function renderAxes(
   );
 
   if (node.y.showTicks) {
-    for (const value of minorTickValues(visibleTicks, node.y.minorTicks)) {
+    for (const value of minorTickValues(yScale, visibleTicks, node.y.minorTicks)) {
       const y = yScale.scale(value);
       if (y < -0.01 || y > plotHeight + 0.01) continue;
       out.push(
@@ -3502,9 +4245,8 @@ function renderAxes(
         );
       }
       if (node.y.showLabels && labelled) {
-        const label = yScale.format(tick);
         out.push(
-          text(label, {
+          tickLabelNode(tickLabelRuns(yScale, tick), tickLabelPt, {
             x: -(tickLen + theme.spacing.tickLabelGapMm),
             y,
             'font-family': theme.fontFamily,
@@ -3512,7 +4254,7 @@ function renderAxes(
             fill: theme.foreground,
             'text-anchor': 'end',
             'dominant-baseline': 'central',
-          }, { role: 'tick-label' }),
+          }),
         );
       }
     });
@@ -3553,7 +4295,6 @@ function renderAxes(
       el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
-
   // How far below the axis the labels reach, so the title clears them.
   const { angle, budget, depth: xLabelDepth } = xLabelLayout(node, theme, geometry);
 
@@ -3700,7 +4441,6 @@ function renderAxesHorizontal(
       el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
-
   out.push(...renderNumericBottomAxis(theme, node.y, yScale, plotWidth, plotHeight));
 
   if (node.y.title) {

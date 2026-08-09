@@ -81,3 +81,60 @@ export function truncateToWidth(text: string, fontSizePt: number, maxWidthMm: nu
   }
   return '…';
 }
+
+/**
+ * Superscript size and baseline rise, as fractions of the base size. 65% and
+ * 40% are the conventional typographic ratios, and exactly what `tickLabelNode`
+ * (`render-document.ts`) draws — so the measurement here and the drawing there
+ * cannot disagree, the same "composed once" discipline `scaleBarWidthMm` and
+ * `analysisInputHash` are already held to.
+ */
+const SUPERSCRIPT_SCALE = 0.65;
+const SUPERSCRIPT_RISE = 0.4;
+
+/**
+ * The absolute floor a superscript's `font-size` may reach.
+ *
+ * An exponent is not body text: Nature's 5 pt minimum (`minimumPt`) is a floor
+ * for prose and axis labels a reader has to read on their own, and clamping a
+ * 6 pt tick label's 65% exponent to that floor would make "10⁵" print as
+ * "10 5". `parity.test.tsx` and `checkTextSize` exempt the `'tick-label-sup'`
+ * role down to this floor instead — half a point under the body floor, and no
+ * lower regardless of how small the base size drops.
+ */
+export const SUPERSCRIPT_MIN_PT = 4;
+
+/**
+ * A superscript run's font size, in points.
+ *
+ * Read by both `estimateRunsWidthMm` below and `tickLabelNode`'s drawing, so
+ * neither can compute a different answer from the other.
+ */
+export function superscriptSizePt(basePt: number): number {
+  return Math.max(SUPERSCRIPT_MIN_PT, basePt * SUPERSCRIPT_SCALE);
+}
+
+/** Width of a run list, each optionally set at the reduced superscript size. */
+export function estimateRunsWidthMm(
+  runs: readonly { text: string; sup?: boolean }[],
+  fontSizePt: number,
+): number {
+  return runs.reduce(
+    (sum, run) =>
+      sum + estimateTextWidthMm(run.text, run.sup ? superscriptSizePt(fontSizePt) : fontSizePt),
+    0,
+  );
+}
+
+/**
+ * How far a run list reaches above the baseline — 0 unless something in it is
+ * raised. A superscript grows *upward* from the baseline, so a caller sizing
+ * the room above a tick label (the gap before an axis line, a category
+ * label's clearance) has to add this on top of the ordinary line height.
+ */
+export function superscriptRiseMm(
+  runs: readonly { text: string; sup?: boolean }[],
+  fontSizePt: number,
+): number {
+  return runs.some((run) => run.sup) ? fontSizePt * PT_TO_MM * SUPERSCRIPT_RISE : 0;
+}

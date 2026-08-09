@@ -203,7 +203,7 @@ describe('point cloud rasterization', () => {
 // Volcano dropped points
 // ---------------------------------------------------------------------------
 
-function volcanoDocument(csv: string): FigureDocument {
+function volcanoDocument(csv: string, patch: Partial<PlotNode> = {}): FigureDocument {
   const newId = createIdFactory();
   const base = createDocument({
     title: 'Volcano figure',
@@ -234,6 +234,10 @@ function volcanoDocument(csv: string): FigureDocument {
       datasetId: dataset.id,
       plotType: 'volcano',
     });
+
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') Object.assign(node, patch);
+    }
   });
 }
 
@@ -262,6 +266,80 @@ describe('volcano dropped points', () => {
       volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01'),
     ).score;
     expect(withDrops).toBe(clean);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Point label placement and duplicates
+// ---------------------------------------------------------------------------
+
+describe('point label placement', () => {
+  it('says nothing when every requested label is drawn', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', {
+        volcanoLabels: ['TP53', 'MYC'],
+      }),
+    ).findings;
+    expect(findings.filter((f) => f.id.startsWith('point-label-missing-'))).toEqual([]);
+  });
+
+  it('discloses a requested label that matched no point', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', {
+        volcanoLabels: ['TP53', 'DOES-NOT-EXIST'],
+      }),
+    ).findings;
+    const finding = findings.find((f) => f.id.startsWith('point-label-missing-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.title).toContain('1 of 2');
+  });
+
+  it('never costs the readiness score', () => {
+    const clean = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', { volcanoLabels: ['TP53'] }),
+    ).score;
+    const withMissing = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', {
+        volcanoLabels: ['TP53', 'DOES-NOT-EXIST'],
+      }),
+    ).score;
+    expect(withMissing).toBe(clean);
+  });
+});
+
+describe('point label duplicates', () => {
+  it('says nothing when no selected label repeats', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', {
+        volcanoLabels: ['TP53', 'MYC'],
+      }),
+    ).findings;
+    expect(findings.filter((f) => f.id.startsWith('point-label-duplicate-'))).toEqual([]);
+  });
+
+  it('discloses a selected label that names more than one row', () => {
+    const findings = reportFor(
+      volcanoDocument('Gene,log2FC,p\nDUP,2.1,0.001\nDUP,1.5,0.02\nOther,0.1,0.9', {
+        volcanoLabels: ['DUP'],
+      }),
+    ).findings;
+    const finding = findings.find((f) => f.id.startsWith('point-label-duplicate-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.detail).toContain('"DUP" (2)');
+  });
+
+  it('never costs the readiness score', () => {
+    const clean = reportFor(
+      volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', { volcanoLabels: ['TP53'] }),
+    ).score;
+    const withDup = reportFor(
+      volcanoDocument('Gene,log2FC,p\nDUP,2.1,0.001\nDUP,1.5,0.02', {
+        volcanoLabels: ['DUP'],
+      }),
+    ).score;
+    expect(withDup).toBe(clean);
   });
 });
 
@@ -327,6 +405,82 @@ describe('heatmap colour contrast', () => {
     const clean = reportFor(heatmapDocument()).score;
     const closeRamp = reportFor(heatmapDocument({ heatmapStops: ['#4575b4', '#4a78b6'] })).score;
     expect(closeRamp).toBe(clean);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cascade offset
+// ---------------------------------------------------------------------------
+
+function cascadeDocument(patch: Partial<PlotNode> = {}): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    title: 'Cascade figure',
+    widthMm: 183,
+    heightMm: 75,
+    presetId: 'nature-double',
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited('X1\tY1\tX2\tY2\n1\t2\t1\t2\n2\t4\t2\t4');
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Runs',
+      format: inferFormat(parsed.columns),
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/runs.csv',
+      sourceFilename: 'runs.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Cascade',
+      datasetId: dataset.id,
+      plotType: 'line',
+    });
+
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') Object.assign(node, patch);
+    }
+  });
+}
+
+describe('cascade offset', () => {
+  it('says nothing about an ordinary overlaid line plot', () => {
+    const findings = reportFor(cascadeDocument()).findings;
+    expect(findings.filter((f) => f.id.startsWith('cascade-offset-'))).toEqual([]);
+  });
+
+  it('discloses the offset once one is set', () => {
+    const findings = reportFor(cascadeDocument({ offsetStepMm: 10 })).findings;
+    const finding = findings.find((f) => f.id.startsWith('cascade-offset-'));
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('info');
+    expect(finding?.title).toContain('2');
+    expect(finding?.detail).toContain('10 mm');
+  });
+
+  it('never costs the readiness score', () => {
+    const clean = reportFor(cascadeDocument()).score;
+    const cascaded = reportFor(cascadeDocument({ offsetStepMm: 10 })).score;
+    expect(cascaded).toBe(clean);
+  });
+
+  it("reports an undersized depth-axis label/title through the ordinary text-size rule", () => {
+    // `THEME_SIZE_KEYS` maps 'cascade-axis-label'/'cascade-axis-title' onto
+    // the theme's ordinary tickLabelPt/axisTitlePt — proving they're wired,
+    // the same way every other themed role already is.
+    const doc = cascadeDocument({ offsetStepMm: 10, showCascadeAxis: true, cascadeAxisTitle: 'X' });
+    const theme = resolveTheme('nature', {
+      type: { ...NATURE_THEME.type, tickLabelPt: 3, axisTitlePt: 3 },
+    });
+    const ids = report(doc, theme).findings.map((f) => f.id);
+    expect(ids).toContain('text-below-minimum-theme');
   });
 });
 
@@ -699,6 +853,83 @@ describe('text size fixes', () => {
     expect(finding.severity).toBe('warning');
     const { fixed } = applyThroughStore(doc, finding);
     expect(report(fixed).findings.map((f) => f.id)).not.toContain('text-above-maximum-override');
+  });
+
+  it('does not flag a superscripted axis exponent as undersized text', () => {
+    // A 65% superscript on a 6 pt tick label is 3.9 pt — genuinely below
+    // `minimumPt` (5). Flagging it would report a defect the renderer creates
+    // on purpose every time an axis uses scientific/power-of-ten notation.
+    const doc = editDocument(
+      createDocument({
+        widthMm: 183,
+        heightMm: 75,
+        presetId: 'nature-double',
+        idFactory: createIdFactory(),
+        now: () => '2026-01-01T00:00:00.000Z',
+      }),
+      (draft) => {
+        const newId = createIdFactory();
+        const parsed = parseDelimited('Dose,Response\n1,100\n2,1000\n3,10000\n4,100000');
+        const dataset: Dataset = {
+          id: newId(),
+          name: 'Dose response',
+          format: inferFormat(parsed.columns),
+          columns: parsed.columns,
+          rows: parsed.rows,
+          sourcePath: 'data/power10.csv',
+          sourceFilename: 'power10.csv',
+          importedAt: '2026-01-01T00:00:00.000Z',
+        };
+        draft.datasets = [dataset];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 2, y: 2, width: 80, height: 60 },
+          name: 'Dose response',
+          datasetId: dataset.id,
+          plotType: 'scatter',
+        });
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') {
+            node.y.scale = 'log10';
+            node.y.labelFormat = 'power10';
+          }
+        }
+      },
+    );
+
+    const ids = report(doc).findings.map((f) => f.id);
+    expect(ids).not.toContain('text-below-minimum-override');
+    expect(ids).not.toContain('text-below-minimum-theme');
+  });
+
+  it('still flags an ordinary 4 pt label as undersized', () => {
+    // The exemption above must be specific to the superscript role, not a
+    // general loosening of the floor.
+    const { doc } = undersizedLabel();
+    expect(report(doc).findings.map((f) => f.id)).toContain('text-below-minimum-override');
+  });
+
+  it("recognises a volcano's pointLabelSizePt as an author override, not a theme size", () => {
+    // PlotNode has no `style`, unlike the other roles this rule already
+    // covers — without `ownFontSizePt`'s generalisation this would silently
+    // fall into the no-fix theme bucket even though the author set it.
+    const doc = volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', {
+      volcanoLabels: ['TP53'],
+      pointLabelSizePt: 3,
+    });
+    const finding = findingById(doc, 'text-below-minimum-override');
+    expect(finding.fix).toBeDefined();
+    const { fixed } = applyThroughStore(doc, finding);
+    expect(report(fixed).findings.map((f) => f.id)).not.toContain('text-below-minimum-override');
+    const plot = Object.values(fixed.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.pointLabelSizePt).toBe(NATURE_THEME.type.minimumPt);
+  });
+
+  it('still reports the theme annotation size when no volcano sets its own label size', () => {
+    const doc = volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001', { volcanoLabels: ['TP53'] });
+    const theme = resolveTheme('nature', { type: { ...NATURE_THEME.type, annotationPt: 3 } });
+    const finding = findingById(doc, 'text-below-minimum-theme', theme);
+    expect(finding.fix).toBeUndefined();
+    expect(report(doc, theme).findings.map((f) => f.id)).not.toContain('text-below-minimum-override');
   });
 });
 

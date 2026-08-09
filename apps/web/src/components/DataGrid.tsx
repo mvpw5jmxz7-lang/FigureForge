@@ -12,7 +12,7 @@
  * virtualisation model for a table that is nearly always under a hundred rows.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   copyBlock,
   editDataset,
@@ -43,10 +43,28 @@ export function DataGrid({
   api,
   dataset,
   onClose,
+  onRowRangeChange,
+  markedRows,
+  rowAction,
 }: {
   api: DocumentApi;
   dataset: Dataset;
   onClose: () => void;
+  /** Rows the current selection covers — a single cell counts as a range of
+   *  one. Fires on every change; the caller decides what, if anything, to
+   *  do with it (volcano point labelling is the one consumer today). */
+  onRowRangeChange?: (rows: { r0: number; r1: number } | null) => void;
+  /** Rows to mark with a dot in the row header — e.g. genes already labelled
+   *  on a volcano plot bound to this dataset. */
+  markedRows?: ReadonlySet<number>;
+  /** One caller-supplied action over the currently selected rows, rendered
+   *  as a button in the grid's own header row, disabled with a stated reason
+   *  the same `minGroupsMet`-style way the rest of the app already uses. */
+  rowAction?: {
+    label: string;
+    disabledReason: string | null;
+    onApply: (r0: number, r1: number) => void;
+  };
 }) {
   const { commit } = api;
   const [cursor, setCursor] = useState<Cursor | null>(null);
@@ -315,6 +333,24 @@ export function DataGrid({
     c1: Math.max(anchor.col, rangeEnd.col),
   };
 
+  // A single selected cell still reports its own row — `rowAction` needs to
+  // work from a plain click, not only a drag — computed here rather than at
+  // each of the three places `anchor`/`rangeEnd` change, so there is exactly
+  // one place that turns "what's selected" into "which rows that covers".
+  const rowRange = useMemo(
+    () => ({
+      r0: Math.min(anchor.row, (rangeEnd ?? anchor).row),
+      r1: Math.max(anchor.row, (rangeEnd ?? anchor).row),
+    }),
+    [anchor.row, rangeEnd],
+  );
+  useEffect(() => {
+    onRowRangeChange?.(rowRange);
+    return () => onRowRangeChange?.(null);
+    // Depends on the row numbers themselves, not the freshly-built object —
+    // `rowRange` would otherwise differ by reference on every render.
+  }, [rowRange.r0, rowRange.r1]);
+
   return (
     <div
       className="data-grid"
@@ -329,6 +365,15 @@ export function DataGrid({
         <span className="muted">
           {dataset.rows.length} rows × {dataset.columns.length} columns
         </span>
+        {rowAction && (
+          <button
+            disabled={rowAction.disabledReason !== null}
+            title={rowAction.disabledReason ?? undefined}
+            onClick={() => rowAction.onApply(rowRange.r0, rowRange.r1)}
+          >
+            {rowAction.label}
+          </button>
+        )}
         <button onClick={onClose}>Done</button>
       </div>
 
@@ -384,6 +429,9 @@ export function DataGrid({
               <tr key={r}>
                 <th className="row-head">
                   <span>{r + 1}</span>
+                  {markedRows?.has(r) && (
+                    <span className="row-marker" title="Already labelled on the plot" />
+                  )}
                   <button
                     className="danger"
                     title="Delete this row"

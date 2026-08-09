@@ -64,7 +64,7 @@ const axisSchema = z.object({
   min: finite.nullable(),
   max: finite.nullable(),
   tickStep: finite.positive().nullable(),
-  scale: z.enum(['linear', 'log10']),
+  scale: z.enum(['linear', 'log10', 'symlog']),
   showLine: z.boolean(),
   showTicks: z.boolean(),
   showLabels: z.boolean(),
@@ -73,6 +73,10 @@ const axisSchema = z.object({
   minorTicks: z.number().int().min(0).max(20).optional(),
   tickDirection: z.enum(['out', 'in']).optional(),
   breaks: z.array(z.object({ from: finite, to: finite })).optional(),
+  labelFormat: z.enum(['auto', 'plain', 'scientific', 'power10']).optional(),
+  labelDecimals: z.number().int().min(0).max(6).optional(),
+  linthresh: finite.positive().optional(),
+  clipToRange: z.boolean().optional(),
 });
 
 const panelSchema = z.object({
@@ -171,6 +175,11 @@ const plotSchema = z.object({
     .object({ down: z.string(), ns: z.string(), up: z.string() })
     .optional(),
   volcanoThresholdLines: z.enum(['show', 'hide']).optional(),
+  // Deliberately no `.max()` — see the field's own doc comment in nodes.ts.
+  volcanoLabels: z.array(z.string()).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  pointLabelOffsets: z.record(z.string(), pointSchema).optional(),
+  pointLabelSizePt: finite.positive().optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   heatmapScale: z.enum(['sequential', 'diverging']).optional(),
   heatmapStops: z.array(z.string()).optional(),
@@ -179,6 +188,12 @@ const plotSchema = z.object({
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   showCensorMarks: z.boolean().optional(),
   showSurvivalCI: z.boolean().optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  offsetStepMm: finite.optional(),
+  offsetStepXMm: finite.optional(),
+  offsetFill: z.enum(['none', 'tint', 'solid']).optional(),
+  showCascadeAxis: z.boolean().optional(),
+  cascadeAxisTitle: z.string().optional(),
 });
 
 const imageSchema = z.object({

@@ -208,6 +208,22 @@ export const LINE_STYLES: readonly LineStyle[] = ['solid', 'dashed', 'dotted', '
 
 export type CenterKind = 'mean' | 'median';
 
+/**
+ * How a numeric tick prints.
+ *
+ *   'auto'        today's `formatTick` exactly — significant figures, an
+ *                 en-dash minus, and an ×10^n fallback outside 1e-3…1e5.
+ *   'plain'       never exponential, regardless of magnitude.
+ *   'scientific'  always mantissa × 10ⁿ, with a real superscript exponent.
+ *   'power10'     10ⁿ alone, for a log/symlog axis whose ticks are decades. A
+ *                 tick that is not itself a clean power of ten falls back to
+ *                 'scientific' — a bare exponent would misstate it.
+ *
+ * Absent reads as 'auto', which routes through the unchanged `formatTick`, so
+ * every figure saved before this existed is byte-identical.
+ */
+export type LabelFormat = 'auto' | 'plain' | 'scientific' | 'power10';
+
 export interface AxisSpec {
   title: string;
   /** Null on either bound means "derive from data". */
@@ -215,7 +231,7 @@ export interface AxisSpec {
   max: number | null;
   /** Null means "choose a readable tick step". */
   tickStep: number | null;
-  scale: 'linear' | 'log10';
+  scale: 'linear' | 'log10' | 'symlog';
   showLine: boolean;
   showTicks: boolean;
   showLabels: boolean;
@@ -237,6 +253,40 @@ export interface AxisSpec {
    * pinned to the break would be read as data at that value.
    */
   breaks?: readonly { from: number; to: number }[];
+  /** See `LabelFormat`. Absent is 'auto'. */
+  labelFormat?: LabelFormat;
+  /** Fixed decimal places for 'plain'/'scientific'. Absent derives from the
+   *  tick step, the same rule 'auto' already uses. */
+  labelDecimals?: number;
+  /**
+   * A symlog axis's linear-region half-width: `|v| ≤ linthresh` maps linearly,
+   * beyond it the axis is log-shaped on each side of zero. Symlog only.
+   *
+   * Absent auto-derives (see `packages/plots`' `defaultLinthresh`) rather than
+   * storing a computed default — unlike `log10`'s threshold, which decides
+   * which *data* are dropped, this is purely presentational, so an unhelpful
+   * auto value is cosmetic and this field is the one-field fix rather than a
+   * value that would need recomputing as the data changes.
+   */
+  linthresh?: number;
+  /**
+   * Drop a mark whose value falls outside `min`/`max` rather than letting it
+   * draw past the plot rectangle. Absent/false is today's behaviour: a scale
+   * extrapolates for an out-of-domain input, so a point outside the declared
+   * range currently overflows the panel uncontained.
+   *
+   * Meaningless with both `min` and `max` absent — there is no range to clip
+   * to — so the Inspector hides the control until at least one is set, and
+   * `continuousGeometry` re-checks the same condition before threading this
+   * through, so a hand-edited file that sets it with no bounds is a true
+   * no-op rather than clipping against the auto-derived, padded domain.
+   *
+   * Continuous plot types only (scatter/line/volcano) — the ones whose marks
+   * are built by `xyMarks`. A histogram's x is bin edges and its y a derived
+   * count, and survival's y is hardcoded to `[0, 1]` and never reads this;
+   * neither goes through `xyMarks`.
+   */
+  clipToRange?: boolean;
 }
 
 export interface PlotNode extends NodeBase {
@@ -414,6 +464,49 @@ export interface PlotNode extends NodeBase {
    * no optional boolean here defaults to `true` when absent.
    */
   volcanoThresholdLines?: 'show' | 'hide';
+  /**
+   * Which points carry a drawn name, keyed on the LABEL STRING rather than a
+   * row index.
+   *
+   * A row index is the wrong key twice over: the data grid can insert, delete
+   * and reorder rows, and `numericPairsAt` drops any row with a missing
+   * label, fold change or p-value — so a dataset row index and a series
+   * point index are already different numbers. A label is the identity the
+   * author actually selected, and it survives both.
+   *
+   * A duplicate label (two probes for one gene) labels *every* matching
+   * point, not the first — labelling one of two identically-named points
+   * draws a name beside a point the reader cannot distinguish from the
+   * unlabelled one, which is a false attribution rather than a missing one.
+   *
+   * Deliberately not capped in the schema: `loadArchive` throws on a
+   * validation failure, so a `.max(25)` here would make a hand-edited file
+   * unopenable. The cap is enforced in the UI and, as a backstop, by
+   * `layoutPointLabels` truncating in a defined order. Volcano only.
+   */
+  volcanoLabels?: readonly string[];
+  /**
+   * Manual displacement of a placed point label from where `layoutPointLabels`
+   * put it, keyed by label TEXT — the same key `volcanoLabels` uses, so two
+   * identically-named points share one offset, the same accepted limitation
+   * they already share one auto-placement slot and one colour under.
+   *
+   * A delta on top of a freshly recomputed auto placement, not an absolute
+   * position — the same "auto base, stored delta" split `BracketNode.userOffsetMm`
+   * uses, so adding or removing other labels re-flows this one's neighbours
+   * correctly rather than pinning it to a page position that could drift out
+   * of sync with its point.
+   *
+   * Plot-area-local millimetres, the same space `LabelCandidate.x/y` use.
+   * Volcano only.
+   */
+  pointLabelOffsets?: Readonly<Record<string, { x: number; y: number }>>;
+  /**
+   * Font size point labels draw at, in points. Absent falls back to
+   * `theme.type.annotationPt`, the same "absent is the theme value" rule
+   * every other themed role already follows. Volcano only.
+   */
+  pointLabelSizePt?: number;
   /** How a heatmap's colour domain is built. Absent is `'sequential'`. Heatmap only. */
   heatmapScale?: HeatmapScaleMode;
   /**
@@ -443,6 +536,51 @@ export interface PlotNode extends NodeBase {
    * Survival only.
    */
   showSurvivalCI?: boolean;
+  /**
+   * Vertical cascade/ridgeline offset in mm between adjacent series, applied
+   * cumulatively by series order (series 2 sits `offsetStepMm` above series
+   * 1, series 3 twice that, and so on).
+   *
+   * Deliberately millimetres, not a data quantity: the whole point of a
+   * ridgeline is that the separation is not readable off the value axis, and
+   * expressing it in data units would invite reading it as one. It also
+   * survives an axis rescale unchanged. Absent or 0 draws exactly as today —
+   * offered only for a line plot with more than one series (`isCascadable`
+   * in `packages/render`).
+   */
+  offsetStepMm?: number;
+  /**
+   * Horizontal companion to `offsetStepMm`, for the reference figure's
+   * sideways "3-D" displacement. Absent is 0 — a purely vertical stack — so
+   * the sideways variant is opt-in.
+   */
+  offsetStepXMm?: number;
+  /**
+   * How a cascaded trace's area under it is drawn. Absent is `'none'`.
+   * `'tint'`/`'solid'` are both fully opaque — a translucent fill that is
+   * meant to occlude the traces behind it is a contradiction, and opacity
+   * sidesteps the PostScript-alpha question this project already measured
+   * once (see CLAUDE.md). Ignored unless an offset is actually set.
+   */
+  offsetFill?: 'none' | 'tint' | 'solid';
+  /**
+   * Draw a schematic depth axis beside a cascade: one tick per series,
+   * labelled with the series name, and — per contiguous run of series
+   * sharing a `category` (or the whole cascade when none has one) — an end
+   * bracket and a group caption. Absent/false draws nothing extra, so an
+   * existing cascade figure is untouched. Meaningless, and hidden by the
+   * Inspector, unless a cascade offset is already in effect.
+   */
+  showCascadeAxis?: boolean;
+  /**
+   * Freeform caption for the cascade depth axis's single implicit group —
+   * used only when no series carries a `category` at all (the common
+   * single-group case), so there is one shared axis to caption rather than
+   * per-series groups with their own name already. Ignored once any series
+   * has a `category`, where each group is captioned by that category string
+   * instead. e.g. "Concentration (mg/mL)".
+   */
+  cascadeAxisTitle?: string;
 }
 
 export interface ImageNode extends NodeBase {

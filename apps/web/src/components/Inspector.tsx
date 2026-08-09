@@ -36,6 +36,7 @@ import {
   type AxisSpec,
   type FigureNode,
   type HeatmapScaleMode,
+  type LabelFormat,
   type LineStyle,
   type NodeId,
   type PlotNode,
@@ -48,6 +49,11 @@ import {
   DEFAULT_HEATMAP_MISSING_COLOR,
   DEFAULT_HEATMAP_STOPS,
   DEFAULT_VOLCANO_COLORS,
+  MAX_POINT_LABELS,
+  computePlotGeometry,
+  hasCascadeOffset,
+  isCascadable,
+  offsetReserveMm,
   reflowBrackets,
 } from '@figureforge/render';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
@@ -137,10 +143,16 @@ const VOLCANO_CATEGORY_LABELS: Record<VolcanoCategory, string> = {
  */
 function VolcanoColorControls({
   node,
+  theme,
   setPlot,
+  picking,
+  onLabelPickNodeChange,
 }: {
   node: PlotNode;
+  theme: Theme;
   setPlot: (label: string, patch: Partial<PlotNode>) => void;
+  picking: boolean;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
 }) {
   const thresholds = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
   const colors = { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors };
@@ -217,6 +229,104 @@ function VolcanoColorControls({
           {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
           {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
         </p>
+      )}
+
+      <VolcanoLabelControls
+        node={node}
+        theme={theme}
+        setPlot={setPlot}
+        picking={picking}
+        onLabelPickNodeChange={onLabelPickNodeChange}
+      />
+    </>
+  );
+}
+
+/**
+ * Which points carry a drawn name. Selection itself happens two other ways —
+ * a range in the Data tab's grid, or a click on the canvas — this is where
+ * the current set is reviewed, toggled from the canvas, and pruned, since
+ * every route unions into the same field rather than replacing it.
+ */
+function VolcanoLabelControls({
+  node,
+  theme,
+  setPlot,
+  picking,
+  onLabelPickNodeChange,
+}: {
+  node: PlotNode;
+  theme: Theme;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+  picking: boolean;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
+}) {
+  const labels = node.volcanoLabels ?? [];
+
+  return (
+    <>
+      <h4>Labels</h4>
+      <button
+        className={picking ? 'active' : ''}
+        onClick={() => onLabelPickNodeChange(picking ? null : node.id)}
+      >
+        {picking ? 'Done picking' : 'Pick labels on canvas…'}
+      </button>
+      <label className="field">
+        Label size (pt)
+        <input
+          type="number"
+          min={4}
+          step={0.5}
+          value={node.pointLabelSizePt ?? theme.type.annotationPt}
+          onChange={(e) => {
+            const pt = Number(e.target.value);
+            if (Number.isFinite(pt) && pt > 0) setPlot('Change label size', { pointLabelSizePt: pt });
+          }}
+        />
+      </label>
+      <p className="hint">
+        {labels.length} of {MAX_POINT_LABELS} selected. Select rows in the Data tab's grid, or
+        click points on the canvas, to add more.
+        {labels.length >= MAX_POINT_LABELS &&
+          ' The maximum is reached — past this a key stops being readable and the leaders cross.'}
+      </p>
+      {labels.length > 0 && (
+        <ul className="list compact">
+          {labels.map((name) => {
+            const moved = node.pointLabelOffsets?.[name] !== undefined;
+            return (
+              <li key={name}>
+                <span>{name}</span>
+                {moved && (
+                  <button
+                    className="icon"
+                    title={`Reset ${name}'s position`}
+                    onClick={() => {
+                      const { [name]: _dropped, ...rest } = node.pointLabelOffsets ?? {};
+                      setPlot('Reset label position', {
+                        pointLabelOffsets: Object.keys(rest).length > 0 ? rest : undefined,
+                      });
+                    }}
+                  >
+                    ⟲
+                  </button>
+                )}
+                <button
+                  className="icon danger"
+                  title={`Remove ${name}`}
+                  onClick={() =>
+                    setPlot('Remove point label', {
+                      volcanoLabels: labels.filter((l) => l !== name),
+                    })
+                  }
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </>
   );
@@ -334,6 +444,9 @@ export interface InspectorProps {
   measureNodeId: NodeId | null;
   measuredPx: number | null;
   onMeasureNodeChange: (id: NodeId | null) => void;
+  /** Volcano plot whose points are being picked directly on the canvas. */
+  labelPickNodeId: NodeId | null;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
 }
 
 export function InspectorTab({
@@ -346,6 +459,8 @@ export function InspectorTab({
   measureNodeId,
   measuredPx,
   onMeasureNodeChange,
+  labelPickNodeId,
+  onLabelPickNodeChange,
 }: InspectorProps) {
   const { document: doc, commit } = api;
 
@@ -406,7 +521,16 @@ export function InspectorTab({
         <input value={node.name} onChange={(e) => set('Rename node', { name: e.target.value })} />
       </label>
 
-      {node.type === 'plot' && <PlotFields api={api} theme={theme} node={node} doc={doc} />}
+      {node.type === 'plot' && (
+        <PlotFields
+          api={api}
+          theme={theme}
+          node={node}
+          doc={doc}
+          picking={labelPickNodeId === node.id}
+          onLabelPickNodeChange={onLabelPickNodeChange}
+        />
+      )}
       {(node.type === 'text' || node.type === 'panel-label') && (
         <TextFields api={api} node={node} />
       )}
@@ -562,11 +686,16 @@ function PlotFields({
   theme,
   node,
   doc,
+  picking,
+  onLabelPickNodeChange,
 }: {
   api: DocumentApi;
   theme: Theme;
   node: PlotNode;
   doc: FigureDocument;
+  /** True while this plot's points are being picked directly on the canvas. */
+  picking: boolean;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
 }) {
   const { commit } = api;
   const dataset = findDataset(doc, node.datasetId);
@@ -706,6 +835,15 @@ function PlotFields({
   const barLike = node.plotType === 'bar' || node.plotType === 'bar-dot';
   const markWord = barLike ? 'bars' : 'marks';
 
+  /*
+   * "Hide points outside min/max" only affects a plot whose marks `xyMarks`
+   * builds — a histogram's x is bin edges and its y a derived count, and
+   * survival's y is hardcoded to [0, 1] and never reads this either, since
+   * neither goes through `xyMarks`.
+   */
+  const clipToRangeRelevant =
+    node.plotType === 'scatter' || node.plotType === 'line' || node.plotType === 'volcano';
+
   return (
     <>
       <h4>Data</h4>
@@ -759,7 +897,13 @@ function PlotFields({
       )}
 
       {node.plotType === 'volcano' ? (
-        <VolcanoColorControls node={node} setPlot={setPlot} />
+        <VolcanoColorControls
+          node={node}
+          theme={theme}
+          setPlot={setPlot}
+          picking={picking}
+          onLabelPickNodeChange={onLabelPickNodeChange}
+        />
       ) : node.plotType === 'heatmap' ? (
         <HeatmapColorControls node={node} setPlot={setPlot} />
       ) : (
@@ -1007,7 +1151,9 @@ function PlotFields({
                   }
                 >
                   <option value="bars">Bars at each point</option>
-                  <option value="band">Shaded band</option>
+                  {(!node.offsetFill || node.offsetFill === 'none') && (
+                    <option value="band">Shaded band</option>
+                  )}
                 </select>
               </label>
               <label className="check">
@@ -1025,6 +1171,9 @@ function PlotFields({
                 table with replicate columns per series. With one value per x there is no
                 interval, so nothing is drawn rather than a hairline. Showing every replicate
                 draws the individual measurements behind the means.
+                {node.offsetFill && node.offsetFill !== 'none'
+                  ? ' A shaded band is unavailable while a cascade fill is on — a translucent interval under a filled trace has no reading.'
+                  : ''}
               </p>
             </>
           )}
@@ -1161,12 +1310,17 @@ function PlotFields({
         </label>
       )}
 
+      {node.plotType === 'line' && series.length > 1 && (
+        <CascadeControls node={node} doc={doc} theme={theme} series={series} setPlot={setPlot} />
+      )}
+
       <h4>Axes</h4>
       <AxisFields
         label="Y"
         axis={node.y}
         seriesValues={series.flatMap((s) => s.values)}
         numeric={node.plotType !== 'heatmap' && node.plotType !== 'survival'}
+        clipRelevant={clipToRangeRelevant}
         onChange={(patch, label) => setPlot(label, { y: { ...node.y, ...patch } })}
       />
       <AxisFields
@@ -1174,11 +1328,18 @@ function PlotFields({
         axis={node.x}
         seriesValues={series.flatMap((s) => [...(s.x ?? [])])}
         numeric={CONTINUOUS_X_PLOT_TYPES.has(node.plotType)}
+        clipRelevant={clipToRangeRelevant}
         onChange={(patch, label) => setPlot(label, { x: { ...node.x, ...patch } })}
       />
 
       <h4>Second y axis</h4>
-      {CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
+      {hasCascadeOffset(node, series.length) ? (
+        <p className="hint">
+          A cascade already spends the vertical axis on separation — comparing traces against
+          different probability scales while they are also offset for display would defeat the
+          point of either. Reduce the offset to 0 to use a second axis instead.
+        </p>
+      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
       node.plotType !== 'volcano' &&
       node.plotType !== 'survival' ? (
         <>
@@ -1203,6 +1364,7 @@ function PlotFields({
                 seriesValues={series
                   .filter((_, i) => node.seriesAxis?.[i] === 'y2')
                   .flatMap((s) => s.values)}
+                clipRelevant={clipToRangeRelevant}
                 onChange={(patch, label) => setPlot(label, { y2: { ...node.y2!, ...patch } })}
               />
               <div className="swatches">
@@ -1242,6 +1404,125 @@ function PlotFields({
 }
 
 /**
+ * Cascade / ridgeline offset controls for a multi-series line plot.
+ *
+ * Reads the plot's own gross plot-area size through `computePlotGeometry`
+ * rather than approximating one from the panel frame, so the live readout of
+ * `offsetReserveMm` can never disagree with what the renderer is about to
+ * spend.
+ */
+function CascadeControls({
+  node,
+  doc,
+  theme,
+  series,
+  setPlot,
+}: {
+  node: PlotNode;
+  doc: FigureDocument;
+  theme: Theme;
+  series: ReturnType<typeof toSeries>;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+}) {
+  if (!isCascadable(node, series.length)) return null;
+
+  const geometry = computePlotGeometry(node, doc, theme);
+  const reserve = offsetReserveMm(node, series.length, geometry?.plotWidth ?? 0, geometry?.plotHeight ?? 0);
+  const active = hasCascadeOffset(node, series.length);
+
+  return (
+    <>
+      <h4>Cascade</h4>
+      <label className="field">
+        Offset per trace (mm)
+        <input
+          type="number"
+          step={0.5}
+          value={node.offsetStepMm ?? 0}
+          onChange={(e) =>
+            setPlot('Set cascade offset', { offsetStepMm: Number(e.target.value) || undefined })
+          }
+        />
+      </label>
+      <label className="field">
+        Sideways offset (mm)
+        <input
+          type="number"
+          step={0.5}
+          value={node.offsetStepXMm ?? 0}
+          onChange={(e) =>
+            setPlot('Set cascade sideways offset', {
+              offsetStepXMm: Number(e.target.value) || undefined,
+            })
+          }
+        />
+      </label>
+      <label className="field">
+        Fill
+        <select
+          value={node.offsetFill ?? 'none'}
+          onChange={(e) =>
+            setPlot('Set cascade fill', { offsetFill: e.target.value as 'none' | 'tint' | 'solid' })
+          }
+        >
+          <option value="none">None</option>
+          <option value="tint">Tint</option>
+          <option value="solid">Solid</option>
+        </select>
+      </label>
+      {active && geometry && (
+        <p className="hint">
+          {reserve.y > 0 && (
+            <>
+              Uses {formatMm(reserve.y, doc.page.displayUnit)} of the{' '}
+              {formatMm(geometry.plotHeight, doc.page.displayUnit)} plot height.{' '}
+            </>
+          )}
+          {reserve.x > 0 && (
+            <>
+              Uses {formatMm(reserve.x, doc.page.displayUnit)} of the{' '}
+              {formatMm(geometry.plotWidth, doc.page.displayUnit)} plot width.
+            </>
+          )}
+        </p>
+      )}
+      {active && (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.showCascadeAxis ?? false}
+              onChange={(e) => setPlot('Toggle cascade depth axis', { showCascadeAxis: e.target.checked })}
+            />
+            Show depth axis
+          </label>
+          {node.showCascadeAxis &&
+            (series.some((s) => s.category) ? (
+              <p className="hint">
+                Each group of traces sharing a category gets its own bracket and label from the
+                data — no title needed here.
+              </p>
+            ) : (
+              <label className="field block">
+                Depth axis title
+                <input
+                  value={node.cascadeAxisTitle ?? ''}
+                  placeholder="e.g. Concentration (mg/mL)"
+                  onChange={(e) =>
+                    setPlot('Change depth axis title', {
+                      cascadeAxisTitle: e.target.value || undefined,
+                    })
+                  }
+                />
+              </label>
+            ))}
+        </>
+      )}
+    </>
+  );
+}
+
+/**
  * The controls for one axis.
  *
  * Every field here was already in the model and honoured by the renderer, with
@@ -1254,6 +1535,7 @@ function AxisFields({
   axis,
   seriesValues,
   numeric = true,
+  clipRelevant = false,
   onChange,
 }: {
   label: string;
@@ -1262,6 +1544,9 @@ function AxisFields({
   seriesValues: readonly number[];
   /** False for a categorical x axis, which has no numeric bounds to set. */
   numeric?: boolean;
+  /** True on scatter/line/volcano, the plot types whose marks `xyMarks`
+   *  builds — the only ones "hide points outside min/max" can affect. */
+  clipRelevant?: boolean;
   onChange: (patch: Partial<AxisSpec>, undoLabel: string) => void;
 }) {
   const nonPositive = seriesValues.filter((v) => Number.isFinite(v) && v <= 0).length;
@@ -1306,46 +1591,172 @@ function AxisFields({
               Scale
               <select
                 value={axis.scale}
-                onChange={(e) =>
-                  onChange({ scale: e.target.value as 'linear' | 'log10' }, `Change ${label} scale`)
-                }
+                onChange={(e) => {
+                  const nextScale = e.target.value as 'linear' | 'log10' | 'symlog';
+                  // Written in the same patch — one undo entry — so a new
+                  // symlog axis reads its powers of ten out of the box, while
+                  // every existing log figure, whose labelFormat is absent,
+                  // is untouched and stays on 'auto'.
+                  onChange(
+                    nextScale === 'symlog'
+                      ? { scale: nextScale, labelFormat: 'power10' }
+                      : { scale: nextScale },
+                    `Change ${label} scale`,
+                  );
+                }}
               >
                 <option value="linear">Linear</option>
                 <option value="log10">Log₁₀</option>
+                <option value="symlog">Symlog (linear near zero)</option>
               </select>
             </label>
             {numberField('tickStep', 'Tick step')}
           </div>
 
+          {axis.scale === 'symlog' && (
+            <label className="field block">
+              Linear threshold
+              <input
+                type="number"
+                min={0}
+                step="any"
+                value={axis.linthresh ?? ''}
+                placeholder="auto"
+                onChange={(e) => {
+                  const raw = e.target.value.trim();
+                  if (raw === '') {
+                    return onChange({ linthresh: undefined }, `Clear ${label} linear threshold`);
+                  }
+                  const value = Number(raw);
+                  if (Number.isFinite(value) && value > 0) {
+                    onChange({ linthresh: value }, `Change ${label} linear threshold`);
+                  }
+                }}
+              />
+            </label>
+          )}
+
           {axis.scale === 'log10' && nonPositive > 0 && (
             <p className="warning">
               {nonPositive} value{nonPositive === 1 ? '' : 's'} at or below zero cannot be
               placed on a log axis. The domain is clamped to a decade below the smallest
-              positive datum, so those points are not drawn.
+              positive datum, so those points are not drawn. A symmetric log (Symlog) axis
+              would draw them, including a true zero.
             </p>
           )}
+          {axis.scale === 'symlog' && nonPositive > 0 && (
+            <p className="hint">
+              {nonPositive} value{nonPositive === 1 ? '' : 's'} at or below zero {nonPositive === 1 ? 'is' : 'are'}{' '}
+              drawn — this axis is linear near zero and logarithmic beyond it on each side, so a
+              true 0 has a real position.
+            </p>
+          )}
+
+          <div className="field-row">
+            <label className="field">
+              Labels
+              <select
+                value={axis.labelFormat ?? 'auto'}
+                onChange={(e) =>
+                  onChange(
+                    { labelFormat: e.target.value as LabelFormat },
+                    `Change ${label} number format`,
+                  )
+                }
+              >
+                <option value="auto">Automatic</option>
+                <option value="plain">Plain</option>
+                <option value="scientific">Scientific (m×10ⁿ)</option>
+                {/* Offered only where most ticks actually land on a power of
+                    ten — on a linear axis nearly every one would fall through
+                    to 'scientific' instead, a control that mostly does
+                    something other than what it says. */}
+                {axis.scale !== 'linear' && (
+                  <option value="power10">Powers of ten (10ⁿ)</option>
+                )}
+              </select>
+            </label>
+            {(axis.labelFormat === 'plain' || axis.labelFormat === 'scientific') && (
+              <label className="field">
+                Decimals
+                <input
+                  type="number"
+                  min={0}
+                  max={6}
+                  step={1}
+                  value={axis.labelDecimals ?? ''}
+                  placeholder="auto"
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    if (raw === '') {
+                      return onChange({ labelDecimals: undefined }, `Clear ${label} decimals`);
+                    }
+                    const value = Math.max(0, Math.min(6, Math.round(Number(raw) || 0)));
+                    onChange({ labelDecimals: value }, `Change ${label} decimals`);
+                  }}
+                />
+              </label>
+            )}
+          </div>
 
           <div className="field-row">
             {numberField('min', 'Min')}
             {numberField('max', 'Max')}
           </div>
 
-          <div className="field-row">
-            <label className="field">
-              Minor ticks
+          {/* Meaningless — and hidden — with neither bound set: there is no
+              range to clip to, so a control that visibly does nothing would
+              be exactly the defect this pattern already avoids elsewhere. */}
+          {clipRelevant && (axis.min !== null || axis.max !== null) && (
+            <label className="check">
               <input
-                type="number"
-                min={0}
-                max={20}
-                step={1}
-                value={axis.minorTicks ?? 0}
-                title="Divisions between major ticks; 0 for none"
-                onChange={(e) => {
-                  const value = Math.max(0, Math.min(20, Math.round(Number(e.target.value) || 0)));
-                  onChange({ minorTicks: value }, `Change ${label} minor ticks`);
-                }}
+                type="checkbox"
+                checked={axis.clipToRange ?? false}
+                onChange={(e) =>
+                  onChange({ clipToRange: e.target.checked }, `Toggle ${label} range clipping`)
+                }
               />
+              Hide points outside min/max
             </label>
+          )}
+
+          <div className="field-row">
+            {axis.scale === 'linear' ? (
+              <label className="field">
+                Minor ticks
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  step={1}
+                  value={axis.minorTicks ?? 0}
+                  title="Divisions between major ticks; 0 for none"
+                  onChange={(e) => {
+                    const value = Math.max(0, Math.min(20, Math.round(Number(e.target.value) || 0)));
+                    onChange({ minorTicks: value }, `Change ${label} minor ticks`);
+                  }}
+                />
+              </label>
+            ) : (
+              // On a log axis the *count* is meaningless — a reader either
+              // wants the conventional 2×..9× sub-decade ticks or does not.
+              // A spinner that adjusted a number nothing read would be exactly
+              // the "control that visibly does nothing" this app avoids.
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={(axis.minorTicks ?? 0) >= 2}
+                  title="Draws the conventional 2, 3, …, 9 ticks within each decade"
+                  onChange={(e) =>
+                    onChange(
+                      { minorTicks: e.target.checked ? 9 : 0 },
+                      `Change ${label} minor ticks`,
+                    )
+                  }
+                />
+                Sub-decade minor ticks (2–9)
+              </label>
+            )}
             <label className="field">
               Ticks
               <select
@@ -1384,11 +1795,12 @@ function AxisBreakFields({
   const setBreaks = (next: { from: number; to: number }[], undoLabel: string): void =>
     onChange({ breaks: next.length > 0 ? next : undefined }, undoLabel);
 
-  if (axis.scale === 'log10') {
+  if (axis.scale !== 'linear') {
     return breaks.length > 0 ? (
       <p className="hint">
-        Breaks are ignored on a log axis: compressing a range that is already compressed
-        leaves nothing a reader can measure against.
+        {axis.scale === 'log10'
+          ? 'Breaks are ignored on a log axis: compressing a range that is already compressed leaves nothing a reader can measure against.'
+          : 'Breaks are ignored on a symlog axis: it already contains one compression boundary — its linear threshold — and a second would leave nothing left to measure against.'}
       </p>
     ) : null;
   }

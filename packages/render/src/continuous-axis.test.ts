@@ -15,14 +15,25 @@ import {
   editDocument,
   inferFormat,
   parseDelimited,
+  type AxisSpec,
   type Dataset,
   type FigureDocument,
   type PlotNode,
   type PlotType,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
+import { xyMarks } from '@figureforge/plots';
 import { renderDocument } from './render-document.js';
-import { measurePlot } from './render-document.js';
+import {
+  cascadeAxisGroups,
+  cascadeAxisReserveMm,
+  computePlotGeometry,
+  isCascadable,
+  measurePlot,
+  placedPointLabelsForPlot,
+  renderCascadeAxis,
+  type ContinuousPlotGeometry,
+} from './render-document.js';
 import { collectByRole } from './scene.js';
 import { toSvgString } from './svg-string.js';
 
@@ -135,6 +146,254 @@ describe('numeric x axis', () => {
     // The tick count comes from the axis length alone, so a narrow panel asks
     // for more labels than fit; the thinning is what keeps them legible.
     expect(narrow).toBeLessThan(wide);
+  });
+});
+
+describe('axis range clipping', () => {
+  it('drops a point past max once clipToRange is set, and topMm no longer reflects it', () => {
+    const withClip = editDocument(makeDocument(XY, 'scatter'), (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') {
+          node.x.max = 4;
+          node.x.clipToRange = true;
+        }
+      }
+    });
+    const plot = Object.values(withClip.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plot, withClip, NATURE_THEME);
+    expect(geometry?.kind).toBe('continuous');
+    const series = (geometry as { series: { points: unknown[] }[] }).series;
+    // Dose 5 and 6 fall past max=4 and are dropped entirely.
+    expect(series[0]!.points).toHaveLength(4);
+  });
+
+  it('draws every point, overflowing the panel, when clipToRange is absent — unchanged from before this feature', () => {
+    const withMaxOnly = editDocument(makeDocument(XY, 'scatter'), (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') node.x.max = 4;
+      }
+    });
+    const plot = Object.values(withMaxOnly.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plot, withMaxOnly, NATURE_THEME);
+    const series = (geometry as { series: { points: unknown[] }[] }).series;
+    expect(series[0]!.points).toHaveLength(6);
+  });
+
+  it('is a no-op when clipToRange is set but neither min nor max is', () => {
+    const clipNoBounds = editDocument(makeDocument(XY, 'scatter'), (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') node.x.clipToRange = true;
+      }
+    });
+    const plain = makeDocument(XY, 'scatter');
+    const plotClip = Object.values(clipNoBounds.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const plotPlain = Object.values(plain.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geomClip = computePlotGeometry(plotClip, clipNoBounds, NATURE_THEME);
+    const geomPlain = computePlotGeometry(plotPlain, plain, NATURE_THEME);
+    expect((geomClip as { series: unknown }).series).toEqual((geomPlain as { series: unknown }).series);
+  });
+
+  it('is byte-identical (same SVG) between clipToRange absent and false', () => {
+    const absent = scene(makeDocument(XY, 'scatter'));
+    const explicitFalse = scene(
+      editDocument(makeDocument(XY, 'scatter'), (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') node.x.clipToRange = false;
+        }
+      }),
+    );
+    expect(toSvgString(explicitFalse)).toBe(toSvgString(absent));
+  });
+
+  it("drops a volcano point's label and leader for free once the point itself is clipped", () => {
+    const clipped = editDocument(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoLabels: ['BRCA1'], // log2FC 4.0, the most extreme fold change
+      }),
+      (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') {
+            node.x.max = 3;
+            node.x.clipToRange = true;
+          }
+        }
+      },
+    );
+    expect(collectByRole(scene(clipped), 'point-label')).toEqual([]);
+    expect(collectByRole(scene(clipped), 'point-label-leader')).toEqual([]);
+    // Every other point (log2FC below 3) still draws.
+    expect(collectByRole(scene(clipped), 'point').length).toBeGreaterThan(0);
+  });
+});
+
+describe('scientific and power-of-ten axis labels', () => {
+  /** Three clean decades, so a log y axis's ticks land exactly on 10ⁿ. */
+  const WIDE = `Dose,Response
+1,100
+2,1000
+3,10000
+4,100000`;
+
+  function withY(doc: FigureDocument, patch: Partial<AxisSpec>): FigureDocument {
+    return editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') Object.assign(node.y, patch);
+      }
+    });
+  }
+
+  const isYTickLabel = (n: { attrs?: Record<string, unknown> }): boolean =>
+    n.attrs?.['dominant-baseline'] === 'central';
+
+  it('renders a decade tick as a bare "10" run plus a superscript tspan', () => {
+    const doc = withY(makeDocument(WIDE, 'scatter'), { scale: 'log10', labelFormat: 'power10' });
+    const labels = collectByRole(scene(doc), 'tick-label').filter(isYTickLabel);
+    expect(labels.length).toBeGreaterThan(0);
+
+    const withSup = labels.filter((n) => (n.children ?? []).some((c) => c.role === 'tick-label-sup'));
+    expect(withSup.length).toBeGreaterThan(0);
+    for (const label of withSup) {
+      // A tspan container has no text of its own — the digits live on its
+      // children instead, which is exactly the shape `parity.test.tsx`'s
+      // "every text-bearing node" assertion was extended to allow for.
+      expect(label.text).toBeUndefined();
+      const runs = label.children ?? [];
+      expect(runs[0]?.text).toBe('10');
+      expect(runs.find((c) => c.role === 'tick-label-sup')).toBeDefined();
+    }
+  });
+
+  it("emits the superscript at a real reduced font-size for 'scientific' mode", () => {
+    const doc = withY(makeDocument(XY, 'scatter'), { labelFormat: 'scientific' });
+    const supRuns = collectByRole(scene(doc), 'tick-label-sup');
+    expect(supRuns.length).toBeGreaterThan(0);
+    for (const run of supRuns) {
+      const pt = Number(run.attrs?.['font-size']) / (25.4 / 72);
+      expect(pt).toBeGreaterThan(0);
+      expect(pt).toBeLessThan(NATURE_THEME.type.tickLabelPt);
+    }
+  });
+
+  it("an axis that never asks for a format renders no 'tick-label-sup' nodes", () => {
+    expect(collectByRole(scene(makeDocument(XY, 'scatter')), 'tick-label-sup')).toHaveLength(0);
+  });
+
+  it("'auto', explicit or absent, is byte-identical to a figure that never touched this control", () => {
+    const before = toSvgString(scene(makeDocument(XY, 'scatter')));
+    const explicitAuto = toSvgString(scene(withY(makeDocument(XY, 'scatter'), { labelFormat: 'auto' })));
+    expect(explicitAuto).toBe(before);
+  });
+
+  /**
+   * A y-axis tick's path is `M{-offset} {y} L0 {y}` — the same y twice,
+   * closed at x=0 — which is what separates it from an x-axis tick's
+   * `M{x} {plotHeight} L{x} {...}` (same x twice, different y) in a scene
+   * that draws both. The backreference requires the *same* rounded number in
+   * both positions, which only the y-axis template produces.
+   */
+  const yTickPositions = (n: { attrs?: Record<string, unknown> }): number | undefined => {
+    const match = /^M-?[\d.]+ (-?[\d.]+) L0 \1$/.exec(String(n.attrs?.['d'] ?? ''));
+    return match ? Number(match[1]) : undefined;
+  };
+
+  it('draws the conventional 2×..9× sub-decade minor ticks on a log y axis, not evenly-spaced ones', () => {
+    const doc = withY(makeDocument(WIDE, 'scatter'), { scale: 'log10', minorTicks: 9 });
+    const s = scene(doc);
+
+    const majors = collectByRole(s, 'tick-label').filter(
+      (n) => n.attrs?.['dominant-baseline'] === 'central',
+    ).length;
+    // Three decades between four majors (100, 1000, 10000, 100000), eight
+    // sub-decade ticks each. A linear-fallback bug would instead draw a fixed
+    // `minorTicks - 1` per gap regardless of what the majors actually are,
+    // which for `minorTicks: 9` happens to also be 8 — so the real assertion
+    // is the *position* check below, not merely the count.
+    expect(majors).toBe(4);
+    const yTicks = collectByRole(s, 'tick').filter((n) => yTickPositions(n) !== undefined);
+    expect(yTicks).toHaveLength(majors + 3 * 8);
+  });
+
+  it('places each minor tick exactly on 2×, 3×, …, 9× of its decade — never on a linear fraction', () => {
+    const doc = withY(makeDocument(WIDE, 'scatter'), { scale: 'log10', minorTicks: 9 });
+    const scene1 = scene(doc);
+
+    // The plot area's y scale is not exposed directly by the scene, so this
+    // reads it back the same way the renderer does: from the ordinary major
+    // tick-label positions, which are exact log10 ticks (100, 1000, …).
+    // A linear interpolation between 100 and 1000 would put its first minor
+    // tick at 200; the geometric one this axis actually draws puts it there
+    // too by coincidence at k=2, so the discriminating check is at k=5
+    // (linear: 550, geometric: 500) — read off the rendered minor-tick paths
+    // by their proximity to the value each formula predicts, using the
+    // labelled majors' own positions to convert mm back to value linearly-
+    // in-log-space (a log scale is linear in log(value)).
+    const majorLabels = collectByRole(scene1, 'tick-label')
+      .filter((n) => n.attrs?.['dominant-baseline'] === 'central')
+      .map((n) => ({ y: Number(n.attrs?.['y']), value: Number(n.text) }))
+      .filter((n) => Number.isFinite(n.value) && n.value > 0)
+      .sort((a, b) => b.y - a.y); // bottom (smallest value) first
+
+    expect(majorLabels.length).toBeGreaterThanOrEqual(2);
+    const [low, high] = [majorLabels[0]!, majorLabels[1]!];
+    const mmPerLog10 = (low.y - high.y) / (Math.log10(high.value) - Math.log10(low.value));
+    const yFor = (value: number): number => low.y - mmPerLog10 * (Math.log10(value) - Math.log10(low.value));
+
+    const minorYs = collectByRole(scene1, 'tick')
+      .map(yTickPositions)
+      .filter((v): v is number => v !== undefined);
+
+    // 500 (geometric k=5 between 100 and 1000) must be present; 550 (what a
+    // linear interpolation would draw instead) must not be.
+    expect(minorYs.some((y) => Math.abs(y - yFor(500)) < 0.05)).toBe(true);
+    expect(minorYs.some((y) => Math.abs(y - yFor(550)) < 0.05)).toBe(false);
+  });
+});
+
+describe('symlog axis', () => {
+  // Spans negative, zero and a large positive value — the shape a symlog
+  // axis exists for, and one a log10 axis could not draw at all.
+  const MIXED = `Dose,Response
+1,-500
+2,0
+3,87000
+4,150000`;
+
+  function withY(doc: FigureDocument, patch: Partial<AxisSpec>): FigureDocument {
+    return editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') Object.assign(node.y, patch);
+      }
+    });
+  }
+
+  it('places a tick at exactly zero and ends the axis on a decade', () => {
+    const doc = withY(makeDocument(MIXED, 'scatter'), { scale: 'symlog' });
+    const plot = Object.values(doc.nodes).find((n): n is PlotNode => n.type === 'plot')!;
+    const geometry = computePlotGeometry(plot, doc, NATURE_THEME);
+    expect(geometry?.kind).toBe('continuous');
+    if (geometry?.kind !== 'continuous') throw new Error('unreachable');
+    expect(geometry.yScale.ticks).toContain(0);
+    const positive = geometry.yScale.ticks.filter((t) => t > 0);
+    expect(positive.length).toBeGreaterThan(0);
+    expect(Number.isInteger(Math.log10(Math.max(...positive)))).toBe(true);
+  });
+
+  it('draws every point, including the negative one — unlike log10 it never drops non-positive values', () => {
+    const doc = withY(makeDocument(MIXED, 'scatter'), { scale: 'symlog' });
+    expect(collectByRole(scene(doc), 'point')).toHaveLength(4);
+  });
+
+  it('renders a real superscript once labelFormat is set to power10, the same as log10', () => {
+    const doc = withY(makeDocument(MIXED, 'scatter'), { scale: 'symlog', labelFormat: 'power10' });
+    expect(collectByRole(scene(doc), 'tick-label-sup').length).toBeGreaterThan(0);
+  });
+
+  it('draws no break marks even when one is set — a symlog axis already contains one compression boundary', () => {
+    const doc = withY(makeDocument(MIXED, 'scatter'), {
+      scale: 'symlog',
+      breaks: [{ from: 10, to: 100 }],
+    });
+    expect(collectByRole(scene(doc), 'axis-break')).toEqual([]);
   });
 });
 
@@ -473,6 +732,326 @@ describe('line styles', () => {
 });
 
 /**
+ * Cascade / offset ("ridgeline") line plots.
+ *
+ * Three series sharing identical x and y values, so any vertical separation
+ * between corresponding points is exactly the cascade offset — nothing else
+ * (different data, different scale) could produce it.
+ */
+describe('cascade / offset line plots', () => {
+  const IDENTICAL = [
+    'X1\tY1\tX2\tY2\tX3\tY3',
+    '1\t2\t1\t2\t1\t2',
+    '2\t4\t2\t4\t2\t4',
+    '3\t6\t3\t6\t3\t6',
+  ].join('\n');
+
+  it('separates n traces by exactly the requested step', () => {
+    const doc = makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 });
+    const points = collectByRole(scene(doc), 'point').filter((n) => n.tag === 'circle');
+    expect(points).toHaveLength(9);
+
+    const byX = new Map<number, number[]>();
+    for (const p of points) {
+      const cx = Number(p.attrs?.['cx']);
+      const cy = Number(p.attrs?.['cy']);
+      byX.set(cx, [...(byX.get(cx) ?? []), cy]);
+    }
+    // Same x per row across all three series, so exactly one bucket per row.
+    expect(byX.size).toBe(3);
+    for (const cys of byX.values()) {
+      expect(cys).toHaveLength(3);
+      const sorted = [...cys].sort((a, b) => a - b);
+      expect(sorted[1]! - sorted[0]!).toBeCloseTo(10, 6);
+      expect(sorted[2]! - sorted[1]!).toBeCloseTo(10, 6);
+    }
+  });
+
+  it('shrinks the y scale range by exactly the reserve it spends', () => {
+    const doc = makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 });
+    const plot = Object.values(doc.nodes).find((n): n is PlotNode => n.type === 'plot')!;
+    const plain = computePlotGeometry(
+      { ...plot, offsetStepMm: undefined },
+      doc,
+      NATURE_THEME,
+    );
+    const cascaded = computePlotGeometry(plot, doc, NATURE_THEME);
+    expect(plain?.kind).toBe('continuous');
+    expect(cascaded?.kind).toBe('continuous');
+    if (plain?.kind !== 'continuous' || cascaded?.kind !== 'continuous') throw new Error('unreachable');
+    // Range top (index 1) moves from 0 down to the reserve; range bottom is untouched.
+    expect(plain.yScale.range[0]).toBe(cascaded.yScale.range[0]);
+    expect(plain.yScale.range[1]).toBe(0);
+    expect(cascaded.yScale.range[1]).toBeCloseTo(20, 6); // (3-1) series * 10 mm
+  });
+
+  it('is byte-identical to an un-cascaded plot when the step is absent or zero', () => {
+    const plain = toSvgString(scene(makeDocument(IDENTICAL, 'line', 80)));
+    const zero = toSvgString(scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 0 })));
+    expect(zero).toBe(plain);
+  });
+
+  it('reverses line paint order — furthest offset first — only when cascading', () => {
+    const plainOrder = collectByRole(scene(makeDocument(IDENTICAL, 'line', 80)), 'line').map(
+      (n) => String(n.attrs?.['stroke']),
+    );
+    const cascadedOrder = collectByRole(
+      scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 })),
+      'line',
+    ).map((n) => String(n.attrs?.['stroke']));
+    expect(cascadedOrder).toEqual([...plainOrder].reverse());
+  });
+
+  it('draws an opaque fill closing at the baseline, in front-to-back paint order', () => {
+    const doc = makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10, offsetFill: 'tint' });
+    const areas = collectByRole(scene(doc), 'area');
+    expect(areas).toHaveLength(3);
+    for (const area of areas) {
+      expect(area.attrs?.['fill-opacity']).toBeUndefined();
+      expect(String(area.attrs?.['d'])).toMatch(/^M[\d.]+ [\d.]+ .* Z$/);
+    }
+  });
+
+  it('draws no fill when offsetFill is absent, even while cascading', () => {
+    const doc = makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 });
+    expect(collectByRole(scene(doc), 'area')).toEqual([]);
+  });
+
+  it('is disabled (no reserve, no offsets) once a second y axis is in use', () => {
+    const doc = makeDocument(IDENTICAL, 'line', 80, {
+      offsetStepMm: 10,
+      y2: {
+        title: 'Y2',
+        min: null,
+        max: null,
+        tickStep: null,
+        scale: 'linear',
+        showLine: true,
+        showTicks: true,
+        showLabels: true,
+        trimToData: false,
+      },
+      seriesAxis: ['y', 'y2', 'y'],
+    });
+    const plot = Object.values(doc.nodes).find((n): n is PlotNode => n.type === 'plot')!;
+    expect(isCascadable(plot, 3)).toBe(false);
+    const geometry = computePlotGeometry(plot, doc, NATURE_THEME);
+    expect(geometry?.kind).toBe('continuous');
+    if (geometry?.kind !== 'continuous') throw new Error('unreachable');
+    expect(geometry.yScale.range[1]).toBe(0);
+  });
+
+  describe('cascade z-axis', () => {
+    describe('cascadeAxisGroups', () => {
+      it('is one implicit group covering everything when no series has a category', () => {
+        const groups = cascadeAxisGroups([{}, {}, {}]);
+        expect(groups).toEqual([{ seriesIndices: [0, 1, 2], category: undefined }]);
+      });
+
+      it('is one group when every series shares the same category', () => {
+        const groups = cascadeAxisGroups([
+          { category: 'Low' },
+          { category: 'Low' },
+          { category: 'Low' },
+        ]);
+        expect(groups).toEqual([{ seriesIndices: [0, 1, 2], category: 'Low' }]);
+      });
+
+      it('splits into contiguous runs matching alternating categories', () => {
+        const groups = cascadeAxisGroups([
+          { category: 'Low' },
+          { category: 'Low' },
+          { category: 'High' },
+          { category: 'High' },
+        ]);
+        expect(groups).toEqual([
+          { seriesIndices: [0, 1], category: 'Low' },
+          { seriesIndices: [2, 3], category: 'High' },
+        ]);
+      });
+
+      it('gives an uncategorised run inside a mixed list its own uncaptioned group', () => {
+        const groups = cascadeAxisGroups([
+          { category: 'Low' },
+          { category: undefined },
+          { category: 'High' },
+        ]);
+        expect(groups).toEqual([
+          { seriesIndices: [0], category: 'Low' },
+          { seriesIndices: [1], category: undefined },
+          { seriesIndices: [2], category: 'High' },
+        ]);
+      });
+    });
+
+    describe('cascadeAxisReserveMm', () => {
+      const series = [{ name: 'Y1' }, { name: 'Y2' }, { name: 'Y3' }];
+
+      it('is zero when showCascadeAxis is absent', () => {
+        expect(cascadeAxisReserveMm({}, NATURE_THEME, series)).toBe(0);
+      });
+
+      it('is zero for a single series, even if showCascadeAxis is set', () => {
+        expect(cascadeAxisReserveMm({ showCascadeAxis: true }, NATURE_THEME, [{ name: 'A' }])).toBe(0);
+      });
+
+      it('grows with a longer series name, and again with a sideways lean', () => {
+        const base = cascadeAxisReserveMm({ showCascadeAxis: true }, NATURE_THEME, series);
+        const longer = cascadeAxisReserveMm({ showCascadeAxis: true }, NATURE_THEME, [
+          { name: 'A very long series name indeed' },
+          { name: 'Y2' },
+        ]);
+        expect(longer).toBeGreaterThan(base);
+
+        const leaning = cascadeAxisReserveMm(
+          { showCascadeAxis: true, offsetStepXMm: 2 },
+          NATURE_THEME,
+          series,
+        );
+        expect(leaning).toBeGreaterThan(base);
+      });
+
+      it('reserves extra depth only once some group is actually captioned', () => {
+        const uncaptioned = cascadeAxisReserveMm(
+          { showCascadeAxis: true },
+          NATURE_THEME,
+          series, // no category, no cascadeAxisTitle
+        );
+        const withTitle = cascadeAxisReserveMm(
+          { showCascadeAxis: true, cascadeAxisTitle: 'Concentration' },
+          NATURE_THEME,
+          series,
+        );
+        expect(withTitle).toBeGreaterThan(uncaptioned);
+
+        const withCategories = cascadeAxisReserveMm({ showCascadeAxis: true }, NATURE_THEME, [
+          { name: 'A', category: 'Low' },
+          { name: 'B', category: 'High' },
+        ]);
+        expect(withCategories).toBeGreaterThan(
+          cascadeAxisReserveMm({ showCascadeAxis: true }, NATURE_THEME, [{ name: 'A' }, { name: 'B' }]),
+        );
+      });
+    });
+
+    it('is byte-identical to today, with no cascade-axis scene nodes, when showCascadeAxis is absent', () => {
+      const plain = toSvgString(scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 })));
+      const explicitFalse = toSvgString(
+        scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10, showCascadeAxis: false })),
+      );
+      expect(explicitFalse).toBe(plain);
+      const s = scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 }));
+      expect(collectByRole(s, 'cascade-axis')).toEqual([]);
+      expect(collectByRole(s, 'cascade-axis-label')).toEqual([]);
+      expect(collectByRole(s, 'cascade-axis-title')).toEqual([]);
+    });
+
+    it('draws nothing when showCascadeAxis is set but the plot is not actually cascading', () => {
+      const s = scene(makeDocument(IDENTICAL, 'line', 80, { showCascadeAxis: true }));
+      expect(collectByRole(s, 'cascade-axis')).toEqual([]);
+    });
+
+    it('draws one tick label per series and grows the right margin by exactly the reserve', () => {
+      const withAxis = makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10, showCascadeAxis: true });
+      const plot = Object.values(withAxis.nodes).find((n): n is PlotNode => n.type === 'plot')!;
+      const withGeometry = computePlotGeometry(plot, withAxis, NATURE_THEME);
+      const withoutGeometry = computePlotGeometry(
+        { ...plot, showCascadeAxis: false },
+        withAxis,
+        NATURE_THEME,
+      );
+      expect(withGeometry?.kind).toBe('continuous');
+      expect(withoutGeometry?.kind).toBe('continuous');
+      if (withGeometry?.kind !== 'continuous' || withoutGeometry?.kind !== 'continuous') {
+        throw new Error('unreachable');
+      }
+
+      const reserve = cascadeAxisReserveMm(plot, NATURE_THEME, withGeometry.series);
+      expect(reserve).toBeGreaterThan(0);
+      expect(withGeometry.margin.right - withoutGeometry.margin.right).toBeCloseTo(reserve, 6);
+
+      const s = scene(withAxis);
+      expect(collectByRole(s, 'cascade-axis-label')).toHaveLength(3);
+      // No category and no cascadeAxisTitle set — nothing to caption.
+      expect(collectByRole(s, 'cascade-axis-title')).toEqual([]);
+    });
+
+    it('captions the single implicit group with cascadeAxisTitle once set', () => {
+      const s = scene(
+        makeDocument(IDENTICAL, 'line', 80, {
+          offsetStepMm: 10,
+          showCascadeAxis: true,
+          cascadeAxisTitle: 'Concentration (mg/mL)',
+        }),
+      );
+      const titles = collectByRole(s, 'cascade-axis-title');
+      expect(titles).toHaveLength(1);
+      expect(titles[0]!.text).toBe('Concentration (mg/mL)');
+    });
+
+    it('composes additively with a right-hand legend, reserving room for both', () => {
+      const doc = makeDocument(IDENTICAL, 'line', 80, {
+        offsetStepMm: 10,
+        showCascadeAxis: true,
+        legend: 'right',
+      });
+      const plot = Object.values(doc.nodes).find((n): n is PlotNode => n.type === 'plot')!;
+      const geometry = computePlotGeometry(plot, doc, NATURE_THEME);
+      const withoutLegend = computePlotGeometry({ ...plot, legend: 'none' }, doc, NATURE_THEME);
+      expect(geometry?.kind).toBe('continuous');
+      expect(withoutLegend?.kind).toBe('continuous');
+      if (geometry?.kind !== 'continuous' || withoutLegend?.kind !== 'continuous') {
+        throw new Error('unreachable');
+      }
+      // Adding a legend on top of the depth axis reserves strictly more room,
+      // not the same (max'd) amount — the two stack rather than share.
+      expect(geometry.margin.right).toBeGreaterThan(withoutLegend.margin.right);
+    });
+
+    describe('renderCascadeAxis (direct, synthetic two-category geometry)', () => {
+      const buildGeometry = (): ContinuousPlotGeometry => {
+        const x = { min: 0, max: 3 };
+        const xScale = { kind: 'linear' as const, domain: x, range: [0, 60] as [number, number], scale: (v: number) => v * 20, invert: (mm: number) => mm / 20, ticks: [], format: String };
+        const yScale = { kind: 'linear' as const, domain: { min: 0, max: 10 }, range: [50, 0] as [number, number], scale: (v: number) => 50 - v * 5, invert: (mm: number) => (50 - mm) / 5, ticks: [], format: String };
+        const series = xyMarks(
+          [
+            { name: 'Low A', values: [1, 2], x: [1, 2] },
+            { name: 'Low B', values: [1, 2], x: [1, 2] },
+            { name: 'High A', values: [1, 2], x: [1, 2] },
+            { name: 'High B', values: [1, 2], x: [1, 2] },
+          ],
+          { x: xScale, y: yScale, showLine: true, showPoints: false, pointSizeMm: 1, colors: ['#111', '#222', '#333', '#444'], categories: ['Low', 'Low', 'High', 'High'] },
+        );
+        return { kind: 'continuous', margin: { left: 0, top: 0, right: 0, bottom: 0 }, plotWidth: 60, plotHeight: 50, xScale, yScale, series, bins: [] };
+      };
+
+      it('draws two end brackets and two group captions for a two-category cascade', () => {
+        const geometry = buildGeometry();
+        const node = { showCascadeAxis: true, offsetStepMm: 10, plotType: 'line', pointSizeMm: 1 } as PlotNode;
+        const nodes = renderCascadeAxis(node, NATURE_THEME, geometry);
+        const labels = nodes.filter((n) => n.role === 'cascade-axis-label');
+        const titles = nodes.filter((n) => n.role === 'cascade-axis-title');
+        expect(labels).toHaveLength(4);
+        expect(titles).toHaveLength(2);
+        expect(titles.map((t) => t.text).sort()).toEqual(['High', 'Low']);
+      });
+
+      it('draws no captions when categories are absent and cascadeAxisTitle is unset', () => {
+        const geometry = buildGeometry();
+        // Strip categories to simulate an ordinary, uncategorised cascade.
+        const uncategorised: ContinuousPlotGeometry = {
+          ...geometry,
+          series: geometry.series.map((s) => ({ ...s, category: undefined })),
+        };
+        const node = { showCascadeAxis: true, offsetStepMm: 10, plotType: 'line', pointSizeMm: 1 } as PlotNode;
+        const nodes = renderCascadeAxis(node, NATURE_THEME, uncategorised);
+        expect(nodes.filter((n) => n.role === 'cascade-axis-title')).toEqual([]);
+      });
+    });
+  });
+});
+
+/**
  * A legend and a secondary axis on the same side of the plot.
  *
  * The reserve for the two was combined with `Math.max`, so whichever was wider
@@ -661,6 +1240,173 @@ describe('volcano plots', () => {
     // A plain xy table has paired x values but no row identity.
     const s = scene(makeVolcanoDocument('X,Y\n1,2\n2,4', 'simple-xy'));
     expect(collectByRole(s, 'point')).toEqual([]);
+  });
+});
+
+describe('volcano point labels', () => {
+  it('draws nothing when volcanoLabels is absent, and the SVG is byte-identical to before', () => {
+    const doc = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential');
+    const s = scene(doc);
+    expect(collectByRole(s, 'point-label')).toEqual([]);
+    expect(collectByRole(s, 'point-label-leader')).toEqual([]);
+  });
+
+  it('draws exactly the selected labels, in the category colour', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+        volcanoLabels: ['TP53', 'MYC'],
+      }),
+    );
+    const labels = collectByRole(s, 'point-label');
+    expect(labels).toHaveLength(2);
+    const byText = new Map(labels.map((n) => [n.text, n.attrs?.['fill']]));
+    expect(byText.get('TP53')).toBe('#d73027'); // up
+    expect(byText.get('MYC')).toBe('#4575b4'); // down
+  });
+
+  it('ignores a requested label that matches no point', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoLabels: ['NOTAGENE'],
+      }),
+    );
+    expect(collectByRole(s, 'point-label')).toEqual([]);
+  });
+
+  it('is sized at the theme annotation size, not the tick-label size', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoLabels: ['TP53'],
+      }),
+    );
+    const label = collectByRole(s, 'point-label')[0]!;
+    const pt = Number(label.attrs?.['font-size']) / (25.4 / 72);
+    expect(pt).toBeCloseTo(NATURE_THEME.type.annotationPt, 6);
+  });
+
+  it('labels every point sharing a duplicated name, not just the first', () => {
+    const csv = 'Gene,log2FC,p\nDUP,2.5,0.001\nDUP,3.0,0.0005\nOther,0.1,0.9';
+    const s = scene(
+      makeVolcanoDocument(csv, 'differential', {
+        volcanoLabels: ['DUP'],
+      }),
+    );
+    expect(collectByRole(s, 'point-label')).toHaveLength(2);
+  });
+
+  it('caps at 25 labels even when more are requested', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => `Gene${i},${1 + i * 0.01},0.001`);
+    const csv = `Gene,log2FC,p\n${rows.join('\n')}`;
+    const s = scene(
+      makeVolcanoDocument(csv, 'differential', {
+        volcanoLabels: rows.map((_, i) => `Gene${i}`),
+      }),
+    );
+    expect(collectByRole(s, 'point-label').length).toBeLessThanOrEqual(25);
+  });
+
+  it('draws labels above the raster once the plot exceeds MAX_VECTOR_POINTS', () => {
+    // The point loop in renderContinuousMarks is skipped entirely above the
+    // threshold, but geometry.series[].points (and every label) is still
+    // fully populated — this is the case that matters most in practice, since
+    // a real gene list is routinely tens of thousands of rows.
+    const rows: string[] = [];
+    for (let i = 0; i < 2100; i++) rows.push(`Gene${i},${(i % 5) - 2},0.01`);
+    const csv = `Gene,log2FC,p\n${rows.join('\n')}`;
+    const s = scene(
+      makeVolcanoDocument(csv, 'differential', {
+        volcanoLabels: ['Gene1', 'Gene2', 'Gene3'],
+      }),
+    );
+    expect(collectByRole(s, 'point-cloud')).toHaveLength(1);
+    expect(collectByRole(s, 'point')).toEqual([]); // vector markers are skipped
+    expect(collectByRole(s, 'point-label').length).toBeGreaterThan(0);
+  });
+});
+
+describe('volcano point label editing', () => {
+  it('draws at a custom size when pointLabelSizePt is set, theme size when absent', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoLabels: ['TP53'],
+        pointLabelSizePt: 10,
+      }),
+    );
+    const label = collectByRole(s, 'point-label')[0]!;
+    const pt = Number(label.attrs?.['font-size']) / (25.4 / 72);
+    expect(pt).toBeCloseTo(10, 6);
+  });
+
+  it('always draws a leader once a label carries a manual offset, unlike the unoffset default', () => {
+    const base = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', { volcanoLabels: ['TP53'] });
+    expect(collectByRole(scene(base), 'point-label-leader')).toEqual([]);
+
+    const offset = editDocument(base, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'plot') node.pointLabelOffsets = { TP53: { x: 10, y: -5 } };
+      }
+    });
+    expect(collectByRole(scene(offset), 'point-label-leader')).toHaveLength(1);
+  });
+
+  it("moves the label by exactly the offset, and the leader's point end stays fixed", () => {
+    const base = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', { volcanoLabels: ['TP53'] });
+    const withOffset = (x: number, y: number) =>
+      editDocument(base, (draft) => {
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') node.pointLabelOffsets = { TP53: { x, y } };
+        }
+      });
+
+    const labelA = collectByRole(scene(withOffset(5, 0)), 'point-label')[0]!;
+    const labelB = collectByRole(scene(withOffset(8, -3)), 'point-label')[0]!;
+    expect(Number(labelB.attrs?.['x']) - Number(labelA.attrs?.['x'])).toBeCloseTo(3, 5);
+    expect(Number(labelB.attrs?.['y']) - Number(labelA.attrs?.['y'])).toBeCloseTo(-3, 5);
+
+    const parseLeader = (d: string) => {
+      const m = /M([-\d.]+) ([-\d.]+) L([-\d.]+) ([-\d.]+)/.exec(d);
+      return { x1: Number(m![1]), y1: Number(m![2]), x2: Number(m![3]), y2: Number(m![4]) };
+    };
+    const leaderA = parseLeader(
+      collectByRole(scene(withOffset(5, 0)), 'point-label-leader')[0]!.attrs?.['d'] as string,
+    );
+    const leaderB = parseLeader(
+      collectByRole(scene(withOffset(8, -3)), 'point-label-leader')[0]!.attrs?.['d'] as string,
+    );
+    // The point end of the leader never moves — only the label end does.
+    expect(leaderB.x1).toBeCloseTo(leaderA.x1, 5);
+    expect(leaderB.y1).toBeCloseTo(leaderA.y1, 5);
+    expect(leaderB.x2).not.toBeCloseTo(leaderA.x2, 1);
+  });
+
+  it('ignores an offset keyed to a label that is not currently placed, without throwing', () => {
+    const doc = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+      volcanoLabels: ['TP53'],
+      pointLabelOffsets: { MYC: { x: 1, y: 1 } },
+    });
+    expect(() => scene(doc)).not.toThrow();
+    expect(collectByRole(scene(doc), 'point-label')).toHaveLength(1);
+  });
+
+  it('placedPointLabelsForPlot returns the same rects the drawing path used, in panel-local mm', () => {
+    const doc = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', { volcanoLabels: ['TP53'] });
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const placed = placedPointLabelsForPlot(plot, doc, NATURE_THEME);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.text).toBe('TP53');
+    const label = collectByRole(scene(doc), 'point-label')[0]!;
+    const geometry = computePlotGeometry(plot, doc, NATURE_THEME)!;
+    expect(geometry.kind).toBe('continuous');
+    const marginLeft = (geometry as { margin: { left: number } }).margin.left;
+    expect(Number(label.attrs?.['x']) + marginLeft).toBeGreaterThanOrEqual(placed[0]!.rectMm.x0 - 0.01);
+    expect(Number(label.attrs?.['x']) + marginLeft).toBeLessThanOrEqual(placed[0]!.rectMm.x1 + 0.01);
+  });
+
+  it('returns [] for a non-volcano plot or an id with no plot node', () => {
+    const doc = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', { volcanoLabels: ['TP53'] });
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    expect(placedPointLabelsForPlot({ ...plot, plotType: 'scatter' }, doc, NATURE_THEME)).toEqual([]);
   });
 });
 

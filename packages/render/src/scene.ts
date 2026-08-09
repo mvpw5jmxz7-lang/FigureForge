@@ -89,7 +89,49 @@ export type SceneRole =
    * 'point-cloud' is kept distinct from 'image' — a role-count assertion for
    * one must not be silently widened by another.
    */
-  | 'censor-mark';
+  | 'censor-mark'
+  /**
+   * A tick label's superscript exponent — the `<tspan>` set at
+   * `superscriptSizePt`, not the label as a whole (which stays `'tick-label'`
+   * on its containing `<text>`). Its own role so `checkTextSize` and
+   * `parity.test.tsx`'s font-size range can exempt exactly this text down to
+   * `SUPERSCRIPT_MIN_PT`, without loosening the floor for any other label.
+   */
+  | 'tick-label-sup'
+  /**
+   * A drawn point identity — a gene name on a volcano plot. Kept distinct
+   * from 'text'/'tick-label' for the standing reason: a role-count assertion
+   * for one must not be silently widened by another, and `THEME_SIZE_KEYS`
+   * maps a role to the theme size it was drawn at.
+   */
+  | 'point-label'
+  /** The dotted leader joining a pushed-out point label to its point. Kept
+   *  distinct from 'line' for the same reason. */
+  | 'point-label-leader'
+  /**
+   * A cascade/ridgeline series' opaque fill down to its baseline. Kept
+   * distinct from 'error-bar' (which is translucent by design) — an 'area'
+   * fill is never `fill-opacity`ed, since a translucent fill that is meant to
+   * occlude the traces behind it is a contradiction.
+   */
+  | 'area'
+  /**
+   * A cascade/ridgeline plot's schematic depth axis: the spine, its tick
+   * strokes, and a group's end bracket. Kept as ONE role for all three —
+   * this is a single small decorative axis, not a first-class plot axis —
+   * but distinct from 'axis'/'tick'/'bracket' so a role-count assertion for
+   * any of those three is never silently widened by this feature.
+   */
+  | 'cascade-axis'
+  /** A cascade depth axis tick's label — one series name. Distinct from
+   *  'tick-label' for the same reason 'cascade-axis' is distinct from
+   *  'axis'/'tick': `THEME_SIZE_KEYS` and any role-count assertion for the
+   *  real axis's tick labels must not be widened by this one. */
+  | 'cascade-axis-label'
+  /** A cascade depth axis group's end-of-axis caption — the series' shared
+   *  `category`, or `cascadeAxisTitle` in the single-implicit-group case.
+   *  Distinct from 'axis-title' for the same reason. */
+  | 'cascade-axis-title';
 
 export const el = (
   tag: string,

@@ -24,7 +24,30 @@ import type { Dataset } from './data.js';
 import { checkReferentialIntegrity, isSupportedVersion, validateDocument } from './schema.js';
 import type { ValidationIssue } from './schema.js';
 
-export const ARCHIVE_EXTENSION = '.figureforge';
+/**
+ * The extension a new save writes. Short, so it is typeable and reads
+ * cleanly in a file manager — `.figureforge` is kept only as something Open
+ * still reads, never as something anything writes again.
+ */
+export const ARCHIVE_EXTENSION = '.ffg';
+/** The original long form. Still opened, never written. */
+export const LEGACY_ARCHIVE_EXTENSION = '.figureforge';
+/** Everything Open accepts. `.ffg` first, so a picker defaults to it. */
+export const ARCHIVE_EXTENSIONS: readonly string[] = [
+  ARCHIVE_EXTENSION,
+  LEGACY_ARCHIVE_EXTENSION,
+];
+/**
+ * A vendor MIME for the File System Access API's picker `accept` map. A
+ * `vnd.` type with a `+zip` structured suffix is the correct shape for an
+ * unregistered vendor container — the archive genuinely is a zip.
+ */
+export const ARCHIVE_MIME = 'application/vnd.figureforge.project+zip';
+/** The picker's file-type entry, shared by the save and open pickers. */
+export const ARCHIVE_FILE_TYPE = {
+  description: 'FigureForge project',
+  accept: { [ARCHIVE_MIME]: [...ARCHIVE_EXTENSIONS] },
+} as const;
 export const MANIFEST_PATH = 'MANIFEST.json';
 export const DOCUMENT_PATH = 'document.json';
 export const THUMBNAIL_PATH = 'thumbnail.png';
@@ -132,7 +155,7 @@ export function loadArchive(bytes: Uint8Array): LoadResult {
     entries = unzipSync(bytes);
   } catch (cause) {
     throw new ArchiveError(
-      `Not a readable ${ARCHIVE_EXTENSION} file (zip could not be opened): ${String(cause)}`,
+      `Not a readable FigureForge project (zip could not be opened): ${String(cause)}`,
     );
   }
 
