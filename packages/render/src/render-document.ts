@@ -40,6 +40,7 @@ import {
   type PanelLabelNode,
   type PanelNode,
   type PlotNode,
+  type RectMm,
   type PointShape,
   type ScaleBarNode,
   type ShapeNode,

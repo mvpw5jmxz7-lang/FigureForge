@@ -23,7 +23,12 @@ on its back plane, and a tenth round adding Shift-constrained square
 resizing and 45° arrow aiming, node rotation (a free grip plus an Inspector
 field, snapping to 45° with Shift), click-to-edit axis titles on the canvas,
 Delete-to-clear in the data grid, and eleven more layout templates including
-a vertical stack at every panel count. Phase 8 and 9 are not started.**
+a vertical stack at every panel count. Phase 8 has begun: stage 1 puts the
+app in an Electron shell that owns the Python service as a supervised child
+process — free-port allocation, health-gated startup, backoff restarts,
+SIGTERM→SIGKILL teardown, and a watchdog on the Python side that reaps itself
+if the shell is SIGKILLed. Native file dialogs, streaming archive I/O and
+packaging are stages 2–4 and are not started. Phase 9 is not started.**
 
 ---
 
@@ -37,12 +42,17 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 706 TypeScript + 139 Python tests
+make test        # 721 TypeScript + 152 Python tests
 make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
+
+make desktop        # launch the Electron shell against the dev server
+make desktop-smoke  # drive that shell headlessly, 15 checks
 ```
 
-`make help` lists all 15 targets.
+`make help` lists all 18 targets. The two `desktop` targets build a separate,
+heavier image (`make build-desktop`, based on the API image so the shell has a
+real Python to supervise) and are not needed for ordinary web work.
 
 The dev environment is a rootless podman **pod**, so both containers share one
 network namespace and the web app reaches the API on plain `localhost:8000`.
@@ -102,9 +112,16 @@ packages/theme/       journal presets, palettes, colour-vision validation
 packages/plots/       scales, summary statistics, mark geometry   ← maths only
 packages/render/      scene tree → {React | SVG string}, quality checker  ← drawing only
 apps/web/             Vite + React canvas, inspectors, import/export UI
+apps/desktop/         Electron shell: main process, preload bridge, sidecar supervisor
 services/api/         FastAPI: SciPy statistics, Chromium/Ghostscript export, TIFF decoding
 scripts/acceptance.ts end-to-end flow, no UI involved
+scripts/desktop-smoke.mjs  drives the real Electron app over CDP
 ```
+
+`apps/desktop` depends on **nothing internal** — not even `apps/web`. It hosts
+the web app as a URL and supervises the service as a process, so neither the
+renderer nor the packages know they are inside a shell. That is what keeps the
+browser build a first-class target rather than a degraded one.
 
 **`plots` computes numbers and `render` draws them.** That split is why the plot
 maths is testable against exact expected values, and why there is no dependency
@@ -208,10 +225,19 @@ Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
 
+**Verified after phase 8 stage 1 (the Electron shell and its Python sidecar):**
+721 TypeScript tests, 152 Python tests, typecheck and lint clean, 46-check
+acceptance run unaffected, and a **15-check desktop smoke run** driving the real
+Electron app — including a SIGKILL of the shell to prove the Python watchdog
+reaps its own orphan. Also fixed a **pre-existing** `RectMm` typecheck error
+from round 10 that an incremental build had cached over; round 10's "typecheck
+clean" claim was wrong. See "Phase 8, Stage 1" below.
+
 **Verified after round 10 (Shift constraints, rotation, editable axis titles,
 cell clearing, more templates):** 706 TypeScript tests, 139 Python tests
-unchanged, typecheck and lint clean, 46-check acceptance run unaffected, and
-27 browser checks in each of light and dark — see "Round 10" below.
+unchanged, lint clean, 46-check acceptance run unaffected, and
+27 browser checks in each of light and dark — see "Round 10" below. (Its
+typecheck claim did not hold; see the line above.)
 
 **Verified after round 9 (sign-aware tick labels, boxed border, 3D cascade
 gridlines):** 686 TypeScript tests, 139 Python tests unchanged, typecheck and
@@ -2602,6 +2628,172 @@ template, or clears cells).
 
 ---
 
+### Phase 8, Stage 1 — the Electron shell and its Python sidecar
+
+Phase 8's whole content, per the risk table that has carried it since phase 1,
+is that "the desktop shell needs Python bundled as a sidecar process with
+lifecycle management — real work, not a wrapper." Stage 1 is that supervisor
+plus the minimum shell to host it. **Nothing in `packages/` changed**, and the
+one line the web app gained is a fallback that reads exactly as it did before
+in a browser.
+
+**The dependency was verified empirically before anything was built**, the same
+blocking-finding check UMAP's stage ran with `pip install --dry-run`: Electron
+43.4.0 was installed into a throwaway container, its missing GUI libraries
+enumerated with `ldd`, and a real `BrowserWindow` opened under Xvfb and asked
+to execute JavaScript in its renderer. It answered. Had it not, this stage
+would have been reported as blocked rather than written and left unverifiable.
+
+- **The sidecar supervisor is a state machine over failures, and it imports
+  nothing.** `apps/desktop/src/sidecar.ts` takes `spawn`, `probe`,
+  `allocatePort` and `delay` as injected functions — the same discipline
+  `ProjectFileSystem` already follows, and for the same reason: the behaviour
+  worth testing is what happens when Python exits during startup, never becomes
+  healthy, or dies mid-session, and those are awkward to provoke against a real
+  interpreter and trivial against a double. The real effects live beside it in
+  `sidecar.node.ts`. Five guarantees, each with a test:
+  - **Ready means ready.** `start()` resolves only once `/health` has answered.
+    A fixed sleep is the classic way to ship a race that reproduces only on a
+    slow machine.
+  - **Startup failure fails fast**, and quotes Python's own stderr. A child
+    that exits during the poll cannot become healthy, so the poll stops there
+    rather than waiting out the 30 s timeout and reporting a generic timeout
+    for a problem `ModuleNotFoundError` already explained precisely.
+  - **A crash is visible.** An unexpected exit restarts with a backoff and,
+    once the budget is spent, reports `failed` through a dialog. The
+    alternative is a live window whose every server-backed feature fails
+    separately with no shared cause.
+  - **A restart that never comes up spends the budget too.** `scheduleRestart`
+    recurses through its own catch, so a service dying on every spawn cannot
+    report "could not be restarted after 3 attempts" having tried once.
+  - **An intentional stop never restarts**, and `stop()` escalates SIGTERM to
+    SIGKILL after a grace period.
+- **The port is allocated by binding `:0` and letting go, and the race that
+  creates is covered rather than engineered away.** Something could take the
+  port between allocation and Python's bind; a sidecar that never becomes
+  healthy therefore *discards* its port and asks for a fresh one, which a test
+  pins. Inheriting a file descriptor instead would remove the race and buy a
+  platform-specific launch path on every OS. A restart *reuses* the port, so
+  the renderer's API base usually stays valid across one.
+- **The watchdog on the Python side is not redundant with the supervisor.**
+  `services/api/figureforge/sidecar.py` polls `os.getppid()` and shuts uvicorn
+  down when its parent stops matching. The supervisor covers every cooperative
+  exit; a SIGKILL, an OOM kill or a power-off runs no handler at all, and each
+  mechanism covers exactly the case the other cannot see. `parent_is_gone` is a
+  pure predicate compared against the *recorded* pid rather than testing for
+  pid 1, which is what keeps it correct under a subreaper, where an orphan's
+  new parent is an ordinary process id. It sets uvicorn's own `should_exit`
+  rather than exiting hard, so the export renderer's browser pool still gets
+  its lifespan shutdown — a hard exit would trade a Python orphan for a
+  Chromium one.
+- **The sidecar refuses a non-loopback bind.** This service has no
+  authentication because as a container it was never exposed beyond the pod; on
+  a laptop or a shared lab machine a `0.0.0.0` bind would offer an
+  unauthenticated Chromium-backed exporter and image decoder to anyone who
+  could route to the host. `--allow-remote` is the explicit opt-out.
+  `main.py` is untouched by all of this: the ASGI app is the same object in
+  both deployments, so no desktop-only path through the request handlers can
+  drift from what the tests cover.
+- **`api.ts`'s `BASE` constant became a `base()` function**, and that is the
+  entire web-side change. It reads `window.figureforge?.apiBase?.()` and falls
+  back to `/api`, so every browser build behaves exactly as before, and it is
+  read *per call* rather than captured because a restarted sidecar may come
+  back on a different port. Guarded for a missing `window` because the suite
+  runs in Node.
+- **The renderer is treated as untrusted.** `contextIsolation` and `sandbox`
+  are on, `nodeIntegration` off, `webviewTag` off, navigation away from the app
+  origin refused, `window.open` denied with genuine `https://` links handed to
+  the real browser, and a single-instance lock — a second instance would spawn
+  a second sidecar and a second export browser pool and the two would fight
+  over the same project files. This is the same stance already taken on the
+  export renderer's browser context, which blocks every scheme but
+  `data:`/`about:`/`blob:`.
+- **The bridge is three keys.** `isDesktop`, `platform`, `apiBase()`. Every
+  addition is a permanent widening of what a compromised renderer can reach, so
+  stage 2's file dialogs will be the first thing to justify one.
+- **The sidecar is started and awaited *before* any window exists**, so the
+  preload can hand the renderer a working base URL synchronously and `api.ts`
+  needs no promise, no retry and no "not ready yet" state. The cost is a slower
+  first paint; the alternative is that same delay redistributed across every
+  early request as a race.
+
+#### Two traps, both found by running it
+
+Neither was visible to 721 green tests — the standing "green tests do not mean
+the app runs" rule earning its keep twice in one stage.
+
+- **`main.ts` importing a constant from `preload.ts` killed the app at
+  startup.** The preload calls `ipcRenderer` at module scope, which exists only
+  in a preload context, so requiring it from the main process threw on
+  `sendSync` of `undefined` before a window was ever created. The channel name
+  now lives in `channels.ts`, which touches no Electron API at all. The rule it
+  encodes: anything both sides need must import nothing from either side.
+- **A sandboxed preload cannot `require` a relative module.** Its `require`
+  resolves only a short allow-list of Electron's own modules, so importing
+  `./channels` threw at load and the bridge *silently* never installed — the
+  window still opened and React still mounted, so nothing looked wrong until
+  the first API call found no base URL. The preload is therefore bundled with
+  esbuild (already present transitively via Vite, so no new download), which is
+  what lets the channel name keep exactly one definition instead of a literal
+  duplicated on both sides of the IPC. Turning `sandbox` off was the other way
+  out and was rejected: this app imports untrusted TIFFs and SVGs.
+
+#### Verifying a GUI in a headless container
+
+`docker/desktop.Dockerfile` is **based on the API image, not a Node image** —
+the thing under test is a shell that owns a Python sidecar, so a container with
+no Python could verify only half of it, and pointing the shell at a service
+someone else started would skip the entire lifecycle this stage exists to
+build. It is also the closer analogue of a packaged application, which ships an
+interpreter beside the executable. Node is copied from the official image
+rather than added through a third-party apt repository; both are bookworm, so
+the glibc matches. Electron's binary lives in an image path, not in the shared
+`node_modules` volume, which the web and test containers install with
+`ELECTRON_SKIP_BINARY_DOWNLOAD=1` — they need only the type definitions, never
+the 221 MB Chromium.
+
+`scripts/desktop-smoke.mjs` drives the running app over the **Chrome DevTools
+Protocol** rather than through Playwright: Electron already speaks CDP with
+`--remote-debugging-port`, and Node 22 has `fetch` and `WebSocket` built in, so
+the alternative was a new JavaScript dependency for four protocol methods — the
+same "avoid the dependency where the published thing is small" stance already
+on record for log-rank and PCA.
+
+**Driven for real, 15 checks, all passing:** Electron booted; the React app
+mounted; the preload bridge arrived carrying exactly `apiBase, isDesktop,
+platform` and nothing else; the API base was a loopback URL with a real
+runtime-chosen port (`http://127.0.0.1:33531`); `window.require` and
+`window.process` were both `undefined`; the sidecar answered `/health` on that
+port reporting **scipy 1.15.0**, so it was the real service rather than a stub;
+the renderer reached it **cross-origin**, which the web build never exercises
+because Vite proxies it same-origin; exactly one sidecar process was running;
+SIGTERM left no orphan; and — the check the watchdog exists for — a **SIGKILL**
+of Electron left the sidecar momentarily orphaned and the Python-side watchdog
+then reaped it, which nothing in the supervisor could have done.
+
+**Verified:** 721 TypeScript tests (706 + 15 new: the sidecar suite covering
+startup, timeout, crash recovery, budget exhaustion, stop escalation and status
+reporting), 152 Python tests (139 + 13 new: the watchdog predicate, the
+watchdog thread, and the loopback-bind refusal), typecheck and lint clean,
+46-check acceptance run unaffected, 15-check desktop smoke run passing.
+
+**One pre-existing defect was found and fixed**: `packages/render/src/render-document.ts`
+used `RectMm` in round 10's `rotatedChrome` without importing it. Round 10's
+"typecheck clean" claim was wrong — an incremental build had cached over it,
+and `tsc --build --force` fails on the round-10 tree. Verified as pre-existing
+by stashing this stage's changes and re-running.
+
+**Not done, deliberately** — stage 1 is the shell and the supervisor, and the
+following are named here so they are not mistaken for oversights:
+native file dialogs and menus still fall back to the browser
+`ProjectFileSystem` (stage 2); the archive is still built whole in memory, so
+the 300 MB ceiling in the risk table is unchanged (stage 3); and there is no
+packaging at all — no electron-builder, no bundled interpreter, no installer,
+no code signing (stage 4). A packaged build's `rendererUrl()` branch is
+written but only the development path has been run.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -2613,7 +2805,7 @@ Phases 5–9, with the actual entry points:
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
 | 7 | **done** — all five chart types (volcano, heatmap, survival, PCA, UMAP) | the DOM-volume prerequisite — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), and UMAP's reuse of that same mechanism plus its own new dependency (`figureforge/umap.py`, the `'umap'` `DataFormat`, "Run UMAP") — see "Phase 7, Stage 1" through "Stage 5" below |
-| 8 | Electron shell | new; see the sidecar risk below |
+| 8 | **stage 1 done** — Electron shell + Python sidecar lifecycle; stages 2–4 open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2 is native file dialogs through the existing `ProjectFileSystem` seam; stage 3 is streaming the archive to disk; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
 ### Already scaffolded but unused
@@ -2657,7 +2849,7 @@ Phases 5–9, with the actual entry points:
 
 | Risk | Detail |
 |---|---|
-| **Electron packaging** | Web-first deferred this, it did not remove it. The desktop shell needs Python bundled as a sidecar process with lifecycle management — real work, not a wrapper. |
+| **Electron packaging** | *Half fixed.* The lifecycle half — the part this row called "real work, not a wrapper" — is done and verified: `apps/desktop` supervises a real Python child (free port, health-gated readiness, backoff restarts, SIGTERM→SIGKILL teardown) and `figureforge/sidecar.py` reaps itself if the parent is SIGKILLed, proven by a smoke check that does exactly that. **Packaging itself is untouched**: no electron-builder, no bundled interpreter, no installer, no code signing, and the app is only ever run from a checkout. `make desktop-smoke` is a container harness for verifying the shell, not a release pipeline. |
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
@@ -2739,6 +2931,29 @@ Each of these cost time once and will again:
   name span. Likewise `inner_text()` fails on SVG (`text_content()` works), and
   a synthetic `input` event does not drive a React controlled input — use
   `fill()`, which goes through the native setter React tracks.
+- **A sandboxed Electron preload cannot `require` a relative module**, and it
+  fails *silently* — the window opens, React mounts, and only the first API
+  call reveals that the bridge never installed. Its `require` resolves a short
+  allow-list of Electron's own modules and nothing else, so `apps/desktop`
+  bundles the preload with esbuild. If you add a preload import, check it
+  survives the bundle rather than assuming tsc's output is what runs.
+- **Anything the Electron main process and the preload both import must import
+  nothing itself.** `preload.ts` touches `ipcRenderer` at module scope, so a
+  main-process `require` of it throws on `undefined.sendSync` before any window
+  exists — the app dies at startup with every unit test green. Shared constants
+  live in `apps/desktop/src/channels.ts` for exactly this reason.
+- **`npm install` here does not run lifecycle scripts.** Electron's postinstall
+  therefore never fetches its binary, and `node_modules/electron` looks
+  correctly installed while carrying no `dist/`. `docker/desktop-entrypoint.sh`
+  invokes `install.js` explicitly rather than trusting the postinstall.
+- **`tsc --build` caches across a broken tree.** A `RectMm` that was never
+  imported survived round 10's "typecheck clean" because the incremental build
+  skipped the project. Use `tsc --build --force` before claiming a clean
+  typecheck.
+- **`xvfb-run` needs `xauth`**, which the slim images do not carry; without it
+  it exits with `xauth command not found` before your program starts. It also
+  outlives a crashed child, so a hung container may be `xvfb-run` waiting on
+  nothing — check with `ps` inside it rather than assuming the app is running.
 
 ### Export traps encoded in the code
 

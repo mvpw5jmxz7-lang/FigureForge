@@ -15,14 +15,17 @@ ROOT := $(shell pwd)
 MOUNT := -v $(ROOT):/app:z
 
 .DEFAULT_GOAL := help
-.PHONY: help build up down restart logs ps sh-web sh-api test test-web test-api acceptance lint clean
+.PHONY: help build build-desktop up down restart logs ps sh-web sh-api test test-web test-api acceptance desktop desktop-smoke lint clean
 
 help: ## Show available targets
-	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build both container images
 	podman build -t figureforge-web -f docker/web.Dockerfile .
 	podman build -t figureforge-api -f docker/api.Dockerfile .
+
+build-desktop: ## Build the Electron shell image (adds ~250 MB of GUI libraries)
+	podman build -t figureforge-desktop -f docker/desktop.Dockerfile .
 
 up: build ## Create the pod and start web (:5173) + api (:8000)
 	-podman pod exists $(POD) || podman pod create --name $(POD) -p 5173:5173 -p 8000:8000
@@ -67,6 +70,28 @@ test-api: ## Run the Python test suite
 
 acceptance: ## Run the end-to-end figure flow (needs `make up` first)
 	podman exec -w /app figureforge-web npx vite-node scripts/acceptance.ts
+
+# Joined to the pod so the shell reaches the Vite dev server on plain
+# localhost:5173, the same trick the web container already relies on. The
+# Python sidecar it spawns is its own child on a loopback port it picks
+# itself, so it does not collide with the pod's :8000 service.
+desktop: build-desktop ## Launch the Electron shell against the dev server (needs `make up`)
+	podman run --rm -it --pod $(POD) --name figureforge-desktop \
+		$(MOUNT) -v figureforge-node-modules:/app/node_modules \
+		-v figureforge-electron:/opt/electron \
+		figureforge-desktop \
+		bash -lc 'npm run build --workspace @figureforge/desktop && \
+			xvfb-run -a --server-args="-screen 0 1400x900x24" \
+			$$FIGUREFORGE_ELECTRON_BIN --no-sandbox apps/desktop/dist/main.js'
+
+desktop-smoke: build-desktop ## Drive the Electron shell headlessly and assert on it (needs `make up`)
+	podman run --rm --pod $(POD) --name figureforge-desktop-smoke \
+		$(MOUNT) -v figureforge-node-modules:/app/node_modules \
+		-v figureforge-electron:/opt/electron \
+		figureforge-desktop \
+		bash -lc 'npm run build --workspace @figureforge/desktop && \
+			xvfb-run -a --server-args="-screen 0 1400x900x24" \
+			node scripts/desktop-smoke.mjs'
 
 lint: ## Lint both codebases
 	podman run --rm $(MOUNT) -v figureforge-node-modules:/app/node_modules \

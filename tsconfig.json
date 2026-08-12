@@ -5,6 +5,7 @@
     { "path": "./packages/theme" },
     { "path": "./packages/render" },
     { "path": "./packages/plots" },
-    { "path": "./apps/web" }
+    { "path": "./apps/web" },
+    { "path": "./apps/desktop" }
   ]
 }

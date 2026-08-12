@@ -2,7 +2,28 @@
 
 import type { Alternative, Correction, StatResult, StatTest } from '@figureforge/doc-model';
 
-const BASE = '/api';
+declare global {
+  interface Window {
+    /** Injected by the Electron preload; absent in every browser build. */
+    figureforge?: { readonly apiBase?: () => string };
+  }
+}
+
+/**
+ * Where the service is.
+ *
+ * In the browser this is the same-origin path Vite proxies, and always was.
+ * The desktop shell owns the service as a child process on a port chosen at
+ * runtime, so the base cannot be a constant there — and it is read per call
+ * rather than captured once because a sidecar that crashes and restarts may
+ * come back on a different port.
+ *
+ * Guarded for a missing `window` because the test suite runs in Node.
+ */
+const base = (): string => {
+  if (typeof window === 'undefined') return '/api';
+  return window.figureforge?.apiBase?.() || '/api';
+};
 
 export interface AnalyzeRequest {
   test: StatTest;
@@ -40,7 +61,7 @@ async function failure(response: Response): Promise<ApiError> {
 }
 
 export async function analyze(request: AnalyzeRequest): Promise<StatResult> {
-  const response = await fetch(`${BASE}/analyze`, {
+  const response = await fetch(`${base()}/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -72,7 +93,7 @@ export interface PcaResult {
 }
 
 export async function runPca(request: PcaRequest): Promise<PcaResult> {
-  const response = await fetch(`${BASE}/pca`, {
+  const response = await fetch(`${base()}/pca`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -100,7 +121,7 @@ export interface UmapResult {
 }
 
 export async function runUmap(request: UmapRequest): Promise<UmapResult> {
-  const response = await fetch(`${BASE}/umap`, {
+  const response = await fetch(`${base()}/umap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -121,7 +142,7 @@ export interface ExportRequest {
 }
 
 export async function exportFigure(request: ExportRequest): Promise<Blob> {
-  const response = await fetch(`${BASE}/export`, {
+  const response = await fetch(`${base()}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -151,7 +172,7 @@ export async function decodeImage(file: File): Promise<DecodedImage> {
   const body = new FormData();
   body.append('file', file);
 
-  const response = await fetch(`${BASE}/decode-image`, { method: 'POST', body });
+  const response = await fetch(`${base()}/decode-image`, { method: 'POST', body });
   if (!response.ok) throw await failure(response);
 
   const header = (name: string): string | null => response.headers.get(name);
@@ -178,7 +199,7 @@ export async function decodeImage(file: File): Promise<DecodedImage> {
 
 export async function health(): Promise<boolean> {
   try {
-    const response = await fetch(`${BASE}/health`);
+    const response = await fetch(`${base()}/health`);
     return response.ok;
   } catch {
     return false;

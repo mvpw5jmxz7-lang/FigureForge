@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    // Electron's main process and — more importantly — a *sandboxed* preload
+    // script must be CommonJS. That forces two overrides of the base config:
+    // `verbatimModuleSyntax` cannot emit ESM import syntax into a CommonJS
+    // module, and `bundler` resolution is not valid for a real Node runtime
+    // that resolves through `require`.
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "verbatimModuleSyntax": false,
+    "types": ["node"],
+    "noEmit": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts"]
+}

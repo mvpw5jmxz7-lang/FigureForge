@@ -1,0 +1,17 @@
+{
+  "name": "@figureforge/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Electron shell hosting the FigureForge renderer and its Python sidecar",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc --build && npm run bundle:preload",
+    "bundle:preload": "esbuild src/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/preload.js",
+    "start": "electron dist/main.js"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "esbuild": "^0.21.5"
+  }
+}

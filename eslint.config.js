@@ -16,6 +16,23 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // Plain-JavaScript tooling scripts run under Node with no TypeScript pass
+    // to supply `types: ["node"]`, so their globals are declared here. Listed
+    // literally rather than pulled from the `globals` package: the list is
+    // short, and it doubles as a statement of what these scripts are allowed
+    // to reach for.
+    files: ['**/*.mjs'],
+    languageOptions: {
+      globals: {
+        WebSocket: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        process: 'readonly',
+        setTimeout: 'readonly',
+      },
+    },
+  },
+  {
     languageOptions: {
       parserOptions: { ecmaVersion: 2022, sourceType: 'module' },
     },
