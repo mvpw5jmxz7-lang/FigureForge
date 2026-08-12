@@ -220,6 +220,8 @@ button.icon.danger:hover { color: var(--danger); }
 [data-handle='ne'], [data-handle='sw'] { cursor: nesw-resize; }
 [data-handle='n'], [data-handle='s'] { cursor: ns-resize; }
 [data-handle='e'], [data-handle='w'] { cursor: ew-resize; }
+[data-handle='rotate'] { cursor: grab; }
+[data-handle='rotate']:active { cursor: grabbing; }
 
 /* --- side panel --------------------------------------------------------- */
 

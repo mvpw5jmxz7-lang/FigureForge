@@ -12,6 +12,7 @@ import {
   createDocument,
   createIdFactory,
   blocksOfSize,
+  clearBlock,
   copyBlock,
   couldHaveRowNames,
   dataBlocks,
@@ -94,6 +95,7 @@ import {
   snapFrame,
   suggestGrid,
 } from './layout.js';
+import { rotatePoint, snapAngle, snapRotation } from './geometry.js';
 import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './templates.js';
 import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
@@ -996,6 +998,133 @@ describe('layout', () => {
     expect(clamped.height).toBeGreaterThan(0);
   });
 
+  it('locks to a square from every corner and edge under aspectLock 1', () => {
+    // What Shift does on the canvas: a square whichever grip is dragged, and
+    // whichever axis the pointer favours.
+    const original = { x: 10, y: 10, width: 40, height: 20 };
+
+    for (const handle of ['nw', 'ne', 'se', 'sw', 'n', 'e', 's', 'w'] as const) {
+      const square = resizeFrame(original, handle, 12, 4, { aspectLock: 1 });
+      expect(square.width).toBeCloseTo(square.height, 6);
+    }
+
+    // The floor must not be allowed to break the ratio — the re-derive after
+    // clamping is what stops a 5 mm-wide, 20 mm-tall "square".
+    const clamped = resizeFrame(original, 'se', -500, -500, { aspectLock: 1, minMm: 5 });
+    expect(clamped.width).toBeCloseTo(clamped.height, 6);
+    expect(clamped.width).toBeCloseTo(5, 6);
+  });
+
+  it('is byte-identical with rotationDeg 0 or absent', () => {
+    // The guarantee every existing caller relies on: adding the option changed
+    // nothing for a figure that never rotates anything.
+    const original = { x: 10, y: 10, width: 40, height: 30 };
+    for (const handle of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const) {
+      expect(resizeFrame(original, handle, 7, -3, { rotationDeg: 0 })).toEqual(
+        resizeFrame(original, handle, 7, -3),
+      );
+    }
+  });
+
+  it('holds the anchored corner still on the page while resizing a rotated frame', () => {
+    /*
+     * The property that makes a rotated resize correct.
+     *
+     * Both frames are drawn about their own centres, and the centre moves when
+     * the size changes — so anchoring the opposite corner in the frame's own
+     * coordinates (which is the whole answer while axis-aligned) lets the
+     * *visible* corner swing away, and the shape slides under the cursor.
+     */
+    const original = { x: 10, y: 10, width: 40, height: 30 };
+    const rotationDeg = 37;
+
+    const pageCorner = (r: typeof original, fx: number, fy: number) =>
+      rotatePoint(
+        { x: r.x + r.width * fx, y: r.y + r.height * fy },
+        { x: r.x + r.width / 2, y: r.y + r.height / 2 },
+        rotationDeg,
+      );
+
+    // Dragging 'se' anchors 'nw' (fractions 0,0); dragging 'nw' anchors 'se'.
+    const se = resizeFrame(original, 'se', 9, 5, { rotationDeg });
+    const beforeNw = pageCorner(original, 0, 0);
+    const afterNw = pageCorner(se, 0, 0);
+    expect(afterNw.x).toBeCloseTo(beforeNw.x, 6);
+    expect(afterNw.y).toBeCloseTo(beforeNw.y, 6);
+
+    const nw = resizeFrame(original, 'nw', -6, -4, { rotationDeg });
+    const beforeSe = pageCorner(original, 1, 1);
+    const afterSe = pageCorner(nw, 1, 1);
+    expect(afterSe.x).toBeCloseTo(beforeSe.x, 6);
+    expect(afterSe.y).toBeCloseTo(beforeSe.y, 6);
+
+    // An edge grip anchors the midpoint of the opposite edge.
+    const east = resizeFrame(original, 'e', 8, 0, { rotationDeg });
+    const beforeW = pageCorner(original, 0, 0.5);
+    const afterW = pageCorner(east, 0, 0.5);
+    expect(afterW.x).toBeCloseTo(beforeW.x, 6);
+    expect(afterW.y).toBeCloseTo(beforeW.y, 6);
+  });
+
+  it('resizes a rotated frame along its own axes, not the page\'s', () => {
+    // Turned a quarter turn, a drag straight down the page runs along what the
+    // author sees as the shape's *width*.
+    const original = { x: 0, y: 0, width: 40, height: 20 };
+    const turned = resizeFrame(original, 'e', 0, 10, { rotationDeg: 90 });
+    expect(turned.width).toBeCloseTo(50, 6);
+    expect(turned.height).toBeCloseTo(20, 6);
+  });
+
+  it('snaps a drag onto the nearest 45° ray, keeping its distance', () => {
+    const anchor = { x: 10, y: 10 };
+
+    // Just past due east snaps back to due east, at the same radius.
+    const nearEast = snapAngle(anchor, { x: 30, y: 12 });
+    expect(nearEast.y).toBeCloseTo(10, 6);
+    expect(nearEast.x).toBeGreaterThan(anchor.x);
+    expect(Math.hypot(nearEast.x - anchor.x, nearEast.y - anchor.y)).toBeCloseTo(
+      Math.hypot(20, 2),
+      6,
+    );
+
+    // All eight rays are reachable, and each lands on a multiple of 45°.
+    for (let bearing = 0; bearing < 360; bearing += 45) {
+      const rad = (bearing * Math.PI) / 180;
+      const point = { x: anchor.x + 10 * Math.cos(rad), y: anchor.y + 10 * Math.sin(rad) };
+      const snapped = snapAngle(anchor, point);
+      expect(snapped.x).toBeCloseTo(point.x, 6);
+      expect(snapped.y).toBeCloseTo(point.y, 6);
+    }
+
+    // Exactly between two rays it may go either way, but never anywhere else.
+    const between = snapAngle(anchor, { x: 10 + 10 * Math.cos(Math.PI / 8), y: 10 + 10 * Math.sin(Math.PI / 8) });
+    const degrees = (Math.atan2(between.y - anchor.y, between.x - anchor.x) * 180) / Math.PI;
+    expect(Math.abs(degrees % 45)).toBeCloseTo(0, 6);
+  });
+
+  it('leaves a zero-length drag alone rather than forcing it to 0°', () => {
+    const anchor = { x: 4, y: 9 };
+    expect(snapAngle(anchor, { x: 4, y: 9 })).toEqual({ x: 4, y: 9 });
+  });
+
+  it('snaps a rotation to 45° and normalises it into [0, 360)', () => {
+    expect(snapRotation(37)).toBe(45);
+    expect(snapRotation(20)).toBe(0);
+    expect(snapRotation(-10)).toBe(0);
+    // Wrapping, so a grip dragged several turns round never stores 720.
+    expect(snapRotation(-46)).toBe(315);
+    expect(snapRotation(359)).toBe(0);
+  });
+
+  it('rotates a point clockwise about a centre, matching SVG', () => {
+    // SVG's rotate() is clockwise in a y-down space: +x turns onto +y.
+    const turned = rotatePoint({ x: 1, y: 0 }, { x: 0, y: 0 }, 90);
+    expect(turned.x).toBeCloseTo(0, 6);
+    expect(turned.y).toBeCloseTo(1, 6);
+    // Zero is the identity, which is what keeps the unrotated path untouched.
+    expect(rotatePoint({ x: 3, y: 7 }, { x: 1, y: 1 }, 0)).toEqual({ x: 3, y: 7 });
+  });
+
   it('snaps to a neighbour edge in preference to the grid', () => {
     const result = snapFrame(
       { x: 40.3, y: 10, width: 20, height: 20 },
@@ -1493,6 +1622,43 @@ describe('layout templates', () => {
       }
     }
   });
+
+  it('offers a single-column stack at every multi-panel count', () => {
+    /*
+     * The reported gap: every template was landscape-biased, and a vertical
+     * stack — the commonest arrangement for a multi-row figure — could not be
+     * chosen at all.
+     */
+    for (const count of [2, 3, 4, 5, 6]) {
+      const stack = templatesForPanelCount(count).find(
+        (t) => t.grid.columns === 1 && t.grid.rows === count,
+      );
+      expect(stack, `no vertical stack for ${count} panels`).toBeDefined();
+      expect(stack!.slots).toEqual(
+        Array.from({ length: count }, (_, row) => ({ row, col: 0 })),
+      );
+    }
+  });
+
+  it('has a unique id for every template', () => {
+    // `findLayoutTemplate` returns the first match, so a duplicate id would
+    // make one of the two unreachable from the Toolbar's dropdown.
+    const ids = LAYOUT_TEMPLATES.map((t) => t.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(findLayoutTemplate(id)?.id).toBe(id);
+  });
+
+  it('warns about page height on every template taller than two rows', () => {
+    // Nothing here grows the page, so a tall template compresses its panels
+    // into the existing height. The description is the one place that says so,
+    // and the Toolbar already shows it as the option's tooltip.
+    for (const template of LAYOUT_TEMPLATES) {
+      if (template.grid.rows <= 2) continue;
+      expect(template.description, `${template.id} says nothing about height`).toMatch(
+        /page height/i,
+      );
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1943,6 +2109,31 @@ describe('.figureforge archive', () => {
     // — cannot affect what unzips.
     const loaded = loadArchive(bytes);
     expect(loaded.manifest.format).toBe('figureforge');
+  });
+
+  it('round-trips a non-zero rotation on an annotation', () => {
+    /*
+     * `rotation` has been on `NodeBase` and in the schema since phase 1, but
+     * nothing ever set it to anything but 0 — so nothing proved it survives a
+     * save. It does not need a `SCHEMA_VERSION` bump for exactly that reason,
+     * and this is what makes that claim checkable rather than asserted.
+     */
+    const { doc } = sampleDocument();
+    const rotated = editDocument(doc, (draft) => {
+      const shape = addShape(draft, createIdFactory(), {
+        shape: 'rect',
+        frame: { x: 10, y: 10, width: 20, height: 12 },
+      });
+      draft.nodes[shape.id]!.rotation = 37.5;
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(rotated)));
+    const shape = Object.values(loaded.document.nodes).find((n) => n.type === 'shape');
+    expect(shape?.rotation).toBe(37.5);
+    // And the untouched nodes still carry the default, so the field did not
+    // become something every node now has to opt out of.
+    const panels = Object.values(loaded.document.nodes).filter((n) => n.type === 'panel');
+    expect(panels.every((p) => p.rotation === 0)).toBe(true);
   });
 
   it('round-trips a volcano plot with its new optional fields', () => {
@@ -3382,6 +3573,49 @@ describe('dataset editing', () => {
     const pasted = pasteBlock(table(), 2, 1, copied);
     expect(pasted.rows[2]).toEqual([null, 10, 11, 12]);
     expect(pasted.rows[3]).toEqual([null, 4, 5, 6]);
+  });
+
+  it('clears a rectangle of cells without changing the table shape', () => {
+    const cleared = clearBlock(table(), 0, 1, 1, 2);
+    // The rectangle is blanked, and blanked to `null` — the same value the
+    // parser writes for an empty cell, not the string "null".
+    expect(cleared.rows[0]).toEqual(['Vehicle', null, null, 12]);
+    expect(cleared.rows[1]).toEqual(['Drug', null, null, 6]);
+    // Row and column counts are untouched: clearing is not removing.
+    expect(cleared.rows).toHaveLength(table().rows.length);
+    expect(cleared.columns).toHaveLength(table().columns.length);
+  });
+
+  it('clears a single cell, and accepts its corners in either order', () => {
+    expect(clearBlock(table(), 1, 2, 1, 2).rows[1]).toEqual(['Drug', 4, null, 6]);
+    // A selection dragged up-and-left names the same rectangle backwards.
+    expect(clearBlock(table(), 1, 2, 0, 1).rows[0]).toEqual(['Vehicle', null, null, 12]);
+  });
+
+  it('clamps a selection that runs past the table rather than refusing it', () => {
+    // Dragging past the last row is ordinary; refusing the whole clear over it
+    // would be surprising.
+    const cleared = clearBlock(table(), 0, 0, 99, 99);
+    expect(cleared.rows.every((r) => r.every((c) => c === null))).toBe(true);
+    expect(cleared.rows).toHaveLength(table().rows.length);
+  });
+
+  it('leaves a numeric column numeric when every value in it is cleared', () => {
+    /*
+     * `columnKindFor` reports an entirely blank column as 'number', so clearing
+     * one cannot silently retype it and flip the layout the format inference
+     * reads off those kinds. Worth pinning: the opposite behaviour would make a
+     * Delete keystroke quietly change how the whole table is plotted.
+     */
+    const cleared = clearBlock(table(), 0, 1, 1, 1);
+    expect(cleared.columns[1]?.kind).toBe('number');
+  });
+
+  it('returns the same dataset when the selection is already blank', () => {
+    // No edit, so no `editedAt` stamp and no undo entry for a keystroke that
+    // changed nothing.
+    const blank = clearBlock(table(), 0, 1, 1, 2);
+    expect(clearBlock(blank, 0, 1, 1, 2)).toBe(blank);
   });
 
   it('marks the dataset edited, which is what makes an analysis go stale', () => {

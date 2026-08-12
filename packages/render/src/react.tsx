@@ -77,6 +77,9 @@ function toReactProps(
   }
 
   if (node.role) props['data-role'] = node.role;
+  // Editor-only, like `data-role`. The string serialiser reads `attrs` alone,
+  // so neither of these reaches an exported figure.
+  if (node.editTarget) props['data-edit-target'] = node.editTarget;
 
   return props;
 }

@@ -58,6 +58,7 @@ import {
   offsetReserveMm,
   reflowBrackets,
 } from '@figureforge/render';
+import { isRotatable } from './Canvas.js';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import type { DocumentApi } from '../useDocument.js';
@@ -636,6 +637,29 @@ export function InspectorTab({
         {formatMm(node.frame.width, doc.page.displayUnit)} ×{' '}
         {formatMm(node.frame.height, doc.page.displayUnit)}
       </p>
+
+      {/*
+        Rotation is offered only on the leaf annotations. The renderer honours
+        `rotation` on any node, but `absoluteFrame` — which every canvas overlay
+        and the whole layout engine read — ignores it, so a rotated container
+        would misplace its children's chrome. Withheld rather than approximated,
+        and the canvas's own rotate grip follows the same set.
+      */}
+      {isRotatable(node) && (
+        <label className="field block">
+          Rotation (°)
+          <input
+            type="number"
+            step={5}
+            value={Number(node.rotation.toFixed(1))}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (!Number.isFinite(value)) return;
+              set('Change rotation', { rotation: ((value % 360) + 360) % 360 });
+            }}
+          />
+        </label>
+      )}
 
       <div className="field-row">
         <label className="check">

@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  absoluteFrame,
   addArrow,
   addAsset,
   addPanelWithImage,
@@ -30,7 +31,7 @@ import { NATURE_THEME } from '@figureforge/theme';
 import { MAX_VECTOR_POINTS, planPointClouds, renderDocument } from './render-document.js';
 import { toSvgString } from './svg-string.js';
 import { toReact } from './react.js';
-import { collectAttr, collectByRole, walkScene, walkWithOwner } from './scene.js';
+import { collectAttr, collectByRole, round, walkScene, walkWithOwner, type SceneNode } from './scene.js';
 import { SUPERSCRIPT_MIN_PT } from './text-width.js';
 
 const CSV = `Treatment,Rep1,Rep2,Rep3
@@ -113,9 +114,54 @@ describe('adapter parity', () => {
     // strip them before comparing the drawing itself.
     const stripped = fromReact
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
 
     expect(stripped).toBe(fromString);
+  });
+
+  it('marks axis titles as editable without changing a byte of the export', () => {
+    /*
+     * `editTarget` is scene *metadata*, like `role` and `nodeId` —
+     * `toSvgString` serialises `attrs` alone. Putting it in `attrs` would have
+     * changed every exported figure for a purely editorial concern, and the
+     * whole-document parity assertion above would not have noticed: it strips
+     * the React-only hooks from both sides before comparing.
+     */
+    const titled = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type !== 'plot') continue;
+        node.x = { ...node.x, title: 'Dose (mg)' };
+        node.y = { ...node.y, title: 'Response' };
+      }
+    });
+    const titledScene = renderDocument(titled, { theme: NATURE_THEME });
+
+    const marked: SceneNode[] = [];
+    walkScene(titledScene, (n) => {
+      if (n.editTarget) marked.push(n);
+    });
+
+    // Both titles on every plot, and each one names a field the canvas knows
+    // how to open — a typo here is a double-click that silently does nothing.
+    expect(marked.length).toBeGreaterThan(0);
+    for (const node of marked) {
+      expect(['x.title', 'y.title', 'y2.title', 'cascadeAxisTitle']).toContain(node.editTarget);
+      expect(node.tag).toBe('text');
+    }
+    expect(marked.map((n) => n.editTarget)).toContain('x.title');
+    expect(marked.map((n) => n.editTarget)).toContain('y.title');
+
+    // The export carries none of it; React carries all of it.
+    expect(toSvgString(titledScene)).not.toContain('data-edit-target');
+    expect(renderToStaticMarkup(toReact(titledScene))).toContain('data-edit-target="x.title"');
+
+    // Tick labels are deliberately not editable: they are computed from the
+    // data, and an editable one would let a figure show a number its data does
+    // not support.
+    for (const label of collectByRole(titledScene, 'tick-label')) {
+      expect(label.editTarget).toBeUndefined();
+    }
   });
 
   it('produces the same markup when axis labels are rotated', () => {
@@ -134,6 +180,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
 
     expect(fromReact).toBe(normalise(toSvgString(scene)));
@@ -201,6 +248,7 @@ describe('adapter parity', () => {
 
       const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
         .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
         .replace(/ data-node-id="[^"]*"/g, '');
       expect(fromReact).toBe(normalise(toSvgString(scene)));
 
@@ -244,6 +292,7 @@ describe('adapter parity', () => {
 
       const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
         .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
         .replace(/ data-node-id="[^"]*"/g, '');
       expect(fromReact).toBe(normalise(toSvgString(scene)));
       expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -294,6 +343,7 @@ describe('adapter parity', () => {
 
       const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
         .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
         .replace(/ data-node-id="[^"]*"/g, '');
       expect(fromReact).toBe(normalise(toSvgString(scene)));
       expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -348,6 +398,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -395,6 +446,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -444,6 +496,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -494,6 +547,7 @@ describe('adapter parity', () => {
       expect(collectByRole(pending, 'point')).toEqual([]);
       const pendingFromReact = normalise(renderToStaticMarkup(toReact(pending)))
         .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
         .replace(/ data-node-id="[^"]*"/g, '');
       expect(pendingFromReact).toBe(normalise(toSvgString(pending)));
 
@@ -509,6 +563,7 @@ describe('adapter parity', () => {
       expect(collectAttr(baked, 'href')).toEqual(['data:image/png;base64,AAAA']);
       const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
         .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
         .replace(/ data-node-id="[^"]*"/g, '');
       expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
 
@@ -563,6 +618,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -620,6 +676,7 @@ describe('adapter parity', () => {
     expect(collectByRole(baked, 'point')).toEqual([]);
     const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
   });
@@ -661,6 +718,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -708,6 +766,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -763,6 +822,7 @@ describe('adapter parity', () => {
 
     const bakedFromReact = normalise(renderToStaticMarkup(toReact(baked)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(bakedFromReact).toBe(normalise(toSvgString(baked)));
     expect(() => renderToStaticMarkup(toReact(baked))).not.toThrow();
@@ -804,6 +864,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -845,6 +906,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -885,6 +947,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -927,6 +990,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -1015,6 +1079,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -1068,6 +1133,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -1111,6 +1177,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -1153,6 +1220,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -1213,6 +1281,7 @@ describe('adapter parity', () => {
 
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
@@ -1299,6 +1368,7 @@ describe('image and annotation nodes', () => {
   it('produces the same markup from both adapters', () => {
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
@@ -1452,6 +1522,82 @@ describe('image and annotation nodes', () => {
     expect(collectByRole(scene, 'point-handle')).toEqual([]);
     expect(() => renderToStaticMarkup(toReact(withChrome))).not.toThrow();
   });
+
+  it('offers a rotate grip on an annotation, and never on a panel', () => {
+    const arrow = Object.values(doc.nodes).find((n) => n.type === 'arrow')!;
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+
+    const onArrow = renderDocument(doc, {
+      theme: NATURE_THEME,
+      resolveAsset,
+      chrome: { selectedIds: [arrow.id] },
+    });
+    // Exactly one, and it does not disturb either existing handle count — the
+    // whole reason 'rotate-handle' is a role of its own.
+    expect(collectByRole(onArrow, 'rotate-handle').length).toBe(1);
+    expect(collectByRole(onArrow, 'resize-handle').length).toBe(8);
+
+    /*
+     * Withheld on containers. `absoluteFrame` ignores rotation, so a rotated
+     * panel would misplace every child's chrome, the crop overlay and the
+     * layout engine's own idea of where it is. Keeping the grip off containers
+     * is what guarantees no rotated node ever has a descendant.
+     */
+    const onPanel = renderDocument(doc, {
+      theme: NATURE_THEME,
+      resolveAsset,
+      chrome: { selectedIds: [panel.id] },
+    });
+    expect(collectByRole(onPanel, 'rotate-handle')).toEqual([]);
+    expect(collectByRole(onPanel, 'resize-handle').length).toBe(8);
+
+    // Chrome, so it must never reach an export.
+    expect(collectByRole(scene, 'rotate-handle')).toEqual([]);
+    expect(() => renderToStaticMarkup(toReact(onArrow))).not.toThrow();
+  });
+
+  it("turns a rotated node's chrome with it, about the same centre the node uses", () => {
+    /*
+     * The failure this exists to catch: the outline and all nine grips staying
+     * axis-aligned while the shape under them turns, so the grip the author
+     * grabs is not the one they are pointing at.
+     */
+    const shape = Object.values(doc.nodes).find((n) => n.type === 'shape');
+    const target = shape ?? Object.values(doc.nodes).find((n) => n.type === 'arrow')!;
+    const turned = editDocument(doc, (draft) => {
+      draft.nodes[target.id]!.rotation = 30;
+    });
+
+    const withChrome = renderDocument(turned, {
+      theme: NATURE_THEME,
+      resolveAsset,
+      chrome: { selectedIds: [target.id] },
+    });
+
+    const handle = collectByRole(withChrome, 'rotate-handle')[0];
+    expect(handle).toBeDefined();
+
+    // The grips are written in the node's own coordinates and turned once by a
+    // wrapping group, so the transform is what proves they follow the node.
+    const svg = toSvgString(withChrome);
+    const frame = absoluteFrame(turned.nodes, target.id)!;
+    expect(svg).toContain(
+      `rotate(30 ${round(frame.x + frame.width / 2)} ${round(frame.y + frame.height / 2)})`,
+    );
+
+    // An unrotated selection emits no such wrapper at all, so nothing about
+    // today's chrome moved.
+    const flat = toSvgString(
+      renderDocument(doc, {
+        theme: NATURE_THEME,
+        resolveAsset,
+        chrome: { selectedIds: [target.id] },
+      }),
+    );
+    expect(flat).not.toContain('rotate(30');
+    expect(() => renderToStaticMarkup(toReact(withChrome))).not.toThrow();
+  });
+
 });
 
 describe('page geometry', () => {

@@ -7,8 +7,8 @@
  * between them never destroys work.
  */
 
-import type { RectMm } from './geometry.js';
-import { fitAspect, right, bottom, centerX, centerY } from './geometry.js';
+import type { PointMm, RectMm } from './geometry.js';
+import { fitAspect, right, bottom, centerX, centerY, rotatePoint } from './geometry.js';
 import type { FigureNode, NodeId, NodeMap } from './nodes.js';
 
 export interface GridSpec {
@@ -323,6 +323,20 @@ export interface ResizeOptions {
   aspectLock?: number | null;
   /** Floor on either dimension, so a panel cannot be dragged to nothing. */
   minMm?: number;
+  /**
+   * The node's own `rotation`, in degrees clockwise about its frame centre.
+   *
+   * Absent or `0` leaves every line of arithmetic below exactly as it was, so
+   * no existing caller changes behaviour. Non-zero does two things: the drag
+   * delta is rotated into the frame's own axes before any width is computed
+   * (dragging the `e` grip of a shape turned 90° must widen it along the
+   * direction the author sees as its side, not along the page's x), and the
+   * origin is corrected afterwards so the anchored corner stays put *on the
+   * page*. Without that second step the frame's unrotated origin is held fixed
+   * while the rotation swings the visible corner away from it, and the node
+   * slides across the canvas as it is resized.
+   */
+  rotationDeg?: number;
 }
 
 const HANDLE_X: Record<ResizeHandle, -1 | 0 | 1> = {
@@ -354,15 +368,23 @@ export function resizeFrame(
   const min = Math.max(0.1, options.minMm ?? 5);
   const dirX = HANDLE_X[handle];
   const dirY = HANDLE_Y[handle];
+  const rotation = options.rotationDeg ?? 0;
 
-  let width = original.width + dxMm * dirX;
-  let height = original.height + dyMm * dirY;
+  // Into the frame's own axes. Rotating the *delta* rather than the frame keeps
+  // every line below identical to the unrotated case.
+  const local =
+    rotation === 0
+      ? { x: dxMm, y: dyMm }
+      : rotatePoint({ x: dxMm, y: dyMm }, { x: 0, y: 0 }, -rotation);
+
+  let width = original.width + local.x * dirX;
+  let height = original.height + local.y * dirY;
 
   const aspect = options.aspectLock ?? null;
   if (aspect && aspect > 0) {
     // Corner drags follow the dominant axis; edge drags derive the other side.
     if (dirX !== 0 && dirY !== 0) {
-      if (Math.abs(dxMm) >= Math.abs(dyMm)) height = width / aspect;
+      if (Math.abs(local.x) >= Math.abs(local.y)) height = width / aspect;
       else width = height * aspect;
     } else if (dirX !== 0) {
       height = width / aspect;
@@ -387,7 +409,41 @@ export function resizeFrame(
   const x = dirX < 0 ? right(original) - width : original.x;
   const y = dirY < 0 ? bottom(original) - height : original.y;
 
-  return { x, y, width, height };
+  const resized = { x, y, width, height };
+  if (rotation === 0) return resized;
+
+  /*
+   * Hold the anchored corner still *on the page*.
+   *
+   * The arithmetic above anchors it in the frame's own coordinates, which is
+   * the whole answer while the frame is axis-aligned. Once it is rotated, both
+   * frames are drawn about their own centres — and the centre moved when the
+   * size changed — so the corner the author is anchoring against lands
+   * somewhere else, and the shape drifts under the cursor.
+   *
+   * Fractions rather than a switch: 0, 0.5 and 1 cover the corner handles and
+   * the edge handles (whose anchor is the midpoint of the opposite edge) in one
+   * expression.
+   */
+  const anchorFx = dirX < 0 ? 1 : dirX > 0 ? 0 : 0.5;
+  const anchorFy = dirY < 0 ? 1 : dirY > 0 ? 0 : 0.5;
+
+  const pageAnchor = (r: RectMm): PointMm =>
+    rotatePoint(
+      { x: r.x + r.width * anchorFx, y: r.y + r.height * anchorFy },
+      { x: centerX(r), y: centerY(r) },
+      rotation,
+    );
+
+  const before = pageAnchor(original);
+  const after = pageAnchor(resized);
+
+  return {
+    x: resized.x + (before.x - after.x),
+    y: resized.y + (before.y - after.y),
+    width,
+    height,
+  };
 }
 
 /**

@@ -23,6 +23,23 @@ export interface SceneNode {
   nodeId?: string;
   /** What this element is, so the quality checker can audit without guessing. */
   role?: SceneRole;
+  /**
+   * A field on the owning document node that this element edits in place, as a
+   * dotted path (`'x.title'`, `'cascadeAxisTitle'`).
+   *
+   * Metadata, deliberately, rather than an entry in `attrs`: `toSvgString`
+   * serialises only `attrs`, so putting it there would change the exported SVG
+   * for a purely editorial concern. The React adapter emits it as
+   * `data-edit-target`, which is all the canvas needs to know *which* string a
+   * double-click on an axis title should open — `nodeId` alone names the plot,
+   * and a plot carries several titles.
+   *
+   * Distinct from `role` because the two answer different questions: `role`
+   * says what an element is (and is consumed by the quality checker's size
+   * rules), this says what editing it would write. Widening `role` into
+   * per-axis members would have silently changed every role-count assertion.
+   */
+  editTarget?: string;
 }
 
 export type SceneRole =
@@ -60,6 +77,13 @@ export type SceneRole =
    * exactly 8, and folding these in would quietly break that assertion's point.
    */
   | 'point-handle'
+  /**
+   * The grip that turns a node. Kept distinct from both handle roles above for
+   * the same reason they are distinct from each other: "exactly 8 resize
+   * handles" and "one point handle per arrow point" are assertions that must
+   * keep meaning what they say when a ninth grip appears beside them.
+   */
+  | 'rotate-handle'
   /**
    * A raster standing in for a plot's points once its count exceeds
    * `MAX_VECTOR_POINTS`. Kept distinct from 'image' — a real `ImageNode` and a

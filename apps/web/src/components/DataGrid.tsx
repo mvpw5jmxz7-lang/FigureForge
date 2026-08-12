@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  clearBlock,
   copyBlock,
   editDataset,
   insertColumn,
@@ -317,6 +318,29 @@ export function DataGrid({
      */
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c' && cursor === null) {
       document.execCommand('copy');
+      return;
+    }
+    /*
+     * Delete/Backspace blanks the selected cells.
+     *
+     * Only with `cursor === null` — once a cell is open for typing, both keys
+     * belong to the text being edited, and stealing Backspace there would make
+     * the editor unusable.
+     *
+     * Bounds are recomputed here rather than read from `rangeBounds` below, the
+     * same way `onCopy` does it: that binding is declared after this handler,
+     * and a second reader of `anchor`/`rangeEnd` is cheaper than reordering the
+     * component around a keystroke.
+     *
+     * No conflict with the canvas's own Delete: its window-level handler
+     * returns early for anything focused inside `.side-panel`.
+     */
+    if ((event.key === 'Delete' || event.key === 'Backspace') && cursor === null) {
+      event.preventDefault();
+      const end = rangeEnd ?? anchor;
+      edit('Clear cells', (ds) =>
+        clearBlock(ds, anchor.row, anchor.col, end.row, end.col),
+      );
       return;
     }
     if (event.key === 'Escape' && cursor === null && rangeEnd !== null) {

@@ -1070,7 +1070,15 @@ export function renderCascadeAxis(node: PlotNode, theme: Theme, geometry: Contin
           'text-anchor': 'middle',
           'dominant-baseline': 'alphabetic',
         },
-        { role: 'cascade-axis-title' },
+        // Editable only when the caption really is `cascadeAxisTitle`. Where it
+        // came from a series' own `category`, the renderer ignores that field
+        // entirely, so offering to edit it would be a control that silently
+        // does nothing — the caption's source is the data, and the data grid is
+        // where it changes.
+        {
+          role: 'cascade-axis-title',
+          ...(group.category === undefined ? { editTarget: 'cascadeAxisTitle' } : {}),
+        },
       ),
     );
   }
@@ -3879,7 +3887,7 @@ function renderSecondaryAxis(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title' }),
+      }, { role: 'axis-title', editTarget: 'y2.title' }),
     );
   }
 
@@ -4632,7 +4640,7 @@ function renderAxes(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title' }),
+      }, { role: 'axis-title', editTarget: 'y.title' }),
     );
   }
 
@@ -4713,7 +4721,7 @@ function renderAxes(
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,
         'text-anchor': 'middle',
-      }, { role: 'axis-title' }),
+      }, { role: 'axis-title', editTarget: 'x.title' }),
     );
   }
 
@@ -4789,7 +4797,7 @@ function renderAxesHorizontal(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title' }),
+      }, { role: 'axis-title', editTarget: 'x.title' }),
     );
   }
 
@@ -4814,7 +4822,7 @@ function renderAxesHorizontal(
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,
         'text-anchor': 'middle',
-      }, { role: 'axis-title' }),
+      }, { role: 'axis-title', editTarget: 'y.title' }),
     );
   }
 
@@ -4873,6 +4881,27 @@ const HANDLE_FILL = '#111318';
 const HANDLE_RING = '#ffffff';
 
 /**
+ * How far the rotate grip stands off the top edge, in mm.
+ *
+ * Clear of the `n` handle rather than on top of it: the two do different things
+ * and a grip that turns a node when the author meant to make it shorter is the
+ * kind of mistake that is only noticed after the fact.
+ */
+const ROTATE_HANDLE_OFFSET_MM = 4;
+
+/**
+ * Node types that offer a rotate grip.
+ *
+ * Only leaf annotations, mirroring `isRotatable` on the canvas side. Rotation
+ * is drawn by `renderNode` onto a node's own wrapping `<g>`, so it applies to
+ * children too — but `absoluteFrame`, which every overlay and the whole layout
+ * engine read, sums ancestor origins and ignores rotation entirely. Keeping the
+ * grip off containers is what guarantees no rotated node ever has a descendant,
+ * so that gap can never be reached.
+ */
+const ROTATABLE_TYPES = new Set(['shape', 'arrow', 'text']);
+
+/**
  * Selection outline and resize handles.
  *
  * Editor chrome: only ever rendered when `chrome.selectedIds` is passed, which
@@ -4880,10 +4909,15 @@ const HANDLE_RING = '#ffffff';
  * cost nothing in parity terms.
  */
 function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): SceneNode {
-  const outlines: SceneNode[] = [];
+  const groups: SceneNode[] = [];
   for (const id of selectedIds) {
     const frame = absoluteFrame(doc.nodes, id);
     if (!frame) continue;
+
+    // Chrome for one node, in that node's own (unrotated) coordinates. The
+    // rotation is applied once to the whole group below, so every position
+    // below is written exactly as it would be for an unrotated node.
+    const outlines: SceneNode[] = [];
     outlines.push(
       el('rect', {
         x: frame.x,
@@ -4900,7 +4934,10 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
 
     // No handles on a locked node: offering a grip that cannot move is worse
     // than offering none.
-    if (isLocked(doc, id)) continue;
+    if (isLocked(doc, id)) {
+      groups.push(rotatedChrome(doc, id, frame, outlines));
+      continue;
+    }
 
     for (const handle of RESIZE_HANDLES) {
       outlines.push(
@@ -4950,8 +4987,82 @@ function renderSelection(doc: FigureDocument, selectedIds: readonly string[]): S
         );
       }
     }
+
+    // One rotate grip, and only on a lone selection: turning several nodes at
+    // once would have to pick a centre for them, and the obvious candidates
+    // (each node's own, or the selection's) disagree visibly.
+    if (node && ROTATABLE_TYPES.has(node.type) && selectedIds.length === 1) {
+      /*
+       * Stem first, grip second.
+       *
+       * The stem ends at the grip's own centre, so drawing it afterwards paints
+       * it over the grip — and since it carries no `data-handle`, a pointer-down
+       * there reaches no handler at all and the drag silently starts a move of
+       * whatever is behind instead. Order is the whole fix.
+       */
+      outlines.push(
+        el('line', {
+          x1: frame.x + frame.width / 2,
+          y1: frame.y,
+          x2: frame.x + frame.width / 2,
+          y2: frame.y - ROTATE_HANDLE_OFFSET_MM,
+          stroke: '#0a84ff',
+          'stroke-width': 0.25,
+          'vector-effect': 'non-scaling-stroke',
+          // Belt and braces: even reordered, the stem must never take a click
+          // that was aimed at the grip it points to.
+          'pointer-events': 'none',
+        }),
+      );
+      outlines.push(
+        el(
+          'circle',
+          {
+            cx: frame.x + frame.width / 2,
+            cy: frame.y - ROTATE_HANDLE_OFFSET_MM,
+            r: HANDLE_HALF_MM,
+            fill: HANDLE_FILL,
+            stroke: HANDLE_RING,
+            'stroke-width': 1,
+            'vector-effect': 'non-scaling-stroke',
+            'data-handle': 'rotate',
+          },
+          undefined,
+          { nodeId: id, role: 'rotate-handle' },
+        ),
+      );
+    }
+
+    groups.push(rotatedChrome(doc, id, frame, outlines));
   }
-  return group({}, outlines);
+  return group({}, groups);
+}
+
+/**
+ * Turn one node's chrome about its own centre, matching what `renderNode` does
+ * to the node itself.
+ *
+ * Without this the outline and all nine grips stay axis-aligned while the shape
+ * under them turns, so the grips sit off the node and the one the author grabs
+ * is not the one they are pointing at. Applying the same `rotate(deg cx cy)`
+ * the renderer already uses is what keeps the two in step by construction.
+ */
+function rotatedChrome(
+  doc: FigureDocument,
+  id: string,
+  frame: RectMm,
+  children: SceneNode[],
+): SceneNode {
+  const rotation = doc.nodes[id]?.rotation ?? 0;
+  if (rotation === 0) return group({}, children);
+  return group(
+    {
+      transform: `rotate(${round(rotation)} ${round(frame.x + frame.width / 2)} ${round(
+        frame.y + frame.height / 2,
+      )})`,
+    },
+    children,
+  );
 }
 
 /** Stable 32-bit hash, used to seed per-node deterministic jitter. */

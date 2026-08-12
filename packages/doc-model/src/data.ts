@@ -1360,6 +1360,49 @@ export function pasteBlock(ds: Dataset, row: number, col: number, text: string):
 }
 
 /**
+ * Blank every cell in a rectangle, leaving the table's shape alone.
+ *
+ * Clearing contents is not the same operation as removing rows or columns —
+ * those already have their own `×` buttons, and a Delete key that silently
+ * restructured the table would be a much bigger action than the one the author
+ * asked for. Positions are kept and set to `null`, the same value the parser
+ * writes for a blank cell, so a cleared cell is indistinguishable from one that
+ * arrived empty.
+ *
+ * Clamped rather than bounds-rejected, because the caller is a selection
+ * rectangle: dragging past the last row is an ordinary thing to do, and
+ * refusing the whole clear over it would be surprising.
+ *
+ * Note this cannot silently retype a numeric column: `columnKindFor` reports an
+ * entirely blank column as `'number'`, so clearing every value in one leaves
+ * the inferred layout exactly where it was.
+ */
+export function clearBlock(ds: Dataset, r0: number, c0: number, r1: number, c1: number): Dataset {
+  const rowStart = Math.max(0, Math.min(r0, r1));
+  const rowEnd = Math.min(ds.rows.length - 1, Math.max(r0, r1));
+  const colStart = Math.max(0, Math.min(c0, c1));
+  const colEnd = Math.min(ds.columns.length - 1, Math.max(c0, c1));
+  if (rowStart > rowEnd || colStart > colEnd) return ds;
+
+  const rows = copyRows(ds);
+  let changed = false;
+  for (let r = rowStart; r <= rowEnd; r++) {
+    const target = rows[r];
+    if (!target) continue;
+    for (let c = colStart; c <= colEnd; c++) {
+      if (target[c] === null) continue;
+      target[c] = null;
+      changed = true;
+    }
+  }
+  // An all-blank selection would otherwise stamp `editedAt` and land an undo
+  // entry for a keystroke that changed nothing.
+  if (!changed) return ds;
+
+  return retyped(ds, rows, [...ds.columns]);
+}
+
+/**
  * Serialise a rectangular block of cells as tab/newline-delimited text — the
  * inverse of `pasteBlock`, and the same shape Excel puts on the clipboard, so
  * a copied block round-trips through a real spreadsheet and back.

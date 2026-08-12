@@ -19,7 +19,11 @@ axis-range clipping toggle, and a cascade plot's schematic depth (z) axis,
 and a ninth round adding sign-aware centred tick labels, a full rectangular
 plot border, and — for a cascading line plot — a true 3D-oblique reference
 grid with configurable colour/style and a second copy of the axes standing
-on its back plane. Phase 8 and 9 are not started.**
+on its back plane, and a tenth round adding Shift-constrained square
+resizing and 45° arrow aiming, node rotation (a free grip plus an Inspector
+field, snapping to 45° with Shift), click-to-edit axis titles on the canvas,
+Delete-to-clear in the data grid, and eleven more layout templates including
+a vertical stack at every panel count. Phase 8 and 9 are not started.**
 
 ---
 
@@ -33,7 +37,7 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 313 TypeScript + 105 Python tests
+make test        # 706 TypeScript + 139 Python tests
 make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
 ```
@@ -203,6 +207,11 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after round 10 (Shift constraints, rotation, editable axis titles,
+cell clearing, more templates):** 706 TypeScript tests, 139 Python tests
+unchanged, typecheck and lint clean, 46-check acceptance run unaffected, and
+27 browser checks in each of light and dark — see "Round 10" below.
 
 **Verified after round 9 (sign-aware tick labels, boxed border, 3D cascade
 gridlines):** 686 TypeScript tests, 139 Python tests unchanged, typecheck and
@@ -2415,6 +2424,184 @@ unaffected (no existing fixture uses any of the new fields).
 
 ---
 
+### Round 10 — constrained drawing, rotation, editable axis titles, cell clearing, more templates
+
+Four items from real use. **Research before implementation shrank two of them
+to almost nothing and reshaped a third**, which is the reason to read this
+section before touching any of it again.
+
+- **`rotation` was already modelled, schema'd and rendered — it simply had no
+  UI.** It has been on `NodeBase` (`nodes.ts`), in `schema.ts`, defaulted by
+  `baseNode`, and honoured by `renderNode`, which pushes
+  `rotate(deg cx cy)` onto every node's wrapping `<g>`. Nothing had ever set it
+  to anything but `0`. So this round added no model work at all for rotation:
+  the whole job was making the *selection chrome and pointer maths*
+  rotation-aware. No `SCHEMA_VERSION` bump for the same reason, and a
+  round-trip test now pins that claim rather than asserting it.
+- **`resizeFrame` already took an `aspectLock`**, with the corner/edge
+  derivation and the re-derive-after-clamping already written — Shift-to-square
+  is passing `1`.
+- **There is no drag-to-draw tool, so "draw a square" and "resize to a square"
+  are the same code path.** Shapes and arrows are *insert-then-drag* (the
+  Toolbar inserts at a fixed frame and selects it; the author drags a grip), a
+  choice already recorded for arrows: a modal tool state would need a cursor
+  preview, an Escape path, multi-point termination and interception of the
+  background handler. The Shift constraint was therefore added to the resize
+  path rather than a drawing mode being invented for it.
+
+#### Shift constraints
+
+- **Shift locks a resize to a square**, overriding an image's or panel's own
+  aspect lock — a deliberate constraint, not a suggestion. Read live off the
+  `pointermove` event rather than from `DragState`, so pressing and releasing
+  Shift mid-drag takes effect at once. (Shift on *pointerdown* still means
+  additive selection; they are different events and do not collide.)
+- **Snapping is suspended under Shift, and for any rotated node.** `snapResize`
+  moves each axis' live edge independently, so it would break the ratio
+  `resizeFrame` had just enforced; and smart guides are computed from the
+  axis-aligned `frame`, which for a rotated node is not where the author sees
+  the shape — a guide drawn there points at nothing. `altKey` already meant
+  "suspend snapping", so all three fold into one `freeform` boolean.
+- **Shift constrains an arrow's heading to 45° steps, measured from the
+  *adjacent* point** — the other end of a two-point arrow, the tail-side
+  neighbour of a bend. `snapAngle` (`geometry.ts`) **preserves the drag
+  distance and constrains only the bearing**: projecting onto the ray instead
+  would shorten the line as the cursor left the snapped direction, so the arrow
+  would appear to shrink while the author was aiming it. A zero-length drag has
+  no direction and is returned untouched rather than forced onto 0°.
+- **A `shape: 'line'` can only express 0°, 45° and 90°, and that is stated
+  rather than faked.** `renderShape` draws a line corner-to-corner of its
+  frame, so its angle *is* its frame aspect. Giving `ShapeNode` a hidden points
+  array to reach the other five directions would duplicate `ArrowNode` badly;
+  an author who needs an arbitrary angle uses an arrow, which has real endpoint
+  grips.
+
+#### Rotation, and the one decision that kept it small
+
+- **Offered only on leaf annotations (`shape`, `arrow`, `text`).** This is the
+  load-bearing choice. `absoluteFrame` sums ancestor origins and **ignores
+  rotation entirely**, and it is what every canvas overlay, `frameOf`, the
+  crop/measure chrome and `Toolbar`'s insert position all read; `autoLayout`,
+  `snapFrame`, `alignFrames`, `measureGutters` and `resizePanel` all assume
+  axis-aligned frames. Restricting rotation to nodes that never have children
+  means **no rotated node ever has a descendant**, so every one of those stays
+  correct *by construction* rather than by a cascade of fixes. `ROTATABLE_TYPES`
+  is spelled once on each side (`isRotatable` in `Canvas.tsx`, read by the
+  Inspector; the renderer's own copy gates the grip) and a parity test asserts a
+  panel is never offered one.
+- **`resizeFrame` gained `rotationDeg`, additive and inert at `0`.** Two things
+  happen when it is non-zero: the drag delta is rotated into the frame's own
+  axes before any width is computed (dragging the `e` grip of a shape turned 90°
+  must widen it along what the author sees as its side), and **the anchored
+  corner is then held still *on the page***. Without that second step the
+  unrotated origin is pinned while the rotation swings the visible corner away
+  from it, and the shape slides across the canvas as it is resized. A test
+  asserts exactly that invariant — the anchor's page position before and after
+  — rather than a literal expected frame.
+- **The chrome is turned by one wrapping group, not per-grip.** `renderSelection`
+  now emits one `<g transform="rotate(deg cx cy)">` per selected node, using the
+  identical transform `renderNode` applies to the node itself, so every handle
+  coordinate inside is written exactly as it was for the unrotated case and the
+  two cannot drift. New `SceneRole: 'rotate-handle'`, kept distinct from
+  `'resize-handle'` and `'point-handle'` for the documented reason those two are
+  distinct from each other: "exactly 8 resize handles" and "one point handle per
+  arrow point" are assertions that must keep meaning what they say.
+- **Stem before grip.** The rotate grip has a short stem back to the frame, and
+  drawing it *after* the circle painted it over the grip's own centre — where,
+  carrying no `data-handle`, a pointer-down reached no handler at all and
+  silently started a move of whatever was behind. Reordered, plus
+  `pointer-events: none` on the stem. **Found by driving a real browser; all 706
+  tests were green over it**, which is the standing rule earning its keep again.
+- One grip only on a lone selection: rotating several nodes at once has to pick
+  a centre, and each node's own versus the selection's disagree visibly.
+
+#### Axis titles edit on the canvas
+
+- **The discriminator is scene *metadata*, not an attribute.** `toSvgString`
+  serialises `node.attrs` alone, while `react.tsx` emits `role`/`nodeId` as
+  `data-*` — so a new optional `SceneNode.editTarget` (emitted as
+  `data-edit-target`) names the field an element edits without changing a byte
+  of any exported figure. Widening `role` into per-axis members was the
+  alternative and was rejected: it would have silently changed every role-count
+  assertion and `quality.ts`'s own role → theme-size map. `nodeId` alone is not
+  enough here — it names the plot, and a plot draws several titles.
+- **The `editTarget` test is checked in `parity.test.tsx`'s strip list.** The
+  whole-document parity assertion normalises React-only hooks off both sides
+  before comparing, so it would *not* have caught a leak on its own; the new
+  test asserts the export contains no `data-edit-target` and React does. The
+  first full run failed on exactly this until the strip was added — the parity
+  test doing its job.
+- **Ordering in `handleDoubleClick` is load-bearing.** The `editTarget` branch
+  runs *before* the container step-in branch: a plot's ancestor is a panel,
+  which is a container, so the existing code would otherwise have swallowed
+  every double-click and merely entered the panel — the title would never open,
+  however many times it was clicked.
+- **The cascade caption is editable only when it really is `cascadeAxisTitle`.**
+  Where it came from a series' own `category`, the renderer ignores that field
+  entirely, so offering to edit it would be a control that silently does
+  nothing.
+- **Tick labels are deliberately not editable**, and a parity test pins it: they
+  are computed from the data, and an editable tick label would let a figure
+  display a number its data does not support. The overlay's box is measured with
+  `getBoundingClientRect()` on the clicked `<text>` — legal in `apps/web`, and
+  the reason `absoluteFrame` (which knows only whole document nodes) could not
+  serve.
+
+#### Clearing cells, and the template gap
+
+- **`clearBlock` mirrors `copyBlock`'s signature** and funnels through the same
+  private `retyped` helper every other transform uses, so column kinds
+  re-derive and `editedAt` is stamped. Corners are accepted in either order and
+  **clamped** rather than bounds-rejected — the caller is a selection rectangle,
+  and dragging past the last row is ordinary. An already-blank selection returns
+  the *same* dataset, so a keystroke that changed nothing leaves no undo entry.
+  Worth knowing: `columnKindFor` reports an entirely blank column as `'number'`,
+  so clearing a numeric column cannot silently retype it and flip the inferred
+  layout — pinned by a test.
+- Bound in `onGridKeyDown` (the container-level handler), only with
+  `cursor === null`: once a cell is open for typing both keys belong to the
+  text. No conflict with the canvas, whose window-level handler already returns
+  early for anything focused inside `.side-panel`.
+- **Every multi-panel template was landscape-biased — there was not one
+  single-column stack in the set**, which is exactly what was reported. Eleven
+  templates added (13 → 24): a vertical stack at each of 2–6 panels, plus
+  `⅔ over ⅓`, `2 + wide bottom`, `3 + wide bottom`, `⅔ + 3 stacked`,
+  `3 over 2` and a `1 + 2 + 3` pyramid. **No geometry changes at all** —
+  `GridSpec` already supported `rowWeights` and `spanCell` already handled
+  spans, so this is data. The existing "every panel gets its own cell" invariant
+  picks all eleven up automatically because it iterates `LAYOUT_TEMPLATES`.
+- **Nothing here grows the page, and each tall template says so.** `applyPreset`
+  never writes `heightMm` and `gridCells` divides the *existing* height into
+  rows, so a 6-tall stack on the default 120 mm page leaves ~15 mm per panel.
+  Rather than changing page sizing (which the journal presets fix, and which
+  `page-too-tall` polices), the needed height goes in each template's
+  `description` — a field the Toolbar already renders as the option's tooltip.
+  A test enforces this for **every** template over two rows, which caught two
+  cases the first pass missed, one of them the pre-existing `six-two-across`.
+
+Driven in a real browser, light **and** dark, **27 checks each**: a Shift-drag
+on a rectangle's SE grip gave exactly 245.8 × 245.8 px (ratio 1.000); the rotate
+grip snapped to 45° with Shift and **the chrome's own transform read 45 to match
+the node's**, with the Inspector's degrees field agreeing; a panel offered no
+rotate grip at all; a Shift-aimed arrow landed 0.000° off a 45° ray from a
+deliberately off-axis drag; double-clicking the y title opened an editor seeded
+with `Cell viability (%)` and the edit landed on the axis; a Shift-selected
+block of cells blanked on Delete, one Ctrl+Z restored `98.2`, and no figure node
+was deleted by the same keystroke; `2 stacked` laid both panels into one column
+with a 62 px gap and no overlap; and the exported PDF stayed a single 29 KB
+page. No console errors in either theme.
+
+**Verified:** 706 TypeScript tests (686 + 20 new: `snapAngle`/`snapRotation`/
+`rotatePoint` and the square-lock, rotation-inertness and anchored-corner
+`resizeFrame` cases in `doc-model.test.ts`, a `clearBlock` suite, a
+rotation round-trip, three template invariants, and parity fixtures for the
+rotate grip, the rotated chrome and `editTarget`), 139 Python tests unchanged
+(nothing here touches `services/api`), typecheck and lint clean, 46-check
+acceptance run unaffected (no existing fixture rotates a node, uses a new
+template, or clears cells).
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -2440,6 +2627,14 @@ Phases 5–9, with the actual entry points:
   until round 4 wired it into `bracketStepMm`.
 - The `'legend'` `SceneRole` was in this list for six phases. Round 4 emits it —
   see `renderLegend`.
+- **`NodeBase.rotation`** belonged in this list for nine rounds and nobody
+  noticed: modelled, in the schema, defaulted by `baseNode` and already applied
+  by `renderNode`, with no UI anywhere and no document ever holding a non-zero
+  value. Round 10 wired it — see "Round 10". It is offered on `shape`/`arrow`/
+  `text` only, and **that restriction is load-bearing**, not a staging decision:
+  `absoluteFrame` ignores rotation, so a rotated container would misplace every
+  descendant's chrome and every layout measurement. Widening it means fixing
+  `absoluteFrame`, `snapFrame`, `alignFrames` and `measureGutters` first.
 
 ### Declared-but-missing things — check before trusting the types
 
@@ -2466,7 +2661,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`) is **optional**, so old files still load. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

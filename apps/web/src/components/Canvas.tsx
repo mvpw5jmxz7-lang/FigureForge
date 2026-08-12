@@ -23,8 +23,10 @@ import {
   resyncScaleBars,
   setArrowPoint,
   setImageCrop,
+  snapAngle,
   snapFrame,
   snapResize,
+  snapRotation,
   type AlignmentGuide,
   type Crop01,
   type FigureDocument,
@@ -81,7 +83,35 @@ interface DragState {
   pointIndex?: number;
   /** The dragged point's start position, in page space. */
   pointOrigin?: { x: number; y: number };
+  /** Set when the drag started on the rotate grip. */
+  rotate?: {
+    /** Page-space centre the node turns about. */
+    centre: { x: number; y: number };
+    /** Bearing from that centre to the pointer when the drag began. */
+    startAngleDeg: number;
+    /** The node's rotation at that moment, which the drag is a delta on. */
+    startRotation: number;
+  };
 }
+
+/**
+ * Node types that may be rotated.
+ *
+ * Deliberately only the leaf annotations. `absoluteFrame` sums ancestor origins
+ * and ignores rotation entirely, and it is what every canvas overlay, the crop
+ * and measure chrome, and `Toolbar`'s insert position all read; `autoLayout`,
+ * `snapFrame`, `alignFrames` and `resizePanel` likewise assume axis-aligned
+ * frames. Restricting rotation to nodes that never have children means no
+ * rotated node ever has a descendant, so all of that stays correct by
+ * construction rather than by a cascade of fixes.
+ */
+const ROTATABLE_TYPES = new Set(['shape', 'arrow', 'text']);
+
+export const isRotatable = (node: FigureNode): boolean => ROTATABLE_TYPES.has(node.type);
+
+/** Degrees, clockwise from the page's +x axis, from `centre` to a page point. */
+const bearingDeg = (centre: { x: number; y: number }, x: number, y: number): number =>
+  (Math.atan2(y - centre.y, x - centre.x) * 180) / Math.PI;
 
 /** How far a pasted copy sits from its original, in millimetres. */
 const PASTE_OFFSET_MM = 3;
@@ -144,6 +174,35 @@ interface TextEdit {
   value: string;
   /** Screen-space box of the node, so the input sits over it. */
   rect: { left: number; top: number; width: number; height: number };
+  /**
+   * Which field of the node is being edited, when it is not the node's own
+   * single string — an axis title, say, of which a plot has several. Absent
+   * means the node's own `text`/`label`, exactly as before this existed.
+   */
+  target?: EditTarget;
+}
+
+/**
+ * Fields a canvas double-click can open, keyed by the `editTarget` the renderer
+ * stamps on the element that draws them.
+ *
+ * Only freeform strings the author owns. Tick labels are deliberately absent:
+ * they are computed from the data, and an editable one would let a figure
+ * display a number its data does not support.
+ */
+const EDIT_TARGETS = ['x.title', 'y.title', 'y2.title', 'cascadeAxisTitle'] as const;
+type EditTarget = (typeof EDIT_TARGETS)[number];
+
+const isEditTarget = (value: string): value is EditTarget =>
+  (EDIT_TARGETS as readonly string[]).includes(value);
+
+/** Read the string an `EditTarget` names off a plot node. */
+function readEditTarget(node: FigureNode, target: EditTarget): string | null {
+  if (node.type !== 'plot') return null;
+  if (target === 'cascadeAxisTitle') return node.cascadeAxisTitle ?? '';
+  if (target === 'x.title') return node.x.title;
+  if (target === 'y.title') return node.y.title;
+  return node.y2?.title ?? null;
 }
 
 export function Canvas({
@@ -166,6 +225,13 @@ export function Canvas({
   /** Container the user has double-clicked into; null means top level. */
   const [enteredId, setEnteredId] = useState<NodeId | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  /*
+   * The page element itself, so a rotate drag can convert client pixels into
+   * page millimetres. A resize or move only ever needs the *delta* between two
+   * client positions, which is origin-independent; an angle is measured about a
+   * fixed centre, so it needs to know where the page starts.
+   */
+  const pageRef = useRef<HTMLDivElement | null>(null);
   /** Ids last copied. Cleared only by another copy — pasting is repeatable. */
   const clipboardRef = useRef<NodeId[]>([]);
 
@@ -262,6 +328,34 @@ export function Canvas({
         return;
       }
 
+      if (handle === 'rotate') {
+        const abs = absoluteFrame(doc.nodes, nodeId);
+        if (!abs) return;
+        // Client pixels → page millimetres, so the bearing is measured in the
+        // same space the stored rotation is defined in.
+        const page = pageRef.current?.getBoundingClientRect();
+        if (!page) return;
+        const pxPerMm = PX_PER_MM * zoom;
+        const centre = { x: abs.x + abs.width / 2, y: abs.y + abs.height / 2 };
+        dragRef.current = {
+          nodeId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          originalFrames: new Map([[nodeId, node.frame]]),
+          rotate: {
+            centre,
+            startAngleDeg: bearingDeg(
+              centre,
+              (event.clientX - page.left) / pxPerMm,
+              (event.clientY - page.top) / pxPerMm,
+            ),
+            startRotation: node.rotation,
+          },
+        };
+        (event.target as Element).setPointerCapture?.(event.pointerId);
+        return;
+      }
+
       dragRef.current = {
         nodeId,
         startClientX: event.clientX,
@@ -271,7 +365,7 @@ export function Canvas({
       };
       (event.target as Element).setPointerCapture?.(event.pointerId);
     },
-    [doc],
+    [doc, zoom],
   );
 
   // --- dragging -----------------------------------------------------------
@@ -289,6 +383,30 @@ export function Canvas({
       const primaryOriginal = drag.originalFrames.get(drag.nodeId);
       if (!primary || !primaryOriginal) return;
 
+      // --- rotating ---------------------------------------------------------
+      if (drag.rotate) {
+        const { centre, startAngleDeg, startRotation } = drag.rotate;
+        const page = pageRef.current?.getBoundingClientRect();
+        if (!page) return;
+        const bearing = bearingDeg(
+          centre,
+          (event.clientX - page.left) / pxPerMm,
+          (event.clientY - page.top) / pxPerMm,
+        );
+        // A delta on the rotation the drag started from, not an absolute
+        // bearing: grabbing the grip anywhere along its reach must not snap the
+        // node round to point at the cursor before the author has moved.
+        const next = startRotation + (bearing - startAngleDeg);
+        api.commit('Rotate', (draft) => {
+          const node = draft.nodes[drag.nodeId];
+          if (!node || isLocked(draft, drag.nodeId)) return;
+          node.rotation = event.shiftKey
+            ? snapRotation(next)
+            : ((next % 360) + 360) % 360;
+        });
+        return;
+      }
+
       // --- arrow endpoint ---------------------------------------------------
       if (drag.pointIndex !== undefined && drag.pointOrigin) {
         const { pointIndex, pointOrigin } = drag;
@@ -298,9 +416,30 @@ export function Canvas({
           // The point is held in page space through the drag and converted
           // back at the end, because normaliseArrowFrame moves the frame
           // origin underneath a frame-relative delta.
+          let target = { x: pointOrigin.x + dxMm, y: pointOrigin.y + dyMm };
+
+          /*
+           * Shift constrains the heading to 45° steps.
+           *
+           * Measured from the *adjacent* point, which is the one the segment
+           * being aimed actually runs from — for a two-point arrow that is the
+           * other end, and for a bent one it is the neighbour on the tail side.
+           * Read live from the event rather than from `DragState`, so the
+           * author can press and release Shift mid-drag.
+           */
+          if (event.shiftKey && node.points.length > 1) {
+            const neighbour = node.points[pointIndex === 0 ? 1 : pointIndex - 1];
+            if (neighbour) {
+              target = snapAngle(
+                { x: node.frame.x + neighbour.x, y: node.frame.y + neighbour.y },
+                target,
+              );
+            }
+          }
+
           setArrowPoint(draft, drag.nodeId, pointIndex, {
-            x: pointOrigin.x + dxMm - node.frame.x,
-            y: pointOrigin.y + dyMm - node.frame.y,
+            x: target.x - node.frame.x,
+            y: target.y - node.frame.y,
           });
         });
         return;
@@ -308,22 +447,50 @@ export function Canvas({
 
       // --- resizing ---------------------------------------------------------
       if (drag.handle) {
+        /*
+         * Shift locks the proportion to a square.
+         *
+         * Read live off the event rather than from `DragState`, so pressing and
+         * releasing Shift part-way through a drag takes effect immediately. It
+         * overrides an image's or panel's own aspect lock, which is what makes
+         * it a deliberate constraint rather than a suggestion.
+         *
+         * There is no drag-to-draw tool here — shapes and arrows are
+         * insert-then-drag — so this same path is what "draw a square" means.
+         */
+        const aspect = event.shiftKey ? 1 : aspectLockFor(primary);
         const resized = resizeFrame(primaryOriginal, drag.handle, dxMm, dyMm, {
-          aspectLock: aspectLockFor(primary),
+          aspectLock: aspect,
           minMm: 5,
+          rotationDeg: primary.rotation,
         });
 
         const siblings = Object.values(doc.nodes)
           .filter((n) => n.parentId === primary.parentId && n.id !== primary.id)
           .map((n) => ({ id: n.id, frame: n.frame }));
 
+        /*
+         * Snapping is suspended in three cases, all for the same reason — it
+         * would contradict something the author asked for or something they can
+         * see:
+         *
+         *  - Alt, which has always meant "suspend snapping".
+         *  - Shift, because `snapResize` moves each axis' live edge
+         *    independently and would immediately break the ratio `resizeFrame`
+         *    just enforced.
+         *  - A rotated node, because the guides are computed from the
+         *    axis-aligned `frame`, which is not where a rotated shape appears —
+         *    a guide drawn there would be pointing at nothing.
+         */
+        const freeform = event.altKey || event.shiftKey || primary.rotation !== 0;
+
         const snapped = snapResize(resized, drag.handle, {
           others: siblings,
           pageWidthMm: doc.page.widthMm,
           pageHeightMm: doc.page.heightMm,
           gridSpacingMm: doc.grid.spacingMm,
-          snapToGrid: doc.grid.snap && !event.altKey,
-          smartGuides: doc.grid.smartGuides && !event.altKey,
+          snapToGrid: doc.grid.snap && !freeform,
+          smartGuides: doc.grid.smartGuides && !freeform,
           toleranceMm: doc.grid.toleranceMm / zoom,
         });
 
@@ -362,13 +529,18 @@ export function Canvas({
         .filter((n) => n.parentId === primary.parentId && !drag.originalFrames.has(n.id))
         .map((n) => ({ id: n.id, frame: n.frame }));
 
+      // A rotated node's `frame` is not the rectangle the author sees, so
+      // snapping its edges would align it to something invisible. Same reasoning
+      // as the resize branch above.
+      const freeform = event.altKey || primary.rotation !== 0;
+
       const snapped = snapFrame(moved, {
         others: siblings,
         pageWidthMm: doc.page.widthMm,
         pageHeightMm: doc.page.heightMm,
         gridSpacingMm: doc.grid.spacingMm,
-        snapToGrid: doc.grid.snap && !event.altKey,
-        smartGuides: doc.grid.smartGuides && !event.altKey,
+        snapToGrid: doc.grid.snap && !freeform,
+        smartGuides: doc.grid.smartGuides && !freeform,
         toleranceMm: doc.grid.toleranceMm / zoom,
       });
 
@@ -392,7 +564,9 @@ export function Canvas({
     const drag = dragRef.current;
     dragRef.current = null;
     setGuides([]);
-    if (!drag || drag.handle) return;
+    // A rotate drag can only have touched a rotatable leaf, never a bracket, so
+    // there is nothing below for it to do.
+    if (!drag || drag.handle || drag.rotate) return;
 
     // Remember how far a bracket was dragged from where the geometry puts it,
     // so repositioning re-applies the adjustment instead of discarding it.
@@ -534,9 +708,48 @@ export function Canvas({
   // --- entering a container, or editing text in place ----------------------
 
   const handleDoubleClick = useCallback(
-    (nodeId: NodeId) => {
+    (nodeId: NodeId, event: React.MouseEvent) => {
       const node = doc.nodes[nodeId];
       if (!node) return;
+
+      /*
+       * An axis title, before anything else.
+       *
+       * Ordering is load-bearing: a plot's ancestor is a panel, which *is* a
+       * container, so the step-in branch below would otherwise swallow the
+       * double-click and merely enter the panel — the title would never open,
+       * however many times it was clicked.
+       *
+       * The element is found by the `data-edit-target` the renderer stamps on
+       * it. `nodeId` alone names the plot, and a plot draws several titles.
+       */
+      const titleEl = (event.target as Element | null)?.closest<SVGElement>('[data-edit-target]');
+      const rawTarget = titleEl?.dataset['editTarget'];
+      if (titleEl && rawTarget && isEditTarget(rawTarget) && !isLocked(doc, nodeId)) {
+        const current = readEditTarget(node, rawTarget);
+        const page = pageRef.current?.getBoundingClientRect();
+        if (current !== null && page) {
+          // Measured off the DOM rather than from `absoluteFrame`, which only
+          // knows whole document nodes and has nothing to say about a `<text>`
+          // two levels inside one. Legal here — only `packages/render` has to
+          // stay DOM-free.
+          const box = titleEl.getBoundingClientRect();
+          setTextEdit({
+            nodeId,
+            value: current,
+            target: rawTarget,
+            rect: {
+              left: box.left - page.left,
+              top: box.top - page.top,
+              // A rotated y title's box is tall and narrow, so the horizontal
+              // field needs its own minimum rather than the label's width.
+              width: Math.max(box.width, 80),
+              height: Math.max(box.height, 22),
+            },
+          });
+          return;
+        }
+      }
 
       /*
        * Double-click steps into whatever the single click just selected, so a
@@ -586,9 +799,21 @@ export function Canvas({
     setTextEdit(null);
     if (!edit) return;
 
-    api.commit('Edit text', (draft) => {
+    api.commit(edit.target ? 'Edit axis title' : 'Edit text', (draft) => {
       const node = draft.nodes[edit.nodeId];
       if (!node) return;
+
+      // An axis title writes exactly the field `AxisFields` writes in the
+      // Inspector, so the two surfaces cannot disagree about what was edited.
+      if (edit.target) {
+        if (node.type !== 'plot') return;
+        if (edit.target === 'cascadeAxisTitle') node.cascadeAxisTitle = edit.value;
+        else if (edit.target === 'x.title') node.x = { ...node.x, title: edit.value };
+        else if (edit.target === 'y.title') node.y = { ...node.y, title: edit.value };
+        else if (node.y2) node.y2 = { ...node.y2, title: edit.value };
+        return;
+      }
+
       if (node.type === 'text' || node.type === 'panel-label') node.text = edit.value;
       else if (node.type === 'bracket') node.label = edit.value;
     });
@@ -608,6 +833,7 @@ export function Canvas({
       }}
     >
       <div
+        ref={pageRef}
         className="canvas-page"
         style={{ width: widthPx, height: heightPx }}
         onPointerMove={handlePointerMove}

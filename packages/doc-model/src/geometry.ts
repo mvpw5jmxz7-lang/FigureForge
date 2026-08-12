@@ -93,3 +93,59 @@ export const translate = (r: RectMm, dx: number, dy: number): RectMm => ({
   x: r.x + dx,
   y: r.y + dy,
 });
+
+/**
+ * Rotate a point about a centre, clockwise, in degrees.
+ *
+ * Clockwise because that is what SVG's `rotate(a cx cy)` does in a y-down
+ * coordinate system, and `NodeBase.rotation` is defined as the angle handed to
+ * exactly that transform. Sharing the convention is what lets the canvas
+ * compute where a rotated node's corner *appears* without re-deriving the
+ * renderer's own maths in the opposite direction.
+ */
+export function rotatePoint(p: PointMm, centre: PointMm, deg: number): PointMm {
+  if (deg === 0) return { x: p.x, y: p.y };
+  const rad = (deg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = p.x - centre.x;
+  const dy = p.y - centre.y;
+  return {
+    x: centre.x + dx * cos - dy * sin,
+    y: centre.y + dx * sin + dy * cos,
+  };
+}
+
+/**
+ * Move `point` onto the nearest ray of `stepDeg` from `anchor`, keeping how far
+ * out it was dragged.
+ *
+ * The distance is preserved rather than projected onto the ray, because this
+ * drives a live drag: projecting shortens the line as the cursor leaves the
+ * snapped direction, so the arrow appears to shrink while the author is trying
+ * to aim it. Keeping the radius means the cursor's distance is always honoured
+ * and only its bearing is constrained.
+ *
+ * A zero-length drag has no direction to snap, so it is returned untouched
+ * rather than being forced onto 0°.
+ */
+export function snapAngle(anchor: PointMm, point: PointMm, stepDeg = 45): PointMm {
+  const dx = point.x - anchor.x;
+  const dy = point.y - anchor.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance === 0 || stepDeg <= 0) return { x: point.x, y: point.y };
+
+  const step = (stepDeg * Math.PI) / 180;
+  const snapped = Math.round(Math.atan2(dy, dx) / step) * step;
+  return {
+    x: anchor.x + distance * Math.cos(snapped),
+    y: anchor.y + distance * Math.sin(snapped),
+  };
+}
+
+/** Snap a rotation in degrees to the nearest `stepDeg`, normalised to [0, 360). */
+export function snapRotation(deg: number, stepDeg = 45): number {
+  if (stepDeg <= 0) return deg;
+  const snapped = Math.round(deg / stepDeg) * stepDeg;
+  return ((snapped % 360) + 360) % 360;
+}
