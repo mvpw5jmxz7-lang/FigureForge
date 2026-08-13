@@ -27,8 +27,11 @@ a vertical stack at every panel count. Phase 8 has begun: stage 1 puts the
 app in an Electron shell that owns the Python service as a supervised child
 process — free-port allocation, health-gated startup, backoff restarts,
 SIGTERM→SIGKILL teardown, and a watchdog on the Python side that reaps itself
-if the shell is SIGKILLed. Native file dialogs, streaming archive I/O and
-packaging are stages 2–4 and are not started. Phase 9 is not started.**
+if the shell is SIGKILLed. Stage 2 adds native Open/Save dialogs, a
+File/Edit/View/Help menu, a recent-projects list, an unsaved-changes guard on
+quit, and drag-a-project-onto-the-window — with every path the renderer may
+touch fenced to ones the shell itself produced. Streaming archive I/O and
+packaging are stages 3–4 and are not started. Phase 9 is not started.**
 
 ---
 
@@ -42,12 +45,12 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 721 TypeScript + 152 Python tests
+make test        # 758 TypeScript + 152 Python tests
 make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
 
 make desktop        # launch the Electron shell against the dev server
-make desktop-smoke  # drive that shell headlessly, 15 checks
+make desktop-smoke  # drive that shell headlessly, 19 checks
 ```
 
 `make help` lists all 18 targets. The two `desktop` targets build a separate,
@@ -112,7 +115,8 @@ packages/theme/       journal presets, palettes, colour-vision validation
 packages/plots/       scales, summary statistics, mark geometry   ← maths only
 packages/render/      scene tree → {React | SVG string}, quality checker  ← drawing only
 apps/web/             Vite + React canvas, inspectors, import/export UI
-apps/desktop/         Electron shell: main process, preload bridge, sidecar supervisor
+apps/desktop/         Electron shell: main process, preload bridge, sidecar supervisor,
+                      native dialogs and the application menu
 services/api/         FastAPI: SciPy statistics, Chromium/Ghostscript export, TIFF decoding
 scripts/acceptance.ts end-to-end flow, no UI involved
 scripts/desktop-smoke.mjs  drives the real Electron app over CDP
@@ -224,6 +228,13 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 8 stage 2 (native dialogs, the application menu, file
+access):** 758 TypeScript tests, 152 Python tests unchanged, typecheck and lint
+clean, 46-check acceptance run unaffected, a **19-check desktop smoke run**
+(including three checks that an unauthorised path is refused across the IPC
+boundary), and an 8-check browser run confirming the web build is inert to all
+of it. See "Phase 8, Stage 2" below.
 
 **Verified after phase 8 stage 1 (the Electron shell and its Python sidecar):**
 721 TypeScript tests, 152 Python tests, typecheck and lint clean, 46-check
@@ -2792,6 +2803,152 @@ packaging at all — no electron-builder, no bundled interpreter, no installer,
 no code signing (stage 4). A packaged build's `rendererUrl()` branch is
 written but only the development path has been run.
 
+### Phase 8, Stage 2 — native dialogs, the application menu, and file access
+
+Stage 1 deliberately reached no filesystem at all. Stage 2 is where the shell
+earns its keep: real OS Open/Save dialogs, a File/Edit/View/Help menu, a
+recent-projects list, an unsaved-changes guard on quit, and dropping a `.ffg`
+on the window to open it. **Round 7's `ProjectFileSystem` turned out to be
+exactly the seam this needed** — it was built so the picker/fallback choice
+would be testable, and a desktop implementation drops straight into it.
+
+- **`SaveTarget.handle` became `unknown`, and that was the whole adaptation.**
+  Research found it is read in exactly one place — `browserProjectFileSystem.write`
+  — and treated as an opaque token everywhere else, so a filesystem path could
+  take a browser handle's seat without a single call site changing. `App.tsx`
+  never learns which implementation it holds; `main.tsx` picks one, and that is
+  the only line in the web app that knows the shell exists.
+- **`SaveTarget.location` is the one field the desktop adds**, and it is *data*,
+  not a platform check. The browser genuinely cannot say where a file went — a
+  `FileSystemFileHandle` is a capability, not a path, and round 8 had to settle
+  for "the browser remembers this folder for next time" because of it. With a
+  location present the confirmation reads `Saved to /home/…/figure.ffg` and the
+  status bar's tooltip shows the path; absent, both read exactly as before. No
+  `isDesktop` branch anywhere in the UI.
+- **The renderer cannot name a path.** This is the security core of the stage.
+  `read`/`write` refuse anything the main process did not itself produce — a
+  dialog result, a recent entry, or a resolved drop — *and* anything whose
+  extension is not `.ffg`/`.figureforge`. Both checks, not either: the
+  extension test is what keeps a bug in the granting path from becoming an
+  arbitrary file read. `AuthorisedPaths` is pure and tested directly, including
+  that `/home/a/../a/figure.ffg` does **not** pass on the strength of
+  `/home/a/figure.ffg` having been granted — the set is compared literally, and
+  every member came from the OS rather than from the renderer.
+  `PROJECT_EXTENSIONS` is hardcoded in `apps/desktop` rather than imported from
+  `doc-model`, because this is the process *validating* the renderer and taking
+  its word would defeat the check; a **test-only** import of `ARCHIVE_EXTENSIONS`
+  asserts the two lists still match, so runtime independence costs no drift.
+- **The accelerator rule is the hard part of the menu, and it is inverted from
+  the obvious.** An Electron menu accelerator is registered with the OS and
+  fires *before* the page — so registering `Ctrl+C`, `Ctrl+V`, `Ctrl+D`,
+  `Delete` or `Ctrl+Z` would answer them one way for the whole window and
+  silently break the data grid, which chooses between "clear these cells" and
+  "delete these nodes" by inspecting what has focus, and the in-cell editor,
+  where `Ctrl+Z` is a *text* undo until the cell is untouched. Every such item
+  is therefore `registerAccelerator: false`: the shortcut is still **shown**
+  next to the item, which is what makes it discoverable, and the key still
+  reaches the page. `New`, `Open`, `Save`, `Save As` and the zoom items bind
+  keys nothing in the page owns, so they register for real — and `Ctrl+S`
+  registering means the menu wins over `App.tsx`'s own listener, which is
+  *better* than two paths since both call the same `save()`. Cut/Copy/Paste
+  `role` items are omitted entirely: Chromium already handles text editing in a
+  focused field, and adding them would register exactly the accelerators this
+  paragraph exists to protect.
+- **The menu template is a pure function of `ShellState`**, and so is its
+  conversion to Electron's option shape. `command` is this codebase's own field
+  meaning "ask the renderer to do X"; `toElectronTemplate` turns it into a
+  `click` and must not let it survive into the output, where Electron would
+  ignore it and the item would look right while doing nothing — which is what
+  the conversion test asserts. Keeping both halves pure is what makes
+  enablement, the accelerator split and the recent list testable with no
+  Electron runtime.
+- **Menu commands call what the app already had.** `newFigure` is the one
+  genuinely new command, because there was none: the sample document was built
+  once as `useDocument`'s initialiser. It clears exactly the four things
+  `openFromFile` clears, and produces the same sample the app launches with, so
+  New and startup agree what a fresh figure is. **Duplicate and Delete are
+  deliberately not dispatched here** — they live in `Canvas`'s keydown, where
+  they can tell a canvas selection from a data-grid one, and the menu leaves
+  their keys unregistered so that handler keeps them.
+- **`save()` now returns whether it saved.** The quit guard needs a real answer
+  before it lets the process exit, and every other caller ignores it. A
+  *denied* write reports false even though the download rescued the bytes: the
+  file the user named was not written, and cancelling the quit is the safe
+  reading.
+- **Dirty is a boolean set by any commit, not a comparison.** Comparing whole
+  documents on every keystroke is expensive, and the cheap approximation errs
+  the safe way — undoing back to exactly the saved state still reads dirty, so
+  the shell offers to save something that did not need it rather than
+  discarding something that did. Counting `history().length` was rejected:
+  undo and redo move the position within the history without changing its
+  length, which would call an undone-then-redone document clean.
+- **The quit guard covers a user quitting, not a SIGTERM.** `before-quit`
+  prompts Save / Don't Save / Cancel and, on Save, asks the renderer to run its
+  own save and *waits for the answer* — the shell cannot serialise the document
+  itself, since the archive is built from state only the renderer holds. A
+  30 s timeout resolves false, which cancels the quit: a hung renderer must not
+  make the app unquittable, and must not have its work discarded on a guess.
+  The `process.on('SIGTERM')` path still exits immediately, on purpose — a
+  shutdown request from the system is not a user closing a window, and blocking
+  it on a modal dialog would be wrong.
+- **Recent files are re-authorised at load, not at save.** The list is a
+  per-user JSON in `userData`; the *authorisation* set is per-session and in
+  memory, because a path authorised months ago is a standing grant. Picking an
+  entry from the menu re-authorises it at that moment, so nothing is lost. A
+  `ENOENT` on open drops the entry rather than leaving it failing forever, and
+  a corrupt list parses to "no recents" rather than stopping the app — it is
+  read during menu construction, so a throw there is a shell that will not
+  start.
+- **`window.figureforge` is declared in exactly one place.** `api.ts` and
+  `desktopFiles.ts` both need it and TypeScript will not merge two `declare
+  global` blocks that describe one property differently, so `shell.ts` owns the
+  declaration and `api.ts` pulls it in with `import type {}`, which emits
+  nothing. The shapes are duplicated from `channels.ts` deliberately —
+  `apps/web` must not depend on `apps/desktop`, or the browser build inherits
+  the shell — and the IPC channel strings are the real contract between them.
+
+#### What is verified, and what is not
+
+Being explicit, because the gap is real and easy to overstate:
+
+- **Verified by unit test** (37 new): the authorisation rule including the
+  traversal and wrong-extension cases, the doc-model extension cross-check, the
+  menu's enablement, the accelerator split, the recent list's ordering/bounding/
+  corruption handling, and the template→Electron conversion.
+- **Verified against the running app** (19 CDP checks, up from 15): the widened
+  bridge exposes exactly `apiBase, isDesktop, onMenuCommand, platform, project,
+  setShellState`; `openPath('/etc/passwd')`, `openPath` of an unauthorised
+  `.ffg` and `write` to an unauthorised path are each **refused across the IPC
+  boundary**; and the renderer can push shell state without throwing. Menu
+  *installation* is proven indirectly but soundly — `applyMenu()` runs before
+  `createWindow()`, so a template Electron rejected would mean no window, and
+  the window exists.
+- **Not driven, and not claimed**: the native Save/Open dialogs themselves, a
+  menu item actually being clicked, the quit-guard message box, the recent-list
+  file being written, and the drag-and-drop path. These are OS-level UI and a
+  headless container cannot click them. Adding a test-only auto-answer for
+  dialogs was rejected for the reason `main.py` is untouched by the sidecar —
+  a code path that exists only under test is a path the tests do not cover.
+- **The browser build was re-checked in a real browser** (8 checks): the app
+  mounts, the status bar still renders its own Save/Open buttons, the
+  `.file-target` keeps the "the browser deliberately does not expose one"
+  tooltip, `window.figureforge` is `undefined` so all three new effects are
+  inert, a panel still selects, and there are no console errors.
+
+**Verified:** 758 TypeScript tests (721 + 37), 152 Python tests unchanged (this
+stage touches no Python), typecheck and lint clean, 46-check acceptance run
+unaffected, 19-check desktop smoke run, 8-check browser run.
+
+**Not done, deliberately:** the status bar keeps its own Save/Open/Export
+buttons on desktop rather than deferring to the menu — one renderer, no
+desktop-only layout branch, and the redundancy is normal in desktop apps.
+Toolbar commands (insert shape/arrow/text, group, templates, z-order) are
+**not** in the menu: they are local closures inside `Toolbar`, unreachable
+without lifting them into `App`, and that refactor belongs to whichever stage
+actually needs them rather than being smuggled into this one. The archive is
+still built whole in memory (stage 3) and there is still no packaging
+(stage 4).
+
 ---
 
 ## What's next
@@ -2805,7 +2962,7 @@ Phases 5–9, with the actual entry points:
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
 | 7 | **done** — all five chart types (volcano, heatmap, survival, PCA, UMAP) | the DOM-volume prerequisite — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), and UMAP's reuse of that same mechanism plus its own new dependency (`figureforge/umap.py`, the `'umap'` `DataFormat`, "Run UMAP") — see "Phase 7, Stage 1" through "Stage 5" below |
-| 8 | **stage 1 done** — Electron shell + Python sidecar lifecycle; stages 2–4 open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2 is native file dialogs through the existing `ProjectFileSystem` seam; stage 3 is streaming the archive to disk; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" |
+| 8 | **stages 1–2 done** — shell + sidecar lifecycle, then native dialogs and the menu; stages 3–4 open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2's entry points are `apps/desktop/src/{menu,projects,projects.node,recent}.ts` and `apps/web/src/{shell,desktopFiles}.ts`; stage 3 is streaming the archive to disk; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" and "Stage 2" |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
 ### Already scaffolded but unused
@@ -2855,7 +3012,7 @@ Phases 5–9, with the actual entry points:
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
-| **No autosave or session restore** | Closing the tab loses everything unsaved, and there is no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
+| **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
 | **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
 | **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets and trivial crops. The letterboxed case was on that list until round 6, for a real reason: the drawn window was not the crop the document named, so baking the nominal rect changed the picture. `renderImage` now places the kept region itself, the two forms draw identically, and a montage tile's crop is baked like any other — measured, a 200×100 source cropped to a quadrant embeds as 100×50. |
@@ -2950,6 +3107,14 @@ Each of these cost time once and will again:
   imported survived round 10's "typecheck clean" because the incremental build
   skipped the project. Use `tsc --build --force` before claiming a clean
   typecheck.
+- **An Electron menu accelerator fires before the page.** Registering one for a
+  key the renderer already handles *context-sensitively* silently breaks it —
+  `Ctrl+C`/`Delete` mean "clear these cells" in the data grid and "delete these
+  nodes" on the canvas, and `Ctrl+Z` in a typed-in cell is a text undo. Use
+  `registerAccelerator: false` to display the shortcut without taking the key.
+- **`File.path` was removed in Electron 32.** A dropped file's path now comes
+  from `webUtils.getPathForFile`, which is a main-world module the sandboxed
+  page cannot reach — so it has to be called in the preload.
 - **`xvfb-run` needs `xauth`**, which the slim images do not carry; without it
   it exits with `xauth command not found` before your program starts. It also
   outlives a crashed child, so a hung container may be `xvfb-run` waiting on

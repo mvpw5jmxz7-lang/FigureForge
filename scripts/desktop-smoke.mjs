@@ -132,6 +132,56 @@ class Cdp {
 }
 
 /**
+ * The bridge widened in stage 2 to reach real files. This is the check that it
+ * did not widen into an arbitrary file reader.
+ *
+ * `projects.test.ts` asserts the rule itself; this asserts the *wiring* — that
+ * a renderer really is refused across the IPC boundary, which is the only
+ * place the two halves meet. Both halves matter: a correct rule that nothing
+ * calls protects nothing.
+ */
+async function checkFileAccessIsFenced(cdp) {
+  // Reads a path the shell never handed out. A renderer that could do this
+  // could read anything the user can.
+  const readSecret = await cdp.evaluate(
+    `window.figureforge.project.openPath('/etc/passwd')
+       .then(() => 'ALLOWED').catch((e) => String(e.message ?? e))`,
+  );
+  check('reading an arbitrary path is refused', !String(readSecret).includes('ALLOWED'), String(readSecret).slice(0, 80));
+
+  // Right extension, still never authorised — this is the case the extension
+  // check alone would let through.
+  const readUnauthorised = await cdp.evaluate(
+    `window.figureforge.project.openPath('/tmp/not-mine.ffg')
+       .then(() => 'ALLOWED').catch((e) => String(e.message ?? e))`,
+  );
+  check(
+    'reading an unauthorised project path is refused',
+    !String(readUnauthorised).includes('ALLOWED'),
+    String(readUnauthorised).slice(0, 80),
+  );
+
+  const writeUnauthorised = await cdp.evaluate(
+    `window.figureforge.project.write('/tmp/not-mine.ffg', new Uint8Array([1,2,3]))
+       .then((r) => 'ALLOWED:' + r).catch((e) => String(e.message ?? e))`,
+  );
+  check(
+    'writing to an unauthorised path is refused',
+    !String(writeUnauthorised).includes('ALLOWED'),
+    String(writeUnauthorised).slice(0, 80),
+  );
+
+  // The renderer pushing its state must not throw; the menu and the quit guard
+  // both read it, and a throw here would break every later state change.
+  const pushed = await cdp.evaluate(
+    `(() => { try { window.figureforge.setShellState({ dirty: false, canUndo: true,` +
+      ` canRedo: false, hasSelection: false, showGrid: false, savedPath: null,` +
+      ` title: 'smoke' }); return 'ok'; } catch (e) { return String(e); } })()`,
+  );
+  check('the renderer can push shell state', pushed === 'ok', String(pushed).slice(0, 80));
+}
+
+/**
  * The case the supervisor cannot cover.
  *
  * A SIGTERM lets the main process run its teardown, which is what the first
@@ -226,9 +276,19 @@ async function main() {
     check('the renderer has no process global', info.hasProcess === 'undefined');
     check(
       'the bridge exposes only what it means to',
-      JSON.stringify(info.keys) === JSON.stringify(['apiBase', 'isDesktop', 'platform']),
+      JSON.stringify(info.keys) ===
+        JSON.stringify([
+          'apiBase',
+          'isDesktop',
+          'onMenuCommand',
+          'platform',
+          'project',
+          'setShellState',
+        ]),
       info.keys?.join(', '),
     );
+
+    await checkFileAccessIsFenced(cdp);
 
     // The port is meaningless unless something is actually behind it.
     const health = await fetch(`${info.base}/health`);

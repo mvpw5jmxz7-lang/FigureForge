@@ -25,8 +25,10 @@ import {
 import { useAssets, type AssetStore } from './assets.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
+import { openedToResult } from './desktopFiles.js';
 import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
 import { createSampleDocument } from './sample.js';
+import { isDesktop, type DesktopMenuCommand } from './shell.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
 
@@ -153,6 +155,11 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   const [labelPickNodeId, setLabelPickNodeId] = useState<NodeId | null>(null);
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
+  /** One spelling, read by both the toolbar's Fit button and the View menu. */
+  const fitToWindow = useCallback(
+    () => setZoom(fitZoom(api.document.page.widthMm)),
+    [api.document.page.widthMm],
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [apiUp, setApiUp] = useState<boolean | null>(null);
@@ -170,6 +177,21 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
    * would be needed regardless, so there is nothing to gain by trying.
    */
   const [saveTarget, setSaveTarget] = useState<SaveTarget | null>(null);
+  /**
+   * Whether there are edits the user has not written to disk.
+   *
+   * Set by any commit and cleared by save, open and new. It is deliberately
+   * *not* an equality check against the last saved document: comparing whole
+   * figures on every keystroke is expensive, and the cheap approximation errs
+   * in the safe direction — undoing back to exactly the saved state still
+   * reads dirty, so the shell offers to save something that did not need it,
+   * rather than discarding something that did.
+   *
+   * Only the desktop shell consumes it (its quit guard and title bar); the
+   * browser has no `beforeunload` guard, which the risk table still records
+   * as open.
+   */
+  const [dirty, setDirty] = useState(false);
   /**
    * A brief confirmation shown right after a save completes — the File
    * System Access API deliberately exposes no path (see `.file-target`'s own
@@ -394,6 +416,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
       const name = renameIfNeeded(chosen);
       downloadArchive(name);
       setSaveName(null);
+      setDirty(false);
       showSaveConfirmation(`Downloaded "${name}${ARCHIVE_EXTENSION}" to your browser's downloads folder.`);
     },
     [renameIfNeeded, downloadArchive, showSaveConfirmation],
@@ -402,9 +425,15 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   /**
    * Write to an already-picked file, falling back to a download if the
    * permission prompt is denied — a save must never simply vanish.
+   *
+   * Returns whether the bytes reached the *intended* file. The desktop shell's
+   * quit guard needs a real answer before it lets the process exit, and every
+   * other caller is free to ignore it. A denied write reports false even
+   * though the download rescued the data: the file the user named was not
+   * written, and cancelling the quit is the safe reading of that.
    */
   const writeToTarget = useCallback(
-    async (target: SaveTarget) => {
+    async (target: SaveTarget): Promise<boolean> => {
       setBusy('Saving');
       try {
         const result = await fileSystem.write(target, buildArchiveBytes());
@@ -412,10 +441,22 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
           setError(`Could not write to "${target.name}"; the file was downloaded instead.`);
           downloadArchive(stripArchiveExtension(target.name));
           setSaveTarget(null);
-          return;
+          return false;
         }
         setSaveTarget(target);
-        showSaveConfirmation(`Saved "${target.name}" — the browser remembers this folder for next time.`);
+        setDirty(false);
+        // A path when the platform has one, the name when it does not — the
+        // browser genuinely cannot say where the file went, and claiming
+        // otherwise would be worse than the vaguer sentence.
+        showSaveConfirmation(
+          target.location
+            ? `Saved to ${target.location}`
+            : `Saved "${target.name}" — the browser remembers this folder for next time.`,
+        );
+        return true;
+      } catch (caught) {
+        setError(`Could not save: ${String(caught)}`);
+        return false;
       } finally {
         setBusy(null);
       }
@@ -424,28 +465,25 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   );
 
   /** Always re-prompts, even when a target is already held. */
-  const saveAs = useCallback(async () => {
+  const saveAs = useCallback(async (): Promise<boolean> => {
     if (!fileSystem.supported()) {
       setSaveName(safeFilename(currentDocument().title));
-      return;
+      return false;
     }
     const picked = await fileSystem.pickSave(`${safeFilename(currentDocument().title)}${ARCHIVE_EXTENSION}`);
-    if (!picked) return; // the user cancelled the picker
+    if (!picked) return false; // the user cancelled the picker
     renameIfNeeded(stripArchiveExtension(picked.name));
-    await writeToTarget(picked);
+    return writeToTarget(picked);
   }, [fileSystem, currentDocument, renameIfNeeded, writeToTarget]);
 
   /** Overwrites a held target in place; behaves as Save as… with none held. */
-  const save = useCallback(async () => {
+  const save = useCallback(async (): Promise<boolean> => {
     if (!fileSystem.supported()) {
       setSaveName(safeFilename(currentDocument().title));
-      return;
+      return false;
     }
-    if (saveTarget) {
-      await writeToTarget(saveTarget);
-      return;
-    }
-    await saveAs();
+    if (saveTarget) return writeToTarget(saveTarget);
+    return saveAs();
   }, [fileSystem, currentDocument, saveTarget, writeToTarget, saveAs]);
 
   const openFromFile = useCallback(
@@ -477,6 +515,8 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         // input (no handle available) must clear a stale target from a
         // previous project, or "Save" would silently overwrite the wrong file.
         setSaveTarget(target);
+        // A freshly opened project is by definition what is on disk.
+        setDirty(false);
         setError(result.warnings.length > 0 ? result.warnings.join(' ') : null);
 
         await rehydrateProxies(result.document, assets.store, setError);
@@ -494,6 +534,166 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     if (!picked) return; // the user cancelled the picker
     await openFromFile(picked.file, picked.target);
   }, [fileSystem, openFromFile]);
+
+  /**
+   * Start again.
+   *
+   * There was no "new" command before the menu needed one: the sample document
+   * was built once, as `useDocument`'s initialiser. This clears exactly what
+   * `openFromFile` clears — the four things that outlive a document reset and
+   * would otherwise leak into the next figure — and produces the same sample
+   * the app opens with, so New and launch agree about what a fresh figure is.
+   */
+  const newFigure = useCallback(() => {
+    assets.store.clear();
+    dataOriginals.current = new Map();
+    api.store.reset(createSampleDocument());
+    setSelectedIds([]);
+    setSaveTarget(null);
+    setDirty(false);
+    setError(null);
+  }, [api.store, assets.store]);
+
+  /**
+   * Open a project file dropped on the window.
+   *
+   * Scoped to project files by extension: the Data tab's textarea has its own
+   * drop handler for CSV/TSV, and this must not take those. Chromium would
+   * otherwise navigate the window to the dropped file, so both handlers
+   * `preventDefault` regardless of whether they act.
+   */
+  useEffect(() => {
+    if (!isDesktop()) return;
+
+    const isProject = (name: string): boolean =>
+      ARCHIVE_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension));
+
+    const onDragOver = (event: DragEvent): void => event.preventDefault();
+    const onDrop = (event: DragEvent): void => {
+      event.preventDefault();
+      const file = event.dataTransfer?.files[0];
+      if (!file || !isProject(file.name)) return;
+      void (async () => {
+        try {
+          // The path has to come from the shell — `File.path` was removed, so
+          // without it a dropped project could be read but never saved back to.
+          const opened = await window.figureforge?.project?.openDropped(file);
+          if (!opened) return;
+          const { file: project, target } = openedToResult(opened);
+          await openFromFile(project, target);
+        } catch (caught) {
+          setError(`Could not open the dropped file: ${String(caught)}`);
+        }
+      })();
+    };
+
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [openFromFile]);
+
+  /**
+   * Any edit makes the document dirty.
+   *
+   * Subscribed at the store rather than counted from `history()`: undo and
+   * redo move the position within the history without changing its length, so
+   * a length comparison would call an undone-then-redone document clean.
+   */
+  useEffect(
+    () =>
+      api.store.subscribe((_document, commit) => {
+        // `reset` notifies with a null commit, and it is always followed by an
+        // explicit `setDirty` from whichever of open/new called it.
+        if (commit !== null) setDirty(true);
+      }),
+    [api.store],
+  );
+
+  /** Tell the shell what its menu and quit guard need. No-op in a browser. */
+  useEffect(() => {
+    window.figureforge?.setShellState?.({
+      dirty,
+      canUndo: api.canUndo,
+      canRedo: api.canRedo,
+      hasSelection: selectedIds.length > 0,
+      showGrid,
+      savedPath: saveTarget?.location ?? null,
+      title: api.document.title,
+    });
+  }, [dirty, api.canUndo, api.canRedo, api.document.title, selectedIds.length, showGrid, saveTarget]);
+
+  /**
+   * Run a command chosen from the native menu.
+   *
+   * Every branch calls something the app already had — the menu is a second
+   * route to those commands, never a second implementation. The two that carry
+   * no existing handler, Duplicate and Delete, are deliberately absent here:
+   * they live in `Canvas`'s keydown, where they can tell a canvas selection
+   * from a data-grid selection, and the menu leaves their accelerators
+   * unregistered so the key still reaches that handler.
+   */
+  useEffect(() => {
+    const dispatch = (command: DesktopMenuCommand): void => {
+      switch (command.type) {
+        case 'new':
+          newFigure();
+          break;
+        case 'open':
+          void openViaPicker();
+          break;
+        case 'open-path':
+          void (async () => {
+            try {
+              const opened = await window.figureforge?.project?.openPath(command.path);
+              if (!opened) return;
+              const { file, target } = openedToResult(opened);
+              await openFromFile(file, target);
+            } catch (caught) {
+              setError(`Could not open that project: ${String(caught)}`);
+            }
+          })();
+          break;
+        case 'save':
+          // The shell may be waiting on this answer before it lets the app
+          // quit, so the result is reported rather than dropped.
+          void save().then((ok) => window.figureforge?.project?.reportSaved(ok));
+          break;
+        case 'save-as':
+          void saveAs();
+          break;
+        case 'export':
+          requestExport(command.format);
+          break;
+        case 'undo':
+          api.undo();
+          break;
+        case 'redo':
+          api.redo();
+          break;
+        case 'zoom-in':
+          setZoom((current) => Math.min(4, current * 1.25));
+          break;
+        case 'zoom-out':
+          setZoom((current) => Math.max(0.1, current / 1.25));
+          break;
+        case 'zoom-reset':
+          setZoom(1);
+          break;
+        case 'zoom-fit':
+          fitToWindow();
+          break;
+        case 'toggle-grid':
+          setShowGrid((current) => !current);
+          break;
+        default:
+          break;
+      }
+    };
+    return window.figureforge?.onMenuCommand?.(dispatch);
+  }, [newFigure, openViaPicker, openFromFile, save, saveAs, requestExport, api, fitToWindow]);
 
   // Ctrl/Cmd+S and Ctrl/Cmd+Shift+S. Bound in App's own effect, not Canvas's —
   // that one returns early for anything focused inside `.side-panel`, which
@@ -520,7 +720,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         onSelectionChange={setSelectedIds}
         zoom={zoom}
         onZoomChange={setZoom}
-        onFit={() => setZoom(fitZoom(api.document.page.widthMm))}
+        onFit={fitToWindow}
         showGrid={showGrid}
         onShowGridChange={setShowGrid}
         busy={busy}
@@ -605,7 +805,10 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
               </button>
               <span
                 className="muted file-target"
-                title="Not a path — the browser deliberately does not expose one"
+                title={
+                  saveTarget?.location ??
+                  'Not a path — the browser deliberately does not expose one'
+                }
               >
                 {saveTarget ? saveTarget.name : '— unsaved'}
               </span>

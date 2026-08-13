@@ -11,11 +11,27 @@
  * that same delay redistributed across every early request as a race.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
+import { existsSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { API_BASE_CHANNEL } from './channels';
+import {
+  API_BASE_CHANNEL,
+  MENU_COMMAND,
+  PROJECT_OPEN_PATH,
+  PROJECT_PICK_OPEN,
+  PROJECT_PICK_SAVE,
+  PROJECT_SAVED,
+  PROJECT_WRITE,
+  SHELL_STATE,
+  type MenuCommand,
+  type ShellState,
+} from './channels';
+import { buildMenuTemplate, toElectronTemplate } from './menu';
+import { ProjectFiles } from './projects.node';
+import { addRecent, parseRecent, removeRecent, serialiseRecent } from './recent';
 import { PythonSidecar, type SidecarStatus } from './sidecar';
 import { allocatePort, delay, makeSpawn, probe, resolvePythonLaunch } from './sidecar.node';
 
@@ -27,6 +43,33 @@ const DEV_URL = process.env['FIGUREFORGE_DEV_URL'] ?? 'http://localhost:5173';
 /** Set once the app is genuinely on its way out, to break the quit cycle. */
 let teardownStarted = false;
 let mainWindow: BrowserWindow | null = null;
+
+const projects = new ProjectFiles();
+
+/**
+ * The renderer's last word about itself.
+ *
+ * Starts pessimistic-but-quiet: nothing is dirty before the app has loaded,
+ * and every command that acts on a selection is disabled until the renderer
+ * says there is one.
+ */
+let shellState: ShellState = {
+  dirty: false,
+  canUndo: false,
+  canRedo: false,
+  hasSelection: false,
+  showGrid: false,
+  savedPath: null,
+  title: 'FigureForge',
+};
+
+let recentPaths: string[] = [];
+
+/** Where the recent list is kept. Per-user, and not inside the checkout. */
+const recentFile = (): string => join(app.getPath('userData'), 'recent.json');
+
+/** GUIDE.md ships with the checkout; a packaged build may not carry it. */
+const guidePath = (): string => join(APP_ROOT, 'GUIDE.md');
 
 const sidecar = new PythonSidecar(
   {
@@ -117,6 +160,143 @@ function publishStatus(status: SidecarStatus): void {
   }
 }
 
+// --- the menu ------------------------------------------------------------
+
+function sendCommand(command: MenuCommand): void {
+  mainWindow?.webContents.send(MENU_COMMAND, command);
+}
+
+function applyMenu(): void {
+  const template = buildMenuTemplate({
+    state: shellState,
+    recent: recentPaths,
+    isMac: process.platform === 'darwin',
+    hasGuide: existsSync(guidePath()),
+  });
+  // The conversion is pure and lives in `menu.ts`; this supplies only the
+  // three effects it cannot have.
+  const converted = toElectronTemplate(template, {
+    onCommand: sendCommand,
+    onAbout: showAbout,
+    onGuide: () => void shell.openPath(guidePath()),
+  }) as Electron.MenuItemConstructorOptions[];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(converted));
+}
+
+function showAbout(): void {
+  const status = sidecar.status;
+  void dialog.showMessageBox({
+    type: 'info',
+    title: 'About FigureForge',
+    message: 'FigureForge',
+    detail: [
+      'Publication-ready multi-panel figure assembly.',
+      '',
+      `Electron ${process.versions.electron}`,
+      `Chromium ${process.versions.chrome}`,
+      `Node ${process.versions.node}`,
+      `Analysis service: ${status.state === 'ready' ? status.baseUrl : status.state}`,
+    ].join('\n'),
+  });
+}
+
+/** The window title is the one place the shell states what is unsaved. */
+function applyTitle(): void {
+  const mark = shellState.dirty ? ' •' : '';
+  const where = shellState.savedPath ? ` — ${shellState.savedPath}` : '';
+  mainWindow?.setTitle(`${shellState.title}${mark}${where}`);
+}
+
+// --- recent files --------------------------------------------------------
+
+async function loadRecent(): Promise<void> {
+  try {
+    recentPaths = parseRecent(await readFile(recentFile(), 'utf8'));
+  } catch {
+    // No list yet, which is the normal first-run state.
+    recentPaths = [];
+  }
+  // Every remembered path is re-authorised for this session at load, because
+  // the user choosing it from the menu is the same act of pointing at a file
+  // that a dialog would be.
+  for (const path of recentPaths) projects.grant(path);
+}
+
+async function rememberRecent(path: string): Promise<void> {
+  recentPaths = addRecent(recentPaths, path);
+  applyMenu();
+  await writeFile(recentFile(), serialiseRecent(recentPaths)).catch(() => {
+    // A recent list that cannot be written is a lost convenience, never a
+    // reason to fail the save the user actually asked for.
+  });
+}
+
+async function forgetRecent(path: string): Promise<void> {
+  recentPaths = removeRecent(recentPaths, path);
+  applyMenu();
+  await writeFile(recentFile(), serialiseRecent(recentPaths)).catch(() => undefined);
+}
+
+// --- project IPC ---------------------------------------------------------
+
+function registerProjectHandlers(): void {
+  ipcMain.handle(PROJECT_PICK_SAVE, async (_event, suggestedName: string) => {
+    if (!mainWindow) return null;
+    const picked = await projects.pickSave(mainWindow, suggestedName);
+    if (picked) await rememberRecent(picked.path);
+    return picked;
+  });
+
+  ipcMain.handle(PROJECT_PICK_OPEN, async () => {
+    if (!mainWindow) return null;
+    const opened = await projects.pickOpen(mainWindow);
+    if (opened) await rememberRecent(opened.path);
+    return opened;
+  });
+
+  ipcMain.handle(PROJECT_OPEN_PATH, async (_event, path: string) => {
+    try {
+      const opened = await projects.read(path);
+      await rememberRecent(path);
+      return opened;
+    } catch (caught) {
+      // A recent entry the user has since moved or deleted should quietly
+      // leave the list rather than sit there failing every time it is clicked.
+      const code = (caught as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') await forgetRecent(path);
+      throw caught;
+    }
+  });
+
+  ipcMain.handle(PROJECT_WRITE, async (_event, path: string, bytes: Uint8Array) => {
+    const result = await projects.write(path, new Uint8Array(bytes));
+    if (result === 'written') await rememberRecent(path);
+    return result;
+  });
+
+  ipcMain.on(SHELL_STATE, (_event, state: ShellState) => {
+    const before = shellState;
+    shellState = state;
+    // Rebuilding a menu is cheap but not free, and this fires on every
+    // selection change; only the fields the menu reads justify a rebuild.
+    if (
+      before.canUndo !== state.canUndo ||
+      before.canRedo !== state.canRedo ||
+      before.hasSelection !== state.hasSelection ||
+      before.showGrid !== state.showGrid
+    ) {
+      applyMenu();
+    }
+    if (
+      before.dirty !== state.dirty ||
+      before.savedPath !== state.savedPath ||
+      before.title !== state.title
+    ) {
+      applyTitle();
+    }
+  });
+}
+
 async function startUp(): Promise<void> {
   ipcMain.on(API_BASE_CHANNEL, (event) => {
     const status = sidecar.status;
@@ -137,9 +317,71 @@ async function startUp(): Promise<void> {
     return;
   }
 
+  await loadRecent();
+  registerProjectHandlers();
+  applyMenu();
+
   mainWindow = createWindow();
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+}
+
+/**
+ * Ask before throwing away unsaved work.
+ *
+ * The web build cannot do this well — it has no `beforeunload` guard, which
+ * the risk table has recorded as an open problem since phase 1 — because a
+ * browser only permits a generic, unstyled prompt and cannot save on the
+ * user's behalf afterwards. A shell can do both, so it does.
+ *
+ * Returns true when the caller may proceed with quitting.
+ */
+async function confirmDiscard(): Promise<boolean> {
+  if (!shellState.dirty || !mainWindow) return true;
+
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Save', "Don't Save", 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    title: 'Unsaved changes',
+    message: `Save changes to "${shellState.title}" before closing?`,
+    detail: 'Your changes will be lost if you don’t save them.',
+  });
+
+  if (response === 1) return true; // Don't Save
+  if (response === 2) return false; // Cancel
+
+  return saveBeforeQuit();
+}
+
+/**
+ * Run the renderer's own save and wait for it to land.
+ *
+ * The shell cannot serialise the document itself — the archive is built by the
+ * renderer from state only it holds — so "Save" here means asking the app to
+ * do exactly what its own Save does, then waiting for the answer. The timeout
+ * exists because a hung renderer must not make the app unquittable; it resolves
+ * false, which cancels the quit and leaves the user in charge rather than
+ * discarding their work on a guess.
+ */
+function saveBeforeQuit(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ipcMain.removeListener(PROJECT_SAVED, onSaved);
+      resolve(false);
+    }, 30_000);
+
+    function onSaved(_event: unknown, ok: boolean): void {
+      clearTimeout(timer);
+      ipcMain.removeListener(PROJECT_SAVED, onSaved);
+      // A save the user cancelled at the dialog is not permission to quit.
+      resolve(ok);
+    }
+
+    ipcMain.on(PROJECT_SAVED, onSaved);
+    sendCommand({ type: 'save' });
   });
 }
 
@@ -155,9 +397,15 @@ async function startUp(): Promise<void> {
 function wireTeardown(): void {
   app.on('before-quit', (event) => {
     if (teardownStarted) return;
+    // Always preventDefault first: both the unsaved-changes prompt and the
+    // sidecar's graceful stop are asynchronous, and Electron would otherwise
+    // tear the process down underneath them.
     event.preventDefault();
-    teardownStarted = true;
-    void sidecar.stop().finally(() => app.quit());
+    void confirmDiscard().then((mayQuit) => {
+      if (!mayQuit) return; // the user cancelled; the app stays up
+      teardownStarted = true;
+      void sidecar.stop().finally(() => app.quit());
+    });
   });
 
   app.on('window-all-closed', () => {

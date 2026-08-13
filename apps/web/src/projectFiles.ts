@@ -59,7 +59,26 @@ const PICKER_ID = 'figureforge-project';
 /** A file the app has permission to overwrite directly, no dialog needed. */
 export interface SaveTarget {
   name: string;
-  handle: FileSystemFileHandle;
+  /**
+   * A user-meaningful location, where the platform has one to give.
+   *
+   * The browser deliberately exposes no path — a `FileSystemFileHandle` is an
+   * opaque capability — so this is absent there and the UI falls back to the
+   * name. The desktop shell has a real path and says so. Keeping it as *data*
+   * on the target rather than a platform check in the app is what stops the
+   * status bar and the save confirmation from growing an `isDesktop` branch.
+   */
+  location?: string;
+  /**
+   * Opaque to everything except the `ProjectFileSystem` that produced it.
+   *
+   * A browser handle and a filesystem path have nothing in common, and no
+   * caller has ever needed to know which it is holding: outside this module
+   * only `.name` is ever read, and the target is passed straight back to
+   * `write`. Typing it as the browser's handle would force the desktop
+   * implementation to lie about what it stores.
+   */
+  handle: unknown;
 }
 
 export interface ProjectFileSystem {
@@ -129,8 +148,11 @@ export const browserProjectFileSystem: ProjectFileSystem = {
   },
 
   async write(target, bytes) {
-    if (!(await ensureWritable(target.handle))) return 'denied';
-    const stream = await target.handle.createWritable();
+    // Narrowed here, once, because this implementation is the only thing that
+    // knows what it put in `handle`.
+    const handle = target.handle as FileSystemFileHandle;
+    if (!(await ensureWritable(handle))) return 'denied';
+    const stream = await handle.createWritable();
     await stream.write(bytes);
     await stream.close();
     return 'written';

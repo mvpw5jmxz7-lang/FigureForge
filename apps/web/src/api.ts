@@ -2,12 +2,9 @@
 
 import type { Alternative, Correction, StatResult, StatTest } from '@figureforge/doc-model';
 
-declare global {
-  interface Window {
-    /** Injected by the Electron preload; absent in every browser build. */
-    figureforge?: { readonly apiBase?: () => string };
-  }
-}
+// Type-only, for the ambient `window.figureforge` declaration; emits nothing,
+// so a browser build carries no trace of the shell.
+import type {} from './shell.js';
 
 /**
  * Where the service is.
