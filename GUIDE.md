@@ -8,33 +8,36 @@ word that isn't explained the moment it comes up.
 **Jump to:** [1. What this is](#1-what-this-is) · [2. What works and what
 doesn't](#2-what-works-today-and-what-does-not-yet) · [3. Installing what you
 need](#3-installing-what-you-need) · [4. Getting the
-project](#4-getting-the-project-onto-your-computer) · [5. Starting it
-up](#5-starting-it-up) · [6. First
-walkthrough](#6-using-the-app-for-the-first-time) · [7. Command
-reference](#7-command-reference) · [8. Stopping
-it](#8-stopping-it-or-starting-fresh) · [9.
-Troubleshooting](#9-troubleshooting) · [10. Giving
-feedback](#10-how-to-give-useful-feedback) · [11. Glossary](#11-glossary)
+project](#4-getting-the-project-onto-your-computer) · [5. Moving FigureForge to
+another computer](#5-moving-figureforge-to-another-computer) · [6. Starting it
+up](#6-starting-it-up) · [7. First
+walkthrough](#7-using-the-app-for-the-first-time) · [8. Command
+reference](#8-command-reference) · [9. Stopping
+it](#9-stopping-it-or-starting-fresh) · [10.
+Troubleshooting](#10-troubleshooting) · [11. Giving
+feedback](#11-how-to-give-useful-feedback) · [12. Glossary](#12-glossary)
 
 ---
 
 ## 1. What this is
 
 FigureForge turns spreadsheet data into the kind of multi-panel figure a
-science journal expects — the sort you'd see in *Nature* or *Cell*: clean
-bar charts with error bars, significance stars placed automatically after a
-real statistical test, panels neatly labelled **a**, **b**, **c**, arranged on
-a page sized to that journal's column width — and it exports a file you can
-actually submit.
+science journal expects — the sort you'd see in *Nature* or *Cell*: clean bar
+charts, scatter plots, heatmaps and more, with error bars and significance
+stars placed automatically after a real statistical test, panels neatly
+labelled **a**, **b**, **c**, arranged on a page sized to that journal's
+column width — and it exports a file you can actually submit.
 
 It runs the real statistics (via a well-established Python library called
 SciPy, the same engine used across scientific computing), not a rough
 approximation — so the p-values and confidence intervals it reports are the
 real ones.
 
-It is **not finished**. Section 2 below is the most important part of this
-guide: it tells you exactly what to expect right now, so you can tell the
-difference between "this is broken" and "this hasn't been built yet."
+The core pipeline — data in, chart, statistics, quality check, publication-
+ready export — is complete. A couple of things are still open (there's no
+downloadable installer yet, and there's no AI layout assistant); section 2
+below is honest about exactly what to expect, so you can tell the difference
+between "this is broken" and "this hasn't been built yet."
 
 ---
 
@@ -43,53 +46,76 @@ difference between "this is broken" and "this hasn't been built yet."
 ### Works today
 
 - **Import data.** Paste a table from Excel, or drop in a `.csv`/`.tsv`/`.txt`
-  file. It recognises a few common layouts (a treatment column with replicate
-  columns, a simple X/Y table, grouped data) and shows you a preview before
+  file. It recognises a wide range of common layouts — a treatment column with
+  replicate columns, a simple X/Y table, grouped/nested data, contingency
+  (count) tables, a differential-expression table, a samples-by-features
+  matrix, survival (time-to-event) data — and shows you a preview before
   anything is added to the figure.
-- **Bar and dot charts**, with error bars (standard deviation, standard error,
-  or a 95% confidence interval) and the individual data points shown as dots.
-- **Real statistics.** t-tests, ANOVA, Mann-Whitney, Kruskal-Wallis,
-  correlation, and more — with correction for multiple comparisons, an effect
-  size, and a ready-to-paste sentence for your methods section.
+- **Every chart type on the menu is real**, not a placeholder: bar, dot,
+  bar+dot, beeswarm, box, violin, scatter, line and histogram plots; plus the
+  more specialised omics/biostatistics types — **volcano plots**, **heatmaps**,
+  **Kaplan–Meier survival curves**, and **PCA**/**UMAP** dimensionality-
+  reduction plots (run directly from an imported data matrix via a "Run PCA" /
+  "Run UMAP" button). Which types are offered depends on the shape of your
+  data — for example, a volcano plot needs a differential-expression-shaped
+  table — so the dropdown only ever offers types your data can actually
+  support, rather than drawing something misleading from the wrong shape.
+- **Error bars and replicate display**: standard deviation, standard error, or
+  a 95% confidence interval, with the individual data points shown alongside.
+- **Real statistics**, all reachable from the on-screen Stats tab: t-tests,
+  one-way and repeated-measures ANOVA, Mann-Whitney, Kruskal-Wallis, Wilcoxon,
+  chi-square, Fisher's exact, correlation (Pearson/Spearman), linear
+  regression, and a log-rank test for survival curves — with correction for
+  multiple comparisons, an effect size, and a ready-to-paste sentence for your
+  methods section. (A few combinations are *deliberately* refused with an
+  on-screen explanation rather than run anyway — for example, a nested design
+  needs a hierarchical model this tool doesn't fit, and a count table doesn't
+  support a t-test. That's a stated statistical guardrail, not a missing
+  feature.)
 - **Automatic significance brackets** — run a test and it draws the bracket
   with `*` / `**` / `***` / `****` / `ns` positioned correctly over the bars
-  being compared.
+  or curves being compared, and keeps them positioned correctly if you move
+  or resize things afterwards.
+- **Image panels.** Import a microscopy image, western blot or gel (PNG, JPEG,
+  SVG or TIFF), crop it, add a calibrated scale bar, and annotate it with
+  arrows, shapes or text — including tiling several images into one panel.
 - **Multi-panel layout.** Add several panels, click one button, and they're
   arranged evenly on a journal-sized page with matching gutters and correctly
-  lettered.
+  lettered — with more than twenty layout templates to choose from, including
+  vertical stacks.
 - **A "publication readiness" score** out of 100, with a plain-English list of
   anything that would likely get the figure sent back (text too small, images
   too low-resolution, colours that don't work for colour-blind readers, and so
-  on).
+  on). Many of these come with a one-click fix; a few genuinely need a
+  decision only you can make (like which colours mean what), so those explain
+  the problem and take you straight to the right control instead of guessing.
 - **Export** to PDF, EPS, SVG (all fully editable, with real selectable text —
   not a picture of text), or PNG/TIFF at print resolution.
 - **Save and reopen your work** as a project file (see the glossary entry for
-  `.figureforge` files).
+  `.ffg` files) — use the **Save**, **Save as…** and **Open project** buttons
+  at the bottom of the window.
 
 ### Not finished yet — please don't report these as bugs
 
-- **Other chart types.** The chart-type menu lists box plots, violin plots,
-  line graphs, scatter plots and histograms, but choosing one of these
-  currently draws *something* using the bar/dot logic underneath — it is not
-  actually that chart type yet. Stick to **Bar** or **Dot** for now; anything
-  else is not trustworthy.
-- **Inserting images** — microscopy pictures, western blots, gels. The menu
-  and the underlying support exist, but there's no way yet to actually load an
-  image file in.
-- **A few statistical tests** (chi-square, linear regression, and a couple of
-  others) work correctly behind the scenes but aren't in the on-screen list
-  yet, so you can't reach them from the app.
-- **Heatmaps, PCA/UMAP plots, volcano plots, survival curves** — not built.
 - **A standalone desktop app.** Right now this only runs as a website you open
-  in your browser (see below) — there's no downloadable application yet.
-- **Not every readiness finding can be fixed for you.** The ones that can now
-  have a button that does the work — undersized labels, missing or duplicated
-  panel letters, a stray font, uneven spacing. The rest need a decision only you
-  can make (which colours mean what, whether to shrink a panel or the type),
-  so they explain the problem and take you to the control instead.
+  in your browser (see below) — there's no downloadable, double-click-to-
+  install application yet.
+- **No AI layout assistant.** Layout is manual (with auto-layout, templates
+  and smart guides to help) — there's no "arrange this for me automatically
+  using AI" feature.
+- **No autosave.** FigureForge doesn't save your work in the background —
+  closing the browser tab without clicking **Save** first loses whatever
+  hasn't been saved. Save often, especially before trying something you might
+  want to undo.
+- **A couple of smaller, documented trade-offs**, mentioned here so they don't
+  come as a surprise: a 16-bit scientific image (common for microscopy)
+  displays and exports at 8-bit for the figure itself, though your original
+  file is always kept byte-for-byte inside the saved project; and a rotated
+  JPEG (from a phone camera, for instance) displays in whatever orientation it
+  was saved in, without reading the camera's rotation tag.
 
 If something looks wrong and it **isn't** on this list, that's useful
-feedback — see [section 10](#10-how-to-give-useful-feedback).
+feedback — see [section 11](#11-how-to-give-useful-feedback).
 
 ---
 
@@ -115,12 +141,36 @@ That's the only thing to install. You do **not** need to separately install
 Python, Node, or anything else — Docker Desktop provides everything
 FigureForge needs, self-contained.
 
-> **A note on how this was written:** the macOS steps above are correct and
-> match how Docker Desktop and this project's setup files work, but they were
-> written without a Mac available to test them on directly — everything on
-> the Linux side of this guide has been run and checked this session; the
-> macOS side has not. If a step doesn't match what you see, that's useful
-> feedback too.
+> **A note on how this was written:** the macOS and Windows steps in this
+> guide are correct and match how Docker Desktop and this project's setup
+> files work, but they were written without a Mac or a Windows PC available to
+> test on directly — everything on the Linux side of this guide has been run
+> and checked this session; macOS and Windows have not. If a step doesn't
+> match what you see, that's useful feedback too.
+
+### On Windows
+
+You need **Docker Desktop**, which on Windows relies on a feature called WSL2
+(a lightweight Linux environment Windows can run alongside itself — Docker
+needs it to work).
+
+1. Go to **[docker.com](https://www.docker.com/products/docker-desktop/)** and
+   download Docker Desktop for Windows.
+2. Run the installer. If it tells you WSL2 isn't installed or enabled, let it
+   install/enable it for you (or follow the link it gives you) — this usually
+   requires one restart of your computer.
+3. If your computer refuses to enable WSL2 at all, the most common cause is
+   that "virtualization" is turned off in your PC's BIOS/UEFI settings. This
+   varies by manufacturer; searching "[your PC model] enable virtualization
+   BIOS" will get you there. This is only needed if the installer specifically
+   asks for it.
+4. After installing, open **Docker Desktop** from the Start menu. Wait for its
+   window to say it's running (the whale icon in the system tray, bottom-right
+   of the screen, stops animating).
+5. Leave Docker Desktop open in the background whenever you're using
+   FigureForge.
+
+You do **not** need to separately install Python, Node, or anything else.
 
 ### On Linux
 
@@ -137,12 +187,14 @@ sudo apt install podman make
 
 ### What is a terminal
 
-This applies on both macOS and Linux. A few steps below ask you to type a
-command into a **terminal** — a
-text-based window for typing instructions to your computer instead of
-clicking. If you've never opened one:
+This applies on macOS, Windows and Linux alike. A few steps below ask you to
+type a command into a **terminal** — a text-based window for typing
+instructions to your computer instead of clicking. If you've never opened one:
 
 - **macOS:** press `Cmd + Space`, type `Terminal`, press Enter.
+- **Windows:** press the `Windows` key, type `Terminal`, press Enter (this
+  opens Windows Terminal, which runs PowerShell — the commands in this guide
+  work the same there).
 - **Linux:** look for "Terminal" in your applications menu, or press
   `Ctrl + Alt + T` on most distributions.
 
@@ -168,22 +220,97 @@ This trips people up more than anything else, so it's worth being explicit.
 You need the terminal's "current location" to be the project folder before
 any command below will work.
 
-- **Easiest way on both platforms:** open the terminal, type `cd ` (with a
-  trailing space), then drag the project folder from Finder/Files straight
-  into the terminal window — it will paste the correct path automatically.
-  Press Enter.
-- You'll know it worked if, when you type `ls` and press Enter, you see a list
-  of files including `README.md`, `GUIDE.md`, `Makefile`, and folders like
-  `apps` and `packages`.
+- **Easiest way on every platform:** open the terminal, type `cd ` (with a
+  trailing space), then drag the project folder from Finder/Explorer/Files
+  straight into the terminal window — it will paste the correct path
+  automatically. Press Enter.
+- You'll know it worked if, when you type `ls` (macOS/Linux) or `dir`
+  (Windows PowerShell — `ls` also works there) and press Enter, you see a
+  list of files including `README.md`, `GUIDE.md`, `Makefile`, and folders
+  like `apps` and `packages`.
 
 Every command in this guide from here on assumes you're sitting in that
 folder.
 
 ---
 
-## 5. Starting it up
+## 5. Moving FigureForge to another computer
 
-### On macOS
+This section is for two different situations: giving the whole app to
+someone else (or setting it up on a second computer of your own), and simply
+handing someone a figure you made. They're different problems with different
+answers, so they're covered separately.
+
+### Moving the whole app to a new computer
+
+The short version: **only the project folder needs to travel.** Docker itself
+has to be freshly installed on the new computer (that's section 3, above, for
+whichever operating system that computer runs), and the very first time you
+start FigureForge there, it will spend a few minutes rebuilding everything —
+exactly like the first time you ever ran it. That rebuild is normal and only
+happens once per computer.
+
+You do **not** need to bring anything besides the project folder itself.
+Everything that makes a working copy of this project large on a computer
+where it's been actively used for development — downloaded packages, build
+output — lives inside Docker's own storage, not inside the folder on disk. A
+plain copy of the folder is already everything that's needed.
+
+**Option 1 — you have access to where the project is hosted (a link ending in
+`.git`).** This is the easiest and fastest route. On the new computer, just
+follow [section 4](#4-getting-the-project-onto-your-computer) and run
+`git clone` there directly — nothing needs to be copied by hand at all.
+
+**Option 2 — you don't have that, you just have the folder on this
+computer.** Copy the folder itself across:
+
+1. On the computer you're copying *from*, first stop FigureForge if it's
+   running (see [section 9](#9-stopping-it-or-starting-fresh)) — it isn't
+   strictly required, but it avoids copying a folder mid-write.
+2. Right-click the project folder and compress/zip it (macOS: "Compress"; the
+   Windows/Linux equivalent is usually "Compress to ZIP file" or "Send to →
+   Compressed folder"). This produces one file, which is much easier to move
+   than a folder full of thousands of small files.
+3. Move that one zip file to the new computer, by whichever means is
+   convenient: a USB flash drive, a shared network drive, or a cloud storage
+   service you already use (Dropbox, Google Drive, OneDrive, WeTransfer, and
+   so on all work fine — it's an ordinary file, nothing special about it).
+4. On the new computer, unzip it (double-click it, or right-click →
+   "Extract"), which gives you back the project folder.
+5. Install Docker on the new computer if you haven't already — see
+   [section 3](#3-installing-what-you-need) for that computer's operating
+   system.
+6. Open a terminal in the unzipped folder (see [section
+   4](#4-getting-the-project-onto-your-computer)'s callout on opening a
+   terminal in the right place) and start it up as usual — [section
+   6](#6-starting-it-up).
+
+That's the whole process. If the first start on the new computer takes a
+while and prints a lot of scrolling text, that's expected — see
+[section 10](#10-troubleshooting) if it doesn't finish within several
+minutes.
+
+### Sharing just a figure, not the whole app
+
+If you just want to send someone a figure you made — not set up FigureForge
+on their computer — you don't need any of the above. A saved FigureForge
+project is one small file ending in `.ffg` (see the glossary), and it travels
+like any other file: attach it to an email, put it on a USB drive, or upload
+it to cloud storage.
+
+The only requirement on the receiving end is that the other person already
+has FigureForge running on their own computer (their own copy, set up the
+same way you did — see sections 3, 4 and 6). They don't need your project
+folder at all. Once FigureForge is open in their browser, they click **Open
+project** at the bottom of the window and pick the `.ffg` file you sent them
+— it opens with everything intact: the data, the layout, and any statistics
+that were run.
+
+---
+
+## 6. Starting it up
+
+### On macOS and Windows
 
 ```bash
 docker compose up --build
@@ -233,16 +360,16 @@ whether your computer is set to light or dark mode — either is normal.)
 1. **Check the terminal is still open and running.** If it printed an error
    and stopped, scroll up and read the last few lines — they usually say
    plainly what went wrong (a very common one is "port already in use," see
-   [Troubleshooting](#9-troubleshooting)).
+   [Troubleshooting](#10-troubleshooting)).
 2. **Give it another minute**, especially on the very first run — the browser
    can be quicker to try than the app is to finish starting.
 3. **Reload the page.** Sometimes the browser gets there before the app is
    fully ready.
-4. If it still doesn't work, see [section 9](#9-troubleshooting).
+4. If it still doesn't work, see [section 10](#10-troubleshooting).
 
 ---
 
-## 6. Using the app for the first time
+## 7. Using the app for the first time
 
 This walks through the whole loop once, using the sample data that's already
 loaded when you open the app, so you can see everything working before trying
@@ -290,18 +417,21 @@ your own data.
    in the toolbar to tidy everything up.
 
 That's the whole loop: data in, chart and statistics, a quality check,
-export.
+export. Once you're comfortable with it, the more specialised chart types —
+volcano plots, heatmaps, survival curves, PCA/UMAP — work the same way, but
+each expects your data in a particular shape; the Data tab's layout picker
+explains what each one needs when you get there.
 
 ---
 
-## 7. Command reference
+## 8. Command reference
 
 Run these from a terminal, sitting in the project folder (see
 [section 4](#4-getting-the-project-onto-your-computer)).
 
-| What you want to do | macOS | Linux | What it does | If it doesn't work, check |
+| What you want to do | macOS / Windows | Linux | What it does | If it doesn't work, check |
 |---|---|---|---|---|
-| Start the app | `docker compose up --build` | `make up` | Builds (if needed) and starts everything; prints the web address | Docker Desktop is open and running (macOS); no error text partway through the output |
+| Start the app | `docker compose up --build` | `make up` | Builds (if needed) and starts everything; prints the web address | Docker Desktop is open and running; no error text partway through the output |
 | Stop the app | `docker compose down` | `make down` | Shuts everything down cleanly | Nothing to check — this one is safe to run any time, even if nothing is running |
 | Run the automated checks | `docker compose exec web npm test` and `docker compose exec api python -m pytest -q` | `make test` | Runs the project's internal test suite — a sanity check that nothing is broken, not something you need for everyday use | The app must already be started (step above) first |
 | Run the full example end-to-end | `docker compose exec web npx vite-node scripts/acceptance.ts` | `make acceptance` | Builds a whole sample figure from scratch — data, chart, statistics, export — and prints a checklist. Useful if you want proof the whole pipeline works without using the browser at all | The app must already be started first; a `[FAIL]` line tells you exactly which step broke |
@@ -316,12 +446,12 @@ command above.
 
 ---
 
-## 8. Stopping it or starting fresh
+## 9. Stopping it or starting fresh
 
 To stop everything:
 
 ```bash
-docker compose down     # macOS
+docker compose down     # macOS / Windows
 make down                # Linux
 ```
 
@@ -332,7 +462,7 @@ after an update to the project — the equivalent of "turn it off and on
 again" is:
 
 ```bash
-docker compose down && docker compose up --build     # macOS
+docker compose down && docker compose up --build     # macOS / Windows
 make restart                                          # Linux
 ```
 
@@ -341,48 +471,57 @@ start) but resolves almost anything short of an actual bug.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 **"Port already in use" or similar, when starting up.**
 This means something is already using the address FigureForge needs
 (`5173` or `8000`) — most often, FigureForge is already running from
-earlier and you just forgot. Run the "stop" command from section 8, then
+earlier and you just forgot. Run the "stop" command from section 9, then
 start again. If that doesn't help, it may be a different program on your
 computer using that same address; closing that program should free it up.
 
 **The browser says it can't connect / "This site can't be reached."**
 The app usually just hasn't finished starting yet — see
-[section 5](#if-the-browser-shows-nothing-or-an-error) above. If Docker
-Desktop (macOS) isn't open and running, start it first.
+[section 6](#if-the-browser-shows-nothing-or-an-error) above. If Docker
+Desktop isn't open and running, start it first.
 
 **The page loads, but statistics or exports don't work, and you see a yellow
 banner** saying the analysis service isn't reachable.
 The `api` piece isn't running or hasn't finished starting. Check with the
-"see what's currently running" command in section 7 — give it another
-minute, or try the restart in section 8.
+"see what's currently running" command in section 8 — give it another
+minute, or try the restart in section 9.
 
 **The very first start takes forever.**
 Expected — it's downloading and assembling everything. This only happens
-once (or after a restart-from-scratch); normal starts afterwards are quick.
+once (or after a restart-from-scratch, or after moving the project to a new
+computer — see [section 5](#5-moving-figureforge-to-another-computer));
+normal starts afterwards are quick.
+
+**(Windows) The installer says WSL2 isn't available, or Docker Desktop won't
+start.**
+Most often this means "virtualization" is switched off in the computer's
+BIOS/UEFI settings, or WSL2 hasn't finished installing yet and the computer
+needs a restart. The Docker Desktop installer usually tells you exactly which
+of the two it needs — follow what it says and restart if asked.
 
 **Nothing above matches what you're seeing.**
-See [section 10](#10-how-to-give-useful-feedback) — copy the last 10–20
+See [section 11](#11-how-to-give-useful-feedback) — copy the last 10–20
 lines of text from the terminal window when reporting it; that's almost
 always where the real answer is.
 
 ---
 
-## 10. How to give useful feedback
+## 11. How to give useful feedback
 
-This tool is still being built, and your testing is genuinely part of that —
-so when something looks wrong, a little detail goes a long way:
+This tool is still being refined, and your testing is genuinely part of that
+— so when something looks wrong, a little detail goes a long way:
 
 1. **First, check [section 2](#2-what-works-today-and-what-does-not-yet).** If
    it's on the "not finished yet" list, it's expected — no need to report it
    (though "I hit this and was confused" is still useful, just frame it as
    that rather than as a bug).
 2. **What were you trying to do?** ("I imported a CSV and tried to make a
-   line graph.")
+   heatmap.")
 3. **What did you expect to happen, and what happened instead?**
 4. **Copy any error message you saw**, word for word — including the little
    yellow or red banners in the app, and anything unusual in the terminal
@@ -392,13 +531,21 @@ so when something looks wrong, a little detail goes a long way:
 
 ---
 
-## 11. Glossary
+## 12. Glossary
 
 - **Terminal** — a window for typing text commands to your computer, instead
   of clicking. See [section 3](#what-is-a-terminal).
 - **Container / Docker / Docker Desktop** — a way of packaging an application
   with everything it needs to run, so it behaves the same on any computer.
-  Docker Desktop is the program that makes this work on a Mac.
+  Docker Desktop is the program that makes this work on a Mac or a Windows PC.
+- **Image (Docker image)** — the packaged, ready-to-run blueprint for a piece
+  of the app (built the first time you start FigureForge, or after a
+  restart-from-scratch). A **container** is that image actually running. You
+  never need to handle images directly — `docker compose up --build` /
+  `make up` build and run them for you.
+- **WSL2** — "Windows Subsystem for Linux," a lightweight Linux environment
+  that Windows can run alongside itself. Docker Desktop on Windows uses it
+  behind the scenes; see [section 3](#on-windows).
 - **Port** (e.g. `5173`, `8000`) — a numbered "channel" a program listens on.
   `http://localhost:5173` means "the program listening on channel 5173, on
   this computer."
@@ -407,10 +554,18 @@ so when something looks wrong, a little detail goes a long way:
   on.
 - **Repository / repo** — the project folder, including its full history of
   changes. "Cloning" it means downloading a copy.
-- **`.figureforge` file** — FigureForge's own save-file format. It's a zip
-  file containing your original data exactly as imported (never altered),
-  the figure layout, and any statistics you've run — so reopening it gives
-  you back everything, not just a picture of the result.
+- **Zip file / archive (for transferring the app)** — a single compressed
+  file containing a whole folder, made so it's easier to move around than
+  thousands of individual files. See [section 5](#moving-the-whole-app-to-a-new-computer)
+  for how to make and unpack one for FigureForge itself. (Not to be confused
+  with a `.ffg` project file, below — a `.ffg` file already is a single file
+  and needs no zipping.)
+- **`.ffg` file** — FigureForge's own save-file format (the project used to
+  call this `.figureforge`; both still open). It's a zip file containing your
+  original data exactly as imported (never altered), the figure layout, and
+  any statistics you've run — so reopening it gives you back everything, not
+  just a picture of the result. Small enough to email or upload directly; see
+  [section 5](#sharing-just-a-figure-not-the-whole-app).
 - **PDF / EPS / SVG vs. PNG / TIFF** — the first three are "vector" formats:
   the text and shapes stay fully editable and scale to any size without
   blurring, which is what a journal wants. PNG and TIFF are "raster" —

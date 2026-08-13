@@ -25,7 +25,9 @@ make acceptance  # end-to-end: CSV in, publication-ready PDF out
 make down        # stop
 ```
 
-`make help` lists every target.
+`make help` lists every target. Two more, `make desktop` and
+`make desktop-smoke`, launch and drive the Electron shell (see below) against
+a separate, heavier image — not needed for ordinary web work.
 
 The dev environment is a **podman pod**, so both containers share one network
 namespace and the web app reaches the API on plain `localhost:8000`. A
@@ -67,13 +69,15 @@ what journals specify ("panel labels 8 pt bold"), and converted at render.
 
 ```
 packages/
-  doc-model/   FigureDocument, schema, undo/redo, layout engine, .figureforge I/O
+  doc-model/   FigureDocument, schema, undo/redo, layout engine, .ffg I/O
   theme/       journal presets, palettes, colour-vision validation
   plots/       scales, ticks, summary statistics, mark geometry  (pure maths)
   render/      scene tree -> {React | SVG string}, quality checker
-apps/web/      Vite + React canvas, inspectors, export UI
+apps/web/      Vite + React canvas, inspectors, import/export UI
+apps/desktop/  Electron shell: supervises the Python sidecar, native dialogs
+               and menu, drag-and-drop open — depends on nothing internal
 services/api/  FastAPI: statistics and export conversion
-scripts/       end-to-end acceptance flow
+scripts/       end-to-end acceptance flow, desktop smoke test, archive A/B
 ```
 
 `plots` computes numbers and `render` draws them. That split is why the plotting
@@ -185,22 +189,38 @@ limit rather than pretending the palette is universally safe.
 
 ## Status
 
-Phases 1–6 of the plan are complete and verified end to end: import → plot →
+Phases 1–7 of the plan are complete and verified end to end: import → plot →
 statistics → annotation → layout → export, with a 100/100 readiness score and a
-PDF confirmed to carry selectable text at exact journal dimensions.
+PDF confirmed to carry selectable text at exact journal dimensions. Phase 8
+(the Electron desktop shell) is three stages in, of four.
 
 **Implemented:** document model with undo/redo and project files; auto-layout
-with smart guides, snapping and templates; all nine plot types
-(bar/dot/bar+dot/beeswarm/box/violin/scatter/line/histogram) with error bars,
-log and broken axes, secondary axes and marker options; statistics with
-corrections, effect sizes and t-distribution intervals, verified against
-published reference values; image panels with crop, calibrated scale bars and
-annotations; all five export formats; a quality checker that repairs what it
-honestly can and explains what it cannot; canvas selection, copy/paste and
-draw-order control; data import with format detection and live preview.
+with smart guides, snapping, rotation and 20+ templates; all twelve plot types
+(bar/dot/bar+dot/beeswarm/box/violin/scatter/line/histogram, plus volcano,
+heatmap and survival curves, with PCA/UMAP reusing scatter via a "run
+analysis" action on a data matrix) with error bars, log/symlog and broken
+axes, secondary axes, marker options and a DOM-free rasterization path for
+point clouds past ~2,000 points; statistics with corrections, effect sizes and
+t-distribution intervals — including a hand-verified log-rank test — verified
+against published reference values; image panels with crop, calibrated scale
+bars and annotations; all five export formats, now streamed rather than built
+whole in memory; a quality checker that repairs what it honestly can and
+explains what it cannot; canvas selection, copy/paste, rotation and draw-order
+control; data import with format detection and live preview across a dozen
+table layouts.
 
-**Not yet built** (Phases 7–9): omics plots (heatmaps, PCA, UMAP, volcano,
-survival), the Electron desktop shell, and the AI layout assistant. The node
-types, renderer hooks and layout geometry for several of these are in place.
+**Phase 8 (Electron shell), stages 1–3 done:** the app runs inside a real
+Electron shell that supervises the Python service as a health-gated child
+process with backoff restarts and a self-reaping watchdog; native Open/Save
+dialogs, an application menu, a recent-projects list, an unsaved-changes quit
+guard, and drag-and-drop open, all fenced so the renderer can only touch paths
+the shell itself produced; and the project archive streams to and from disk
+instead of being built whole in memory, on the browser as well as the
+desktop (measured: a 200 MB save's peak memory fell from 526 MB to 337 MB).
+**Not yet built:** stage 4 (packaging — electron-builder, a bundled
+interpreter, an installer, code signing) and phase 9 (the AI layout
+assistant). The desktop app currently only runs from a checkout
+(`make desktop`), not as a downloadable installer.
 
-Run `make acceptance` to see the whole pipeline execute.
+Run `make acceptance` to see the whole web pipeline execute, or
+`make desktop-smoke` for the Electron shell.

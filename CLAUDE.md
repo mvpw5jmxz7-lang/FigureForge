@@ -233,6 +233,29 @@ Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
 
+**`GUIDE.md` and `README.md` were rewritten after phase 8 stage 3 to describe
+the app that actually exists**, not the one from when they were first
+written. `GUIDE.md` (the non-developer guide) previously said other chart
+types "draw something using bar/dot logic," image import "can't be done
+yet," several stats tests "aren't reachable," and heatmaps/PCA/UMAP/volcano/
+survival were "not built" — all shipped since, over phases 4–7. It now lists
+every chart type, all reachable statistics, and image panels as working, and
+states the real remaining gaps honestly (no installer, no AI layout
+assistant, no autosave). It also gained a section for someone who has never
+used Docker on moving the project to another computer (git clone vs.
+zip-and-copy, and separately, sharing just a `.ffg` file) and first-time
+Windows install steps — the previous version covered only macOS and Linux.
+The prior version is kept as `GUIDE.old.md`. `README.md`'s Status section had
+the identical staleness (still said "Phases 1–6 complete... Phases 7–9 not
+yet built") and was corrected the same way, plus its package-layout listing
+gained `apps/desktop`. Deliberately **not** mentioned in `GUIDE.md`: the
+Electron desktop shell (`make desktop`) — it is a dev/test harness run from a
+checkout, not a packaged, downloadable app (stage 4), and advertising it to a
+non-developer would be misleading. Checked by hand rather than run: every
+internal anchor link against its heading, and every shell command shown
+against `Makefile`/`compose.yaml`. There is no automated test over prose, so
+this is not part of the TypeScript/Python counts below.
+
 **Verified after phase 8 stage 3 (streaming the archive):** 789 TypeScript
 tests, 152 Python tests unchanged, typecheck and lint clean, 46-check
 acceptance run unaffected, a 21-check desktop smoke run and a 6-check browser
