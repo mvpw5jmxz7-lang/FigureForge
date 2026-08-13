@@ -7,6 +7,7 @@ import {
   loadArchive,
   saveArchive,
   type FigureDocument,
+  type LoadResult,
   type NodeId,
 } from '@figureforge/doc-model';
 import { checkFigure, renderDocument, toSvgString } from '@figureforge/render';
@@ -25,7 +26,7 @@ import {
 import { useAssets, type AssetStore } from './assets.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
-import { openedToResult } from './desktopFiles.js';
+import { openAuthorisedPath } from './desktopFiles.js';
 import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
 import { createSampleDocument } from './sample.js';
 import { isDesktop, type DesktopMenuCommand } from './shell.js';
@@ -388,15 +389,29 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     [api, currentDocument],
   );
 
-  const buildArchiveBytes = useCallback((): Uint8Array => {
+  /**
+   * The project as data, ready to be serialised by whoever is storing it.
+   *
+   * Both side-stores go in, or the archive keeps the metadata and loses the
+   * thing it describes: a project whose micrographs are grey boxes and whose
+   * "verbatim" CSV was re-serialised on the way out.
+   */
+  const currentArchiveContents = useCallback(() => {
     const document = currentDocument();
-    return saveArchive(
-      // Both side-stores go in, or the archive keeps the metadata and loses
-      // the thing it describes: a project whose micrographs are grey boxes and
-      // whose "verbatim" CSV was re-serialised on the way out.
-      buildArchiveContents(document, dataOriginals.current, assets.store.archiveMap(document)),
-    );
+    return buildArchiveContents(document, dataOriginals.current, assets.store.archiveMap(document));
   }, [currentDocument, assets.store]);
+
+  /**
+   * The whole archive as one buffer.
+   *
+   * Only the download fallback needs this — it hands a `Blob` to an anchor and
+   * there is no stream to give it instead. Every other path streams, so it
+   * never holds a second copy of every image; see `archive-stream.ts`.
+   */
+  const buildArchiveBytes = useCallback(
+    (): Uint8Array => saveArchive(currentArchiveContents()),
+    [currentArchiveContents],
+  );
 
   const downloadArchive = useCallback(
     (name: string) => {
@@ -436,7 +451,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     async (target: SaveTarget): Promise<boolean> => {
       setBusy('Saving');
       try {
-        const result = await fileSystem.write(target, buildArchiveBytes());
+        const result = await fileSystem.write(target, currentArchiveContents());
         if (result === 'denied') {
           setError(`Could not write to "${target.name}"; the file was downloaded instead.`);
           downloadArchive(stripArchiveExtension(target.name));
@@ -461,7 +476,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         setBusy(null);
       }
     },
-    [fileSystem, buildArchiveBytes, downloadArchive, showSaveConfirmation],
+    [fileSystem, currentArchiveContents, downloadArchive, showSaveConfirmation],
   );
 
   /** Always re-prompts, even when a target is already held. */
@@ -486,10 +501,15 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     return saveAs();
   }, [fileSystem, currentDocument, saveTarget, writeToTarget, saveAs]);
 
-  const openFromFile = useCallback(
-    async (file: File, target: SaveTarget | null) => {
+  /**
+   * Adopt an already-parsed project.
+   *
+   * Split from the `File` path so a streamed open — which never materialises
+   * the archive — reaches exactly the same state changes.
+   */
+  const applyLoaded = useCallback(
+    async (result: LoadResult, target: SaveTarget | null) => {
       try {
-        const result = loadArchive(new Uint8Array(await file.arrayBuffer()));
 
         // Load the bytes before resetting the document. The other order shows
         // one frame of placeholders where the images should be.
@@ -527,13 +547,25 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     [api.store, assets.store],
   );
 
+  /** The `<input type="file">` fallback: parse here, then adopt. */
+  const openFromFile = useCallback(
+    async (file: File, target: SaveTarget | null) => {
+      try {
+        await applyLoaded(loadArchive(new Uint8Array(await file.arrayBuffer())), target);
+      } catch (caught) {
+        setError(`Could not open project: ${String(caught)}`);
+      }
+    },
+    [applyLoaded],
+  );
+
   const openProject = useCallback((file: File) => void openFromFile(file, null), [openFromFile]);
 
   const openViaPicker = useCallback(async () => {
     const picked = await fileSystem.pickOpen();
     if (!picked) return; // the user cancelled the picker
-    await openFromFile(picked.file, picked.target);
-  }, [fileSystem, openFromFile]);
+    await applyLoaded(picked.result, picked.target);
+  }, [fileSystem, applyLoaded]);
 
   /**
    * Start again.
@@ -577,10 +609,10 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         try {
           // The path has to come from the shell — `File.path` was removed, so
           // without it a dropped project could be read but never saved back to.
-          const opened = await window.figureforge?.project?.openDropped(file);
-          if (!opened) return;
-          const { file: project, target } = openedToResult(opened);
-          await openFromFile(project, target);
+          const resolved = await window.figureforge?.project?.resolveDropped(file);
+          if (!resolved) return;
+          const opened = await openAuthorisedPath(resolved.path, resolved.name);
+          await applyLoaded(opened.result, opened.target);
         } catch (caught) {
           setError(`Could not open the dropped file: ${String(caught)}`);
         }
@@ -593,7 +625,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDrop);
     };
-  }, [openFromFile]);
+  }, [applyLoaded]);
 
   /**
    * Any edit makes the document dirty.
@@ -647,10 +679,10 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         case 'open-path':
           void (async () => {
             try {
-              const opened = await window.figureforge?.project?.openPath(command.path);
-              if (!opened) return;
-              const { file, target } = openedToResult(opened);
-              await openFromFile(file, target);
+              const resolved = await window.figureforge?.project?.resolve(command.path);
+              if (!resolved) return;
+              const opened = await openAuthorisedPath(resolved.path, resolved.name);
+              await applyLoaded(opened.result, opened.target);
             } catch (caught) {
               setError(`Could not open that project: ${String(caught)}`);
             }
@@ -693,7 +725,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
       }
     };
     return window.figureforge?.onMenuCommand?.(dispatch);
-  }, [newFigure, openViaPicker, openFromFile, save, saveAs, requestExport, api, fitToWindow]);
+  }, [newFigure, openViaPicker, applyLoaded, save, saveAs, requestExport, api, fitToWindow]);
 
   // Ctrl/Cmd+S and Ctrl/Cmd+Shift+S. Bound in App's own effect, not Canvas's —
   // that one returns early for anything focused inside `.side-panel`, which

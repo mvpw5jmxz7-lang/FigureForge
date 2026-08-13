@@ -7,9 +7,19 @@
  */
 
 import { dialog, type BrowserWindow } from 'electron';
-import { readFile, writeFile } from 'node:fs/promises';
+import { open, rename, rm, type FileHandle } from 'node:fs/promises';
 
 import { AuthorisedPaths, PROJECT_EXTENSIONS, basename } from './projects';
+
+/**
+ * How much of a project file crosses the IPC boundary at a time.
+ *
+ * Reads are *pulled* — the renderer asks for the next chunk — so this is also
+ * the backpressure window. 4 MB makes a 300 MB project about 75 round trips,
+ * which is nothing, while keeping each message small enough that the copy
+ * structured cloning makes is not itself the problem.
+ */
+const CHUNK_BYTES = 4 * 1024 * 1024;
 
 /**
  * Electron wants extensions without the leading dot, and a display name.
@@ -21,12 +31,6 @@ const FILTERS = [
     extensions: PROJECT_EXTENSIONS.map((extension) => extension.replace(/^\./, '')),
   },
 ];
-
-export interface OpenedProject {
-  path: string;
-  name: string;
-  bytes: Uint8Array;
-}
 
 export interface SaveLocation {
   path: string;
@@ -53,7 +57,7 @@ export class ProjectFiles {
     return { path: result.filePath, name: basename(result.filePath) };
   }
 
-  async pickOpen(window: BrowserWindow): Promise<OpenedProject | null> {
+  async pickOpen(window: BrowserWindow): Promise<SaveLocation | null> {
     const result = await dialog.showOpenDialog(window, {
       title: 'Open figure',
       filters: FILTERS,
@@ -62,39 +66,130 @@ export class ProjectFiles {
     const path = result.filePaths[0];
     if (result.canceled || !path) return null;
     this.grant(path);
-    return this.read(path);
+    // The bytes are not read here: the renderer streams them through
+    // `beginRead`/`readChunk`, so nothing ever holds the whole archive.
+    return { path, name: basename(path) };
   }
 
-  /**
-   * Read a path the user has already pointed at — a recent entry, or a file
-   * dropped on the window. Refused unless this session produced it.
-   */
-  async read(path: string): Promise<OpenedProject> {
-    const refusal = this.authorised.refuse(path);
-    if (refusal) throw new Error(refusal);
-    const bytes = await readFile(path);
-    return { path, name: basename(path), bytes: new Uint8Array(bytes) };
-  }
+  // --- reading, a chunk at a time ---------------------------------------
 
   /**
-   * Overwrite an authorised path.
+   * Open an authorised path for chunked reading.
    *
-   * Returns `'denied'` rather than throwing for a permission failure, matching
-   * `ProjectFileSystem.write`'s contract in the renderer — the app already has
-   * a "the file was downloaded instead" recovery for exactly that answer.
+   * The renderer pulls: it asks for the next chunk when it is ready for one.
+   * Pushing would be fewer round trips and would buffer without bound in the
+   * renderer if it fell behind the disk, which is the failure this whole
+   * stage exists to remove.
    */
-  async write(path: string, bytes: Uint8Array): Promise<'written' | 'denied'> {
+  async beginRead(path: string): Promise<{ id: string; name: string }> {
     const refusal = this.authorised.refuse(path);
     if (refusal) throw new Error(refusal);
+
+    const handle = await open(path, 'r');
+    const id = `r${this.nextId++}`;
+    this.reads.set(id, handle);
+    return { id, name: basename(path) };
+  }
+
+  /** The next chunk, or null at end of file. */
+  async readChunk(id: string): Promise<Uint8Array | null> {
+    const handle = this.reads.get(id);
+    if (!handle) throw new Error('That project is no longer open for reading.');
+
+    const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, CHUNK_BYTES, null);
+    if (bytesRead === 0) return null;
+    // Copied out of the reusable buffer: the Uint8Array crosses the IPC
+    // boundary and must not alias storage the next read will overwrite.
+    return new Uint8Array(buffer.subarray(0, bytesRead));
+  }
+
+  async endRead(id: string): Promise<void> {
+    const handle = this.reads.get(id);
+    this.reads.delete(id);
+    await handle?.close();
+  }
+
+  // --- writing, through a temp file --------------------------------------
+
+  /**
+   * Open an authorised path for chunked writing.
+   *
+   * Writes land in a sibling temp file and are renamed over the target on
+   * `finishWrite`. Streaming makes this necessary rather than merely tidy:
+   * a write that fails part-way would otherwise leave a truncated file that
+   * still looks like a project and opens to a missing image. The rename is
+   * atomic within a filesystem, so the target is either the old file or the
+   * complete new one, never half of either.
+   */
+  async beginWrite(path: string): Promise<string | 'denied'> {
+    const refusal = this.authorised.refuse(path);
+    if (refusal) throw new Error(refusal);
+
+    const id = `w${this.nextId++}`;
+    const temporary = `${path}.${process.pid}-${id}.part`;
     try {
-      await writeFile(path, bytes);
-      return 'written';
+      const handle = await open(temporary, 'w');
+      this.writes.set(id, { handle, temporary, target: path });
+      return id;
     } catch (caught) {
-      const code = (caught as NodeJS.ErrnoException).code;
-      // Only a permissions answer is 'denied'; a full disk or a vanished
-      // directory is a real error the user needs to see stated.
-      if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'denied';
+      // 'denied' is a value, not an exception: the renderer's `write`
+      // contract already has a recovery for it, and an Error crossing IPC
+      // arrives as a string with its type lost.
+      if (isPermissionError(caught)) return 'denied';
       throw caught;
     }
   }
+
+  async writeChunk(id: string, bytes: Uint8Array): Promise<void> {
+    const session = this.writes.get(id);
+    if (!session) throw new Error('That project is no longer open for writing.');
+    await session.handle.write(bytes);
+  }
+
+  /** Flush, close and move the temp file into place. */
+  async finishWrite(id: string): Promise<'written' | 'denied'> {
+    const session = this.writes.get(id);
+    if (!session) throw new Error('That project is no longer open for writing.');
+    this.writes.delete(id);
+
+    try {
+      await session.handle.close();
+      await rename(session.temporary, session.target);
+      return 'written';
+    } catch (caught) {
+      await rm(session.temporary, { force: true });
+      if (isPermissionError(caught)) return 'denied';
+      throw caught;
+    }
+  }
+
+  /** Abandon a write, leaving the target untouched. */
+  async abortWrite(id: string): Promise<void> {
+    const session = this.writes.get(id);
+    if (!session) return;
+    this.writes.delete(id);
+    await session.handle.close().catch(() => undefined);
+    await rm(session.temporary, { force: true });
+  }
+
+  /** Called when the window goes away, so nothing is left half-written. */
+  async closeAll(): Promise<void> {
+    for (const id of [...this.writes.keys()]) await this.abortWrite(id);
+    for (const id of [...this.reads.keys()]) await this.endRead(id);
+  }
+
+  private readonly reads = new Map<string, FileHandle>();
+  private readonly writes = new Map<
+    string,
+    { handle: FileHandle; temporary: string; target: string }
+  >();
+  private nextId = 1;
+}
+
+function isPermissionError(caught: unknown): boolean {
+  const code = (caught as NodeJS.ErrnoException).code;
+  // Only a permissions answer is 'denied'; a full disk or a vanished
+  // directory is a real error the user needs to see stated.
+  return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
 }

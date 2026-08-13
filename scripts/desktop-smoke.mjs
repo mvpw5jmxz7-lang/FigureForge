@@ -141,34 +141,44 @@ class Cdp {
  * calls protects nothing.
  */
 async function checkFileAccessIsFenced(cdp) {
+  const refused = async (label, expression) => {
+    const answer = await cdp.evaluate(
+      `${expression}.then((r) => 'ALLOWED:' + JSON.stringify(r)).catch((e) => String(e.message ?? e))`,
+    );
+    check(label, !String(answer).includes('ALLOWED'), String(answer).slice(0, 90));
+  };
+
   // Reads a path the shell never handed out. A renderer that could do this
   // could read anything the user can.
-  const readSecret = await cdp.evaluate(
-    `window.figureforge.project.openPath('/etc/passwd')
-       .then(() => 'ALLOWED').catch((e) => String(e.message ?? e))`,
+  await refused(
+    'reading an arbitrary path is refused',
+    `window.figureforge.project.beginRead('/etc/passwd')`,
   );
-  check('reading an arbitrary path is refused', !String(readSecret).includes('ALLOWED'), String(readSecret).slice(0, 80));
 
-  // Right extension, still never authorised — this is the case the extension
-  // check alone would let through.
-  const readUnauthorised = await cdp.evaluate(
-    `window.figureforge.project.openPath('/tmp/not-mine.ffg')
-       .then(() => 'ALLOWED').catch((e) => String(e.message ?? e))`,
-  );
-  check(
+  // Right extension, still never authorised — the case the extension check
+  // alone would let through.
+  await refused(
     'reading an unauthorised project path is refused',
-    !String(readUnauthorised).includes('ALLOWED'),
-    String(readUnauthorised).slice(0, 80),
+    `window.figureforge.project.beginRead('/tmp/not-mine.ffg')`,
   );
 
-  const writeUnauthorised = await cdp.evaluate(
-    `window.figureforge.project.write('/tmp/not-mine.ffg', new Uint8Array([1,2,3]))
-       .then((r) => 'ALLOWED:' + r).catch((e) => String(e.message ?? e))`,
-  );
-  check(
+  await refused(
     'writing to an unauthorised path is refused',
-    !String(writeUnauthorised).includes('ALLOWED'),
-    String(writeUnauthorised).slice(0, 80),
+    `window.figureforge.project.beginWrite('/tmp/not-mine.ffg')`,
+  );
+
+  // `resolve` is the recent-list entry point. Naming a path the shell has
+  // never heard of must not authorise it, or the fence has a gate in it.
+  await refused(
+    'resolving an unknown path is refused',
+    `window.figureforge.project.resolve('/tmp/not-mine.ffg')`,
+  );
+
+  // A fabricated File yields an empty path from `webUtils`, which is how the
+  // shell tells a real drop from a renderer pretending to have had one.
+  await refused(
+    'a fabricated drop is refused',
+    `window.figureforge.project.resolveDropped(new File([], 'x.ffg'))`,
   );
 
   // The renderer pushing its state must not throw; the menu and the quit guard

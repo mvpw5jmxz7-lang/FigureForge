@@ -21,11 +21,38 @@
  */
 export const API_BASE_CHANNEL = 'figureforge:api-base';
 
-/** Renderer → main, `invoke`. Show a dialog, or read/write an authorised path. */
+/** Renderer → main, `invoke`. Show a dialog and return the chosen path. */
 export const PROJECT_PICK_SAVE = 'figureforge:project-pick-save';
 export const PROJECT_PICK_OPEN = 'figureforge:project-pick-open';
-export const PROJECT_OPEN_PATH = 'figureforge:project-open-path';
-export const PROJECT_WRITE = 'figureforge:project-write';
+/**
+ * Authorise a path the user pointed at some other way.
+ *
+ * Two channels, not one, because the two carry different trust. A recent entry
+ * is a string the renderer names, so main accepts it only if it is already in
+ * the shell's own recent list. A dropped file's path is derived in the
+ * *preload* by `webUtils.getPathForFile`, which returns empty for anything the
+ * page fabricated — so arriving on this second channel is itself the evidence
+ * that a real file was dropped.
+ */
+export const PROJECT_RESOLVE = 'figureforge:project-resolve';
+export const PROJECT_RESOLVE_DROPPED = 'figureforge:project-resolve-dropped';
+
+/**
+ * Chunked project I/O.
+ *
+ * A project is a zip of micrographs and can run to hundreds of megabytes, so
+ * it moves a chunk at a time rather than as one message: the archive is never
+ * held whole on either side of the boundary, which is the point of this stage.
+ * Reads are *pulled* — the renderer asks for the next chunk when it is ready —
+ * so the disk cannot outrun it.
+ */
+export const PROJECT_BEGIN_READ = 'figureforge:project-begin-read';
+export const PROJECT_READ_CHUNK = 'figureforge:project-read-chunk';
+export const PROJECT_END_READ = 'figureforge:project-end-read';
+export const PROJECT_BEGIN_WRITE = 'figureforge:project-begin-write';
+export const PROJECT_WRITE_CHUNK = 'figureforge:project-write-chunk';
+export const PROJECT_FINISH_WRITE = 'figureforge:project-finish-write';
+export const PROJECT_ABORT_WRITE = 'figureforge:project-abort-write';
 
 /** Main → renderer. A menu item was chosen. */
 export const MENU_COMMAND = 'figureforge:menu-command';

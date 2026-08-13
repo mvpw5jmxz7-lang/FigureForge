@@ -10,3 +10,4 @@ export * from './schema.js';
 export * from './store.js';
 export * from './operations.js';
 export * from './archive.js';
+export * from './archive-stream.js';

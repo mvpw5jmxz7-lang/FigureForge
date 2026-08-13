@@ -30,8 +30,10 @@ SIGTERM→SIGKILL teardown, and a watchdog on the Python side that reaps itself
 if the shell is SIGKILLed. Stage 2 adds native Open/Save dialogs, a
 File/Edit/View/Help menu, a recent-projects list, an unsaved-changes guard on
 quit, and drag-a-project-onto-the-window — with every path the renderer may
-touch fenced to ones the shell itself produced. Streaming archive I/O and
-packaging are stages 3–4 and are not started. Phase 9 is not started.**
+touch fenced to ones the shell itself produced. Stage 3 streams the project
+archive to and from disk instead of building it whole in memory, on the browser
+as well as the desktop: measured, a 200 MB figure's save peak fell from 526 MB
+to 337 MB. Packaging is stage 4 and is not started. Phase 9 is not started.**
 
 ---
 
@@ -45,12 +47,12 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 758 TypeScript + 152 Python tests
+make test        # 789 TypeScript + 152 Python tests
 make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
 
 make desktop        # launch the Electron shell against the dev server
-make desktop-smoke  # drive that shell headlessly, 19 checks
+make desktop-smoke  # drive that shell headlessly, 21 checks
 ```
 
 `make help` lists all 18 targets. The two `desktop` targets build a separate,
@@ -110,7 +112,8 @@ maintained by hand.
 ### Package split
 
 ```
-packages/doc-model/   model, zod schema, undo/redo, layout, operations, .figureforge I/O
+packages/doc-model/   model, zod schema, undo/redo, layout, operations, .ffg I/O
+                      (archive.ts whole-buffer, archive-stream.ts chunked)
 packages/theme/       journal presets, palettes, colour-vision validation
 packages/plots/       scales, summary statistics, mark geometry   ← maths only
 packages/render/      scene tree → {React | SVG string}, quality checker  ← drawing only
@@ -120,6 +123,7 @@ apps/desktop/         Electron shell: main process, preload bridge, sidecar supe
 services/api/         FastAPI: SciPy statistics, Chromium/Ghostscript export, TIFF decoding
 scripts/acceptance.ts end-to-end flow, no UI involved
 scripts/desktop-smoke.mjs  drives the real Electron app over CDP
+scripts/archive-memory.ts  peak-RSS A/B for the archive writer
 ```
 
 `apps/desktop` depends on **nothing internal** — not even `apps/web`. It hosts
@@ -228,6 +232,12 @@ four merged stages. **Round 6** is six reported bugs across the legend, the
 Data tab, the data grid, montage cropping and the selection chrome — all
 merged. Run `git status` and `git branch` before assuming the tree is clean or
 which branch you're on.
+
+**Verified after phase 8 stage 3 (streaming the archive):** 789 TypeScript
+tests, 152 Python tests unchanged, typecheck and lint clean, 46-check
+acceptance run unaffected, a 21-check desktop smoke run and a 6-check browser
+run. **Measured**: on a 200 MB payload the save peak fell 525.8 → 337.3 MB and
+the save-then-open cycle 725.9 → 589.1 MB. See "Phase 8, Stage 3" below.
 
 **Verified after phase 8 stage 2 (native dialogs, the application menu, file
 access):** 758 TypeScript tests, 152 Python tests unchanged, typecheck and lint
@@ -2939,15 +2949,112 @@ Being explicit, because the gap is real and easy to overstate:
 stage touches no Python), typecheck and lint clean, 46-check acceptance run
 unaffected, 19-check desktop smoke run, 8-check browser run.
 
-**Not done, deliberately:** the status bar keeps its own Save/Open/Export
-buttons on desktop rather than deferring to the menu — one renderer, no
-desktop-only layout branch, and the redundancy is normal in desktop apps.
+**Not done in stage 2, deliberately:** the status bar keeps its own
+Save/Open/Export buttons on desktop rather than deferring to the menu — one
+renderer, no desktop-only layout branch, and the redundancy is normal in
+desktop apps.
 Toolbar commands (insert shape/arrow/text, group, templates, z-order) are
 **not** in the menu: they are local closures inside `Toolbar`, unreachable
 without lifting them into `App`, and that refactor belongs to whichever stage
 actually needs them rather than being smuggled into this one. The archive is
 still built whole in memory (stage 3) and there is still no packaging
 (stage 4).
+
+### Phase 8, Stage 3 — streaming the archive
+
+The risk table has carried this row since phase 1: *"the archive is built whole
+in memory… an OOM and a lost session… what phase 8 (Electron) actually
+solves."* This is the stage that redeems it — **on the browser as well as the
+desktop**, which was not the original expectation.
+
+**Measured first, because it is a memory claim.** `scripts/archive-memory.ts`
+reports `VmHWM` (peak resident set) from `/proc/self/status` — the high-water
+mark the kernel observed, not a sampled guess. Peak RSS never falls, so the two
+strategies cannot share a process; the script runs twice. On a 200 MB payload:
+
+| 200 MB of images | save peak | then open |
+|---|---|---|
+| whole buffer (before) | 525.8 MB | 725.9 MB |
+| streaming (after) | **337.3 MB** | **589.1 MB** |
+
+Saving went from +200.5 MB to **+1.7 MB** — the archive is no longer
+materialised at all. The whole save-then-open cycle dropped 725.9 → 589.1 MB.
+The residual is the working set the app must hold either way: the images
+themselves.
+
+- **The layout is factored, not rewritten.** `archiveEntries` is now the one
+  definition of what is in an archive and in what order; `readArchiveEntries`
+  is everything `loadArchive` does after the unzip. `saveArchive` and
+  `loadArchive` are thin wrappers over them and keep their signatures — which
+  is why the 46-check acceptance run, which calls both directly, did not move.
+  `archiveEntries` holds *references* to the caller's bytes, never copies,
+  which is what lets the streaming writer be bounded at all; a test pins that.
+- **`archive-stream.ts` is DOM-free and Node-free**, so one implementation
+  serves the browser's `FileSystemWritableFileStream` and the desktop's IPC
+  chunks. That is also what keeps `apps/desktop` free of internal dependencies:
+  the zipping happens in the renderer for both platforms and the shell is a
+  byte sink.
+- **The browser already had a stream and was not using it.**
+  `browserProjectFileSystem.write` has always called `createWritable()`; it
+  wrote a single buffer into it. Feeding it chunk by chunk was nearly free once
+  the layout was factored, so the ceiling lifted for the web build too — the
+  risk row no longer claims Electron is what solves this.
+- **`ProjectFileSystem` now takes a project, not bytes.** `write(target,
+  contents)` and `pickOpen(): { result: LoadResult }` let each implementation
+  choose how to serialise. Optional `writeStream?`/`openStream?` beside the
+  byte methods was the alternative and was rejected: two ways to do one thing.
+- **The manifest carries every entry's uncompressed size, and that is not
+  cosmetic.** The first reader collected an entry's chunks and joined them at
+  the end — which holds the pieces *and* the result, i.e. two copies of the
+  largest micrograph. Measured, that peaked at **765 MB against the
+  whole-buffer reader's 722 MB**: worse than the thing it replaced, on exactly
+  the "several hundred-megabyte TIFF" this format exists to carry. fflate's
+  `originalSize` is unavailable here because its streaming writer emits data
+  descriptors (verified directly — declaring `size`/`crc` up front does not
+  change it), so `Manifest.entrySizes` supplies them instead. The manifest is
+  the first entry, so it has always arrived before anything it describes.
+  Optional, and absent it falls back to collecting, so older archives still
+  open.
+- **Desktop writes go to a temp file and are renamed into place.** Streaming
+  makes this necessary rather than tidy: bytes now reach the disk long before
+  the archive is complete, so a failure part-way would otherwise leave a
+  truncated file that still ends in `.ffg` and opens with an image missing. The
+  rename is atomic within a filesystem, so the target is either the previous
+  save or the complete new one. Tests cover the abort leaving both the previous
+  file *and* the directory untouched.
+- **Reads are pulled, not pushed.** The renderer asks for the next 4 MB chunk
+  when it is ready for one, which is backpressure for free; pushing would
+  buffer without bound in the renderer if it fell behind the disk — the exact
+  failure this stage exists to remove.
+
+#### A hole found by writing the test
+
+Stage 2's authorisation set only ever held paths the shell itself produced.
+Stage 3 needed a way to reopen a *recent* entry, and the first version of
+`resolve(path)` simply granted whatever it was handed — which would have let a
+compromised renderer read any `.ffg` on the disk. It now accepts only paths
+already in the shell's own recent list. Dropped files travel on a **separate
+channel**, because they carry different evidence: the preload derives their
+path with `webUtils.getPathForFile`, which returns empty for anything the page
+fabricated, so arriving on that channel is itself the proof a real file was
+dropped. Both refusals are asserted through the real IPC in the smoke run.
+
+**Verified:** 789 TypeScript tests (758 + 31: the streaming writer and reader
+including five pathological chunkings down to one byte at a time, a truncated
+stream refusing rather than returning a partial project, `archiveEntries`
+order/levels/reference-holding, and the desktop's chunked file I/O against a
+real temp directory), 152 Python tests unchanged (no Python in this stage),
+typecheck and lint clean, **46-check acceptance run unaffected**, a **21-check
+desktop smoke run** (19 + the two new refusals), and a **6-check browser run**
+driving a real streamed save and reopen with no console errors.
+
+**Not done, deliberately:** the download fallback for Firefox/Safari still
+builds one buffer — it hands a `Blob` to an anchor and there is no stream to
+give it instead, so `saveArchive` remains for exactly that caller. Export still
+serialises the whole SVG in memory and is unchanged. The two writers produce
+*different bytes* for the same project (a streaming zip emits data descriptors
+a whole-buffer one has no need for); the tests assert the archives round-trip
+to equal contents rather than pretending the bytes match.
 
 ---
 
@@ -2962,7 +3069,7 @@ Phases 5–9, with the actual entry points:
 | 5 | **done** — remaining stats surface | `services/api/figureforge/stats/tests.py`; `run_test`'s `x`/`x_name` params, the `anova-rm` dispatch branch |
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
 | 7 | **done** — all five chart types (volcano, heatmap, survival, PCA, UMAP) | the DOM-volume prerequisite — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), and UMAP's reuse of that same mechanism plus its own new dependency (`figureforge/umap.py`, the `'umap'` `DataFormat`, "Run UMAP") — see "Phase 7, Stage 1" through "Stage 5" below |
-| 8 | **stages 1–2 done** — shell + sidecar lifecycle, then native dialogs and the menu; stages 3–4 open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2's entry points are `apps/desktop/src/{menu,projects,projects.node,recent}.ts` and `apps/web/src/{shell,desktopFiles}.ts`; stage 3 is streaming the archive to disk; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" and "Stage 2" |
+| 8 | **stages 1–3 done** — shell + sidecar lifecycle, native dialogs and the menu, then streaming archive I/O; stage 4 (packaging) open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2's entry points are `apps/desktop/src/{menu,projects,projects.node,recent}.ts` and `apps/web/src/{shell,desktopFiles}.ts`; stage 3's are `packages/doc-model/src/archive-stream.ts` and the chunked bridge in `projects.node.ts`; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" through "Stage 3" |
 | 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
 
 ### Already scaffolded but unused
@@ -3014,7 +3121,7 @@ Phases 5–9, with the actual entry points:
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
-| **The archive is built whole in memory** | `zipSync` returns one `Uint8Array`, so a project with several hundred-megabyte TIFFs is a single allocation of that size in a browser tab — an OOM and a lost session. The Data tab shows a running total and warns past 300 MB, so the ceiling is anticipated rather than discovered at save time. This is the real limit on TIFF support in a web app, and what phase 8 (Electron) actually solves. |
+| **The archive is built whole in memory** | *Fixed, and not only on the desktop.* `writeArchiveStream`/`readArchiveStream` move the archive a chunk at a time, so it is never materialised: measured on a 200 MB payload, the save peak fell 525.8 → 337.3 MB (+200.5 MB of overhead became +1.7 MB) and the save-then-open cycle 725.9 → 589.1 MB. The browser benefits too — `createWritable()` was always a stream and was simply being handed one buffer. What remains is the working set the app must hold either way: the images themselves. The **download fallback** for Firefox/Safari still builds one buffer, because it hands a `Blob` to an anchor and there is no stream to give it instead. |
 | **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets and trivial crops. The letterboxed case was on that list until round 6, for a real reason: the drawn window was not the crop the document named, so baking the nominal rect changed the picture. `renderImage` now places the kept region itself, the two forms draw identically, and a montage tile's crop is baked like any other — measured, a 200×100 source cropped to a quadrant embeds as 100×50. |
 | **Opening a TIFF project needs the API** | The archive stores only the original bytes, so the PNG display proxy is regenerated on open. If the service is down the images render as placeholders and a message says why; everything else in the figure still works. Reversible with one optional field (`Asset.proxyPath?`) if the trade proves wrong. |
 | **16-bit micrographs export at 8 bits** | The archive keeps the 16-bit original verbatim, so reproducibility holds, but the figure ships the 8-bit proxy with the observed range mapped linearly. Correct for print, and reported in the UI rather than left to be discovered. |
@@ -3112,6 +3219,15 @@ Each of these cost time once and will again:
   `Ctrl+C`/`Delete` mean "clear these cells" in the data grid and "delete these
   nodes" on the canvas, and `Ctrl+Z` in a typed-in cell is a text undo. Use
   `registerAccelerator: false` to display the shortcut without taking the key.
+- **fflate's streaming `Zip` always emits data descriptors**, so an archive it
+  wrote has no size in its local headers and `UnzipFile.originalSize` is
+  `undefined` when reading one back. Declaring `size`/`crc` before `add()` does
+  not change it (verified directly). A streaming reader therefore cannot
+  pre-allocate from the zip alone — `Manifest.entrySizes` exists for that, and
+  without it the reader holds two copies of the largest file.
+- **`toEqual` on a multi-megabyte `Uint8Array` is a per-element walk.** One
+  9 MB round-trip assertion took 23 seconds and made the desktop suite unusable;
+  `Buffer.compare` is the same assertion in milliseconds.
 - **`File.path` was removed in Electron 32.** A dropped file's path now comes
   from `webUtils.getPathForFile`, which is a main-world module the sandboxed
   page cannot reach — so it has to be called in the preload.

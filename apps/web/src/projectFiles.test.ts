@@ -21,7 +21,41 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ARCHIVE_FILE_TYPE } from '@figureforge/doc-model';
+import { buildArchiveContents, createDocument, loadArchive } from '@figureforge/doc-model';
+
 import { browserProjectFileSystem } from './projectFiles.js';
+
+/** A minimal but real project, so `write` exercises the actual archive writer. */
+const someProject = () => buildArchiveContents(createDocument(), new Map(), new Map());
+
+/**
+ * Collect what a writable stream was given.
+ *
+ * `write` streams now, so a test can no longer assert "was called with these
+ * exact bytes" — it asserts the joined result is a readable archive, which is
+ * the property that actually matters.
+ */
+function collectingStream() {
+  const chunks: Uint8Array[] = [];
+  return {
+    chunks,
+    write: vi.fn(async (chunk: Uint8Array) => {
+      chunks.push(chunk.slice());
+    }),
+    close: vi.fn(async () => {}),
+    abort: vi.fn(async () => {}),
+    joined(): Uint8Array {
+      const total = chunks.reduce((sum, c) => sum + c.length, 0);
+      const out = new Uint8Array(total);
+      let at = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, at);
+        at += chunk.length;
+      }
+      return out;
+    },
+  };
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -109,14 +143,24 @@ describe('pickSave', () => {
 });
 
 describe('pickOpen', () => {
-  it('resolves the file and a save target built from the same handle', async () => {
-    const file = new File([], 'figure.ffg');
+  it('parses the picked file and builds a target from the same handle', async () => {
+    // Streamed through `File.stream()`, so the archive is never held whole —
+    // the returned project is already parsed rather than a File to read again.
+    const stream = collectingStream();
+    const written = fakeHandle({
+      queryPermission: vi.fn(async () => 'granted' as const),
+      createWritable: vi.fn(async () => stream),
+    });
+    await browserProjectFileSystem.write({ name: written.name, handle: written }, someProject());
+
+    const file = new File([new Uint8Array(stream.joined())], 'figure.ffg');
     const handle = fakeHandle({ getFile: vi.fn(async () => file) });
     vi.stubGlobal('window', { showOpenFilePicker: vi.fn(async () => [handle]) });
 
     const result = await browserProjectFileSystem.pickOpen();
 
-    expect(result).toEqual({ file, target: { name: 'figure.ffg', handle } });
+    expect(result?.target).toEqual({ name: 'figure.ffg', handle });
+    expect(result?.result.document.schemaVersion).toBe(createDocument().schemaVersion);
   });
 
   it('returns null on cancellation', async () => {
@@ -132,17 +176,23 @@ describe('pickOpen', () => {
 
 describe('write', () => {
   it('writes and closes when permission is already granted', async () => {
-    const stream = { write: vi.fn(async () => {}), close: vi.fn(async () => {}) };
+    const stream = collectingStream();
     const handle = fakeHandle({
       queryPermission: vi.fn(async () => 'granted' as const),
       createWritable: vi.fn(async () => stream),
     });
-    const bytes = new Uint8Array([1, 2, 3]);
 
-    const result = await browserProjectFileSystem.write({ name: handle.name, handle }, bytes);
+    const result = await browserProjectFileSystem.write(
+      { name: handle.name, handle },
+      someProject(),
+    );
 
     expect(result).toBe('written');
-    expect(stream.write).toHaveBeenCalledWith(bytes);
+    // Several chunks, not one buffer: that is the whole point of streaming.
+    expect(stream.write.mock.calls.length).toBeGreaterThan(1);
+    expect(loadArchive(stream.joined()).document.schemaVersion).toBe(
+      createDocument().schemaVersion,
+    );
     expect(stream.close).toHaveBeenCalled();
     // Never asked twice: a permission already granted must not re-prompt.
     expect(handle.requestPermission).not.toHaveBeenCalled();
@@ -153,7 +203,7 @@ describe('write', () => {
 
     const result = await browserProjectFileSystem.write(
       { name: handle.name, handle },
-      new Uint8Array(),
+      someProject(),
     );
 
     expect(result).toBe('denied');
@@ -169,7 +219,7 @@ describe('write', () => {
 
     const result = await browserProjectFileSystem.write(
       { name: handle.name, handle },
-      new Uint8Array(),
+      someProject(),
     );
 
     expect(result).toBe('written');
@@ -184,7 +234,7 @@ describe('write', () => {
 
     const result = await browserProjectFileSystem.write(
       { name: handle.name, handle },
-      new Uint8Array(),
+      someProject(),
     );
 
     expect(result).toBe('denied');

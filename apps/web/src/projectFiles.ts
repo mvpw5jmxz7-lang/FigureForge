@@ -10,7 +10,14 @@
  * untestable.
  */
 
-import { ARCHIVE_FILE_TYPE } from '@figureforge/doc-model';
+import {
+  ARCHIVE_FILE_TYPE,
+  archiveEntries,
+  readArchiveStream,
+  writeArchiveStream,
+  type ArchiveContents,
+  type LoadResult,
+} from '@figureforge/doc-model';
 
 /**
  * Minimal ambient shapes for the File System Access API.
@@ -24,6 +31,8 @@ import { ARCHIVE_FILE_TYPE } from '@figureforge/doc-model';
 interface FileSystemWritableFileStream {
   write(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
+  /** Discards the swap file. Absent on older implementations. */
+  abort?(): Promise<void>;
 }
 interface FileSystemFileHandle {
   readonly name: string;
@@ -87,8 +96,24 @@ export interface ProjectFileSystem {
   supported(): boolean;
   /** Null means the user cancelled the picker; not an error. */
   pickSave(suggestedName: string): Promise<SaveTarget | null>;
-  pickOpen(): Promise<{ file: File; target: SaveTarget } | null>;
-  write(target: SaveTarget, bytes: Uint8Array): Promise<'written' | 'denied'>;
+  /**
+   * Open a project, already parsed.
+   *
+   * Returns a `LoadResult` rather than bytes so each implementation can choose
+   * how to get there: the browser reads the `File` as a stream, and the
+   * desktop shell pulls it from disk in chunks. Handing back a whole buffer
+   * would force both to hold the compressed archive, which is half of what
+   * `archive-stream.ts` exists to avoid.
+   */
+  pickOpen(): Promise<{ result: LoadResult; target: SaveTarget } | null>;
+  /**
+   * Write a project to an already-picked file.
+   *
+   * Takes the *contents* rather than serialised bytes for the same reason:
+   * `saveArchive` would materialise a second copy of every image before a
+   * single byte reached the disk.
+   */
+  write(target: SaveTarget, contents: ArchiveContents): Promise<'written' | 'denied'>;
 }
 
 async function ensureWritable(handle: FileSystemFileHandle): Promise<boolean> {
@@ -140,21 +165,49 @@ export const browserProjectFileSystem: ProjectFileSystem = {
       });
       if (!handle) return null;
       const file = await handle.getFile();
-      return { file, target: { name: handle.name, handle } };
+      // `File.stream()` reads lazily, so the compressed archive is never held
+      // whole — only the entries it decodes to, which the app needs anyway.
+      const result = await readArchiveStream(streamOf(file));
+      return { result, target: { name: handle.name, handle } };
     } catch (caught) {
       if (isCancellation(caught)) return null;
       throw caught;
     }
   },
 
-  async write(target, bytes) {
+  async write(target, contents) {
     // Narrowed here, once, because this implementation is the only thing that
     // knows what it put in `handle`.
     const handle = target.handle as FileSystemFileHandle;
     if (!(await ensureWritable(handle))) return 'denied';
+
+    // `createWritable` is a real stream and always was — this used to write a
+    // single buffer into it, which meant `saveArchive` had to build the whole
+    // archive first. Feeding it chunk by chunk keeps the peak at one entry.
+    // The API writes to a swap file and commits on `close`, so a failure
+    // part-way through leaves the original file untouched.
     const stream = await handle.createWritable();
-    await stream.write(bytes);
+    try {
+      await writeArchiveStream(archiveEntries(contents), (chunk) => stream.write(chunk));
+    } catch (caught) {
+      await stream.abort?.();
+      throw caught;
+    }
     await stream.close();
     return 'written';
   },
 };
+
+/** A `File` as an async iterable of chunks, for `readArchiveStream`. */
+async function* streamOf(file: File): AsyncIterable<Uint8Array> {
+  const reader = file.stream().getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

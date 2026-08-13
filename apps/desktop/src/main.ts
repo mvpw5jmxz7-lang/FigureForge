@@ -20,16 +20,24 @@ import { pathToFileURL } from 'node:url';
 import {
   API_BASE_CHANNEL,
   MENU_COMMAND,
-  PROJECT_OPEN_PATH,
+  PROJECT_ABORT_WRITE,
+  PROJECT_BEGIN_READ,
+  PROJECT_BEGIN_WRITE,
+  PROJECT_END_READ,
+  PROJECT_FINISH_WRITE,
   PROJECT_PICK_OPEN,
   PROJECT_PICK_SAVE,
+  PROJECT_READ_CHUNK,
+  PROJECT_RESOLVE,
+  PROJECT_RESOLVE_DROPPED,
   PROJECT_SAVED,
-  PROJECT_WRITE,
+  PROJECT_WRITE_CHUNK,
   SHELL_STATE,
   type MenuCommand,
   type ShellState,
 } from './channels';
 import { buildMenuTemplate, toElectronTemplate } from './menu';
+import { basename } from './projects';
 import { ProjectFiles } from './projects.node';
 import { addRecent, parseRecent, removeRecent, serialiseRecent } from './recent';
 import { PythonSidecar, type SidecarStatus } from './sidecar';
@@ -254,25 +262,59 @@ function registerProjectHandlers(): void {
     return opened;
   });
 
-  ipcMain.handle(PROJECT_OPEN_PATH, async (_event, path: string) => {
+  // Authorise a path the user pointed at some other way — a recent entry, or a
+  // file dropped on the window. No bytes move here; the renderer then streams
+  // it through the same beginRead/readChunk pair a dialog result uses.
+  //
+  // A path the renderer simply names is **not** enough. Granting whatever it
+  // asks for would let a compromised renderer read any project file on the
+  // disk, which is most of what stage 2's authorisation set exists to prevent.
+  // So this accepts only what the shell already knows about: an entry in its
+  // own recent list, or a path the preload resolved from a real dropped file
+  // via `webUtils` — the latter arrives pre-granted below.
+  ipcMain.handle(PROJECT_RESOLVE, (_event, path: string) => {
+    if (!recentPaths.includes(path)) {
+      throw new Error('Refusing a path this session did not open or save.');
+    }
+    projects.grant(path);
+    return { path, name: basename(path) };
+  });
+
+  // A real dropped file. The preload resolved this through `webUtils`, which
+  // yields an empty string for anything the page made up, so a non-empty path
+  // here means the user genuinely dropped a file on the window.
+  ipcMain.handle(PROJECT_RESOLVE_DROPPED, (_event, path: string) => {
+    if (!path) throw new Error('That drop did not carry a real file.');
+    projects.grant(path);
+    return { path, name: basename(path) };
+  });
+
+  ipcMain.handle(PROJECT_BEGIN_READ, async (_event, path: string) => {
     try {
-      const opened = await projects.read(path);
+      const session = await projects.beginRead(path);
       await rememberRecent(path);
-      return opened;
+      return session;
     } catch (caught) {
       // A recent entry the user has since moved or deleted should quietly
       // leave the list rather than sit there failing every time it is clicked.
-      const code = (caught as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') await forgetRecent(path);
+      if ((caught as NodeJS.ErrnoException).code === 'ENOENT') await forgetRecent(path);
       throw caught;
     }
   });
+  ipcMain.handle(PROJECT_READ_CHUNK, (_event, id: string) => projects.readChunk(id));
+  ipcMain.handle(PROJECT_END_READ, (_event, id: string) => projects.endRead(id));
 
-  ipcMain.handle(PROJECT_WRITE, async (_event, path: string, bytes: Uint8Array) => {
-    const result = await projects.write(path, new Uint8Array(bytes));
-    if (result === 'written') await rememberRecent(path);
+  ipcMain.handle(PROJECT_BEGIN_WRITE, (_event, path: string) => projects.beginWrite(path));
+  ipcMain.handle(PROJECT_WRITE_CHUNK, (_event, id: string, chunk: Uint8Array) =>
+    // Re-wrapped: the value arriving from structured clone may be a view onto
+    // a larger buffer, and `write` would otherwise send the whole thing.
+    projects.writeChunk(id, new Uint8Array(chunk)),
+  );
+  ipcMain.handle(PROJECT_FINISH_WRITE, async (_event, id: string) => {
+    const result = await projects.finishWrite(id);
     return result;
   });
+  ipcMain.handle(PROJECT_ABORT_WRITE, (_event, id: string) => projects.abortWrite(id));
 
   ipcMain.on(SHELL_STATE, (_event, state: ShellState) => {
     const before = shellState;

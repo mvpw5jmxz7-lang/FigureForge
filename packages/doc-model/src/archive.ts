@@ -59,6 +59,22 @@ export interface Manifest {
   createdAt: string;
   /** Informational; the document is still the authority. */
   title: string;
+  /**
+   * Uncompressed byte length of every other entry, by archive path.
+   *
+   * Written so a *streaming* reader can allocate each file once and copy
+   * chunks straight into it. Without it the reader has to collect an entry's
+   * pieces and join them, which holds the pieces and the result at the same
+   * time — two copies of the largest micrograph, and measurably worse than
+   * reading the whole archive in one go for a project built around one big
+   * TIFF, which is precisely the case this format exists to carry.
+   *
+   * The manifest is the first entry in the archive, so it has always arrived
+   * by the time any of the files it describes do. Optional: archives written
+   * before this existed simply fall back to collecting, and a reader that does
+   * not know the field ignores it.
+   */
+  entrySizes?: Record<string, number>;
 }
 
 export interface ArchiveContents {
@@ -81,9 +97,52 @@ export interface SaveOptions {
 // Writing
 // ---------------------------------------------------------------------------
 
-export function saveArchive(contents: ArchiveContents, options: SaveOptions = {}): Uint8Array {
+/** One file in the archive, with the compression level it should go in at. */
+export interface ArchiveEntry {
+  path: string;
+  bytes: Uint8Array;
+  /** zlib level 0–9. */
+  level: number;
+}
+
+/**
+ * What an archive contains, and in what order.
+ *
+ * The single definition of the layout, so the whole-buffer writer below and
+ * the streaming one in `archive-stream.ts` cannot come to disagree about it —
+ * the same discipline `scaleBarWidthMm` and `analysisInputHash` are each held
+ * to. Order matters: `zipSync` writes entries in the order it is given them,
+ * and a reader that seeks the manifest first should not have to scan the
+ * whole file to find it.
+ *
+ * Holds *references* to the caller's bytes rather than copying them, which is
+ * what lets the streaming writer run at a bounded footprint.
+ */
+export function archiveEntries(
+  contents: ArchiveContents,
+  options: SaveOptions = {},
+): ArchiveEntry[] {
   const now = (options.now ?? (() => new Date().toISOString()))();
   const level = options.compressionLevel ?? 6;
+
+  // Everything except the manifest, which has to describe these.
+  const body: ArchiveEntry[] = [
+    { path: DOCUMENT_PATH, bytes: strToU8(JSON.stringify(contents.document, null, 2)), level },
+  ];
+
+  for (const [path, text] of contents.dataFiles) {
+    body.push({ path, bytes: strToU8(text), level });
+  }
+  for (const [path, bytes] of contents.assets) {
+    // Images are already compressed; recompressing costs time and saves nothing.
+    body.push({ path, bytes, level: 0 });
+  }
+  if (contents.thumbnail) {
+    body.push({ path: THUMBNAIL_PATH, bytes: contents.thumbnail, level: 0 });
+  }
+
+  const entrySizes: Record<string, number> = {};
+  for (const entry of body) entrySizes[entry.path] = entry.bytes.length;
 
   const manifest: Manifest = {
     format: 'figureforge',
@@ -91,24 +150,28 @@ export function saveArchive(contents: ArchiveContents, options: SaveOptions = {}
     appVersion: options.appVersion ?? '0.1.0',
     createdAt: now,
     title: contents.document.title,
+    entrySizes,
   };
 
-  const files: Zippable = {
-    [MANIFEST_PATH]: [strToU8(JSON.stringify(manifest, null, 2)), { level }],
-    [DOCUMENT_PATH]: [strToU8(JSON.stringify(contents.document, null, 2)), { level }],
-  };
+  return [
+    { path: MANIFEST_PATH, bytes: strToU8(JSON.stringify(manifest, null, 2)), level },
+    ...body,
+  ];
+}
 
-  for (const [path, text] of contents.dataFiles) {
-    files[path] = [strToU8(text), { level }];
+/**
+ * Build the whole archive in memory.
+ *
+ * Still the right answer where a single buffer is what the caller needs — the
+ * Firefox/Safari download fallback hands a `Blob` to an anchor, and there is
+ * no stream to hand it instead. Everywhere a destination can accept chunks,
+ * `writeArchiveStream` avoids holding a second copy of every image.
+ */
+export function saveArchive(contents: ArchiveContents, options: SaveOptions = {}): Uint8Array {
+  const files: Zippable = {};
+  for (const entry of archiveEntries(contents, options)) {
+    files[entry.path] = [entry.bytes, { level: entry.level as 0 }];
   }
-  for (const [path, bytes] of contents.assets) {
-    // Images are already compressed; recompressing costs time and saves nothing.
-    files[path] = [bytes, { level: 0 }];
-  }
-  if (contents.thumbnail) {
-    files[THUMBNAIL_PATH] = [contents.thumbnail, { level: 0 }];
-  }
-
   return zipSync(files);
 }
 
@@ -158,7 +221,18 @@ export function loadArchive(bytes: Uint8Array): LoadResult {
       `Not a readable FigureForge project (zip could not be opened): ${String(cause)}`,
     );
   }
+  return readArchiveEntries(entries);
+}
 
+/**
+ * Validate and assemble an archive whose files have already been extracted.
+ *
+ * Split from `loadArchive` so the streaming reader — which unzips
+ * incrementally and never holds the compressed whole — reaches the identical
+ * checks. Every rejection a malformed project can earn is defined here, once:
+ * two copies of this would be two opinions about what a valid project is.
+ */
+export function readArchiveEntries(entries: Record<string, Uint8Array>): LoadResult {
   const manifestBytes = entries[MANIFEST_PATH];
   if (!manifestBytes) {
     throw new ArchiveError(`Missing ${MANIFEST_PATH}; this is not a FigureForge project.`);

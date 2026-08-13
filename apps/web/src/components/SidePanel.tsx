@@ -1182,8 +1182,9 @@ function DataTab({
 
       {totalAssetBytes > ASSET_SIZE_WARNING_BYTES && (
         <p className="warning">
-          {(totalAssetBytes / 1e6).toFixed(0)} MB of images. The project file is built in memory in
-          one piece, so saving may fail beyond roughly half a gigabyte.
+          {(totalAssetBytes / 1e6).toFixed(0)} MB of images. The project streams to disk as it
+          saves, so the limit is how much your browser will hold at once rather than twice this
+          again — but a figure this heavy will still be slow to open and to export.
         </p>
       )}
     </section>

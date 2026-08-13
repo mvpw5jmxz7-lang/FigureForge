@@ -14,18 +14,31 @@
  * build simply finds `window.figureforge` undefined and takes its own paths.
  */
 
-export interface DesktopOpened {
+/** A path the shell has authorised this session. */
+export interface DesktopPath {
   path: string;
   name: string;
-  bytes: Uint8Array;
 }
 
 export interface DesktopProject {
-  pickSave(suggestedName: string): Promise<{ path: string; name: string } | null>;
-  pickOpen(): Promise<DesktopOpened | null>;
-  openPath(path: string): Promise<DesktopOpened | null>;
-  openDropped(file: File): Promise<DesktopOpened | null>;
-  write(path: string, bytes: Uint8Array): Promise<'written' | 'denied'>;
+  pickSave(suggestedName: string): Promise<DesktopPath | null>;
+  pickOpen(): Promise<DesktopPath | null>;
+  /** Authorise a recent entry, without moving any bytes. */
+  resolve(path: string): Promise<DesktopPath>;
+  /** Authorise a dropped file, resolving its path via `webUtils`. */
+  resolveDropped(file: File): Promise<DesktopPath>;
+
+  // Chunked I/O. A project runs to hundreds of megabytes, so it never crosses
+  // the IPC boundary as one message; see `archive-stream.ts` for why.
+  beginRead(path: string): Promise<{ id: string; name: string }>;
+  /** Null at end of file. */
+  readChunk(id: string): Promise<Uint8Array | null>;
+  endRead(id: string): Promise<void>;
+  beginWrite(path: string): Promise<string | 'denied'>;
+  writeChunk(id: string, chunk: Uint8Array): Promise<void>;
+  finishWrite(id: string): Promise<'written' | 'denied'>;
+  abortWrite(id: string): Promise<void>;
+
   /** Only the shell's quit guard listens for this. */
   reportSaved(ok: boolean): void;
 }

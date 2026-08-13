@@ -30,11 +30,18 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import {
   API_BASE_CHANNEL,
   MENU_COMMAND,
-  PROJECT_OPEN_PATH,
+  PROJECT_ABORT_WRITE,
+  PROJECT_BEGIN_READ,
+  PROJECT_BEGIN_WRITE,
+  PROJECT_END_READ,
+  PROJECT_FINISH_WRITE,
   PROJECT_PICK_OPEN,
   PROJECT_PICK_SAVE,
+  PROJECT_READ_CHUNK,
+  PROJECT_RESOLVE,
+  PROJECT_RESOLVE_DROPPED,
   PROJECT_SAVED,
-  PROJECT_WRITE,
+  PROJECT_WRITE_CHUNK,
   SHELL_STATE,
   type MenuCommand,
   type ShellState,
@@ -65,17 +72,29 @@ contextBridge.exposeInMainWorld('figureforge', {
   project: {
     pickSave: (suggestedName: string) => ipcRenderer.invoke(PROJECT_PICK_SAVE, suggestedName),
     pickOpen: () => ipcRenderer.invoke(PROJECT_PICK_OPEN),
-    openPath: (path: string) => ipcRenderer.invoke(PROJECT_OPEN_PATH, path),
-    write: (path: string, bytes: Uint8Array) => ipcRenderer.invoke(PROJECT_WRITE, path, bytes),
+    /** Authorise a path the user chose from the recent list. */
+    resolve: (path: string) => ipcRenderer.invoke(PROJECT_RESOLVE, path),
 
     /**
-     * Open a file the user dropped on the window.
+     * Authorise a file the user dropped on the window.
      *
      * The path resolution has to happen here: `webUtils` is a main-world
      * Electron module the sandboxed page cannot reach, and without a path a
      * dropped project could be read but never saved back to.
      */
-    openDropped: (file: File) => ipcRenderer.invoke(PROJECT_OPEN_PATH, webUtils.getPathForFile(file)),
+    resolveDropped: (file: File) =>
+      ipcRenderer.invoke(PROJECT_RESOLVE_DROPPED, webUtils.getPathForFile(file)),
+
+    // Chunked I/O. A project runs to hundreds of megabytes, so it never
+    // crosses this boundary as a single message.
+    beginRead: (path: string) => ipcRenderer.invoke(PROJECT_BEGIN_READ, path),
+    readChunk: (id: string) => ipcRenderer.invoke(PROJECT_READ_CHUNK, id),
+    endRead: (id: string) => ipcRenderer.invoke(PROJECT_END_READ, id),
+    beginWrite: (path: string) => ipcRenderer.invoke(PROJECT_BEGIN_WRITE, path),
+    writeChunk: (id: string, chunk: Uint8Array) =>
+      ipcRenderer.invoke(PROJECT_WRITE_CHUNK, id, chunk),
+    finishWrite: (id: string) => ipcRenderer.invoke(PROJECT_FINISH_WRITE, id),
+    abortWrite: (id: string) => ipcRenderer.invoke(PROJECT_ABORT_WRITE, id),
 
     /** Tell the shell a save it asked for has landed. Used by the quit guard. */
     reportSaved: (ok: boolean) => ipcRenderer.send(PROJECT_SAVED, ok),
