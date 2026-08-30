@@ -127,6 +127,55 @@ export async function runUmap(request: UmapRequest): Promise<UmapResult> {
   return (await response.json()) as UmapResult;
 }
 
+export interface VolcanoTestRequest {
+  rowLabels: string[];
+  values: (number | null)[][];
+  /** Absent means 'two-sample', matching the server's own default. */
+  mode?: 'two-sample' | 'one-sample';
+  groupAIndices?: number[];
+  groupBIndices?: number[];
+  /** One-sample mode only: the replicate value columns, tested against zero. */
+  valueIndices?: number[];
+  s0: number;
+  fdrPercent: number;
+}
+
+export interface SamVolcanoRow {
+  label: string;
+  log2FoldChange: number;
+  pValue: number;
+  qValue: number;
+  category: 'up' | 'down' | 'ns';
+}
+
+export interface VolcanoTestResult {
+  rows: SamVolcanoRow[];
+  /** [log2FoldChange, -log10 p] points sampled along each branch, unsorted. */
+  curveUp: [number, number][];
+  curveDown: [number, number][];
+  droppedRows: string[];
+  warnings: string[];
+  deltaUsed: number;
+  fdrAchieved: number;
+  /** The two resolved cutoffs on `d`; independent, so not mirror images. */
+  cutUp: number;
+  cutLow: number;
+  permutations: number;
+  permutationsExhaustive: boolean;
+  /** Ready-to-paste manuscript sentence, composed by the service. */
+  methodsSentence: string;
+}
+
+export async function runVolcanoTest(request: VolcanoTestRequest): Promise<VolcanoTestResult> {
+  const response = await fetch(`${base()}/volcano-test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as VolcanoTestResult;
+}
+
 export type ExportFormat = 'svg' | 'pdf' | 'eps' | 'png' | 'tiff';
 
 export interface ExportRequest {

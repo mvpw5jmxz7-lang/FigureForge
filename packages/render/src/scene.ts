@@ -176,7 +176,16 @@ export type SceneRole =
    * than the gridline colour/style, and a role-count assertion for any of the
    * others must not be silently widened by it.
    */
-  | 'cascade-back-axis';
+  | 'cascade-back-axis'
+  /**
+   * A Perseus-style permutation (SAM) significance boundary on a volcano
+   * plot — two dashed curves in place of the straight fold-change/p-value
+   * cutoff lines. Kept distinct from 'threshold-line' for the standing
+   * reason: a role-count assertion for the straight-line cutoffs must not be
+   * silently widened by this feature, and the two are never drawn together
+   * (see `renderVolcanoThresholds`).
+   */
+  | 'volcano-sam-curve';
 
 export const el = (
   tag: string,

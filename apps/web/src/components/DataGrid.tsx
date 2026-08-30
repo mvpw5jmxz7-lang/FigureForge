@@ -19,6 +19,7 @@ import {
   editDataset,
   insertColumn,
   insertRow,
+  moveColumn,
   pasteBlock,
   removeColumn,
   removeRow,
@@ -420,6 +421,24 @@ export function DataGrid({
                   />
                   <div className="field-row">
                     <span className="kind">{column.kind === 'number' ? '#' : 'A'}</span>
+                    {!dataset.columnGroups?.length && (
+                      <>
+                        <button
+                          title="Swap with the column to the left"
+                          disabled={col === 0}
+                          onClick={() => edit('Move column', (ds) => moveColumn(ds, col, 'left'))}
+                        >
+                          ‹
+                        </button>
+                        <button
+                          title="Swap with the column to the right"
+                          disabled={col === dataset.columns.length - 1}
+                          onClick={() => edit('Move column', (ds) => moveColumn(ds, col, 'right'))}
+                        >
+                          ›
+                        </button>
+                      </>
+                    )}
                     <button
                       title="Insert a column before this one"
                       onClick={() => edit('Insert column', (ds) => insertColumn(ds, col))}

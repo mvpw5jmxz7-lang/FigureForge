@@ -525,8 +525,12 @@ export interface XyMarkOptions {
    *
    * Only meaningful without `summariseAtX`: a category classifies one
    * measurement, and a summarised point is several.
+   *
+   * `qValue` is `undefined` unless the input series carries `qValues` at
+   * this index — a volcano plot's optional per-point FDR/q-value, read
+   * straight through with no transform.
    */
-  classify?: (xValue: number, yValue: number) => string;
+  classify?: (xValue: number, yValue: number, qValue?: number) => string;
   /**
    * A cascade/ridgeline offset in mm, indexed by series order — the same key
    * `ySeries`/`pointShapes`/`seriesAxis` already use, so it needs no names
@@ -587,6 +591,7 @@ export function xyMarks(
     values: readonly number[];
     x?: readonly number[];
     pointLabels?: readonly string[];
+    qValues?: readonly number[];
   }[],
   options: XyMarkOptions,
 ): XySeriesMarks[] {
@@ -603,13 +608,13 @@ export function xyMarks(
     // Only pairs where both coordinates are real. Dropping the pair rather than
     // the value keeps x and y aligned; dropping one side would shift every
     // subsequent point onto the wrong x.
-    const pairs: { xValue: number; yValue: number; label?: string }[] = [];
+    const pairs: { xValue: number; yValue: number; label?: string; qValue?: number }[] = [];
     for (let i = 0; i < s.values.length; i++) {
       const xValue = s.x?.[i];
       const yValue = s.values[i];
       if (xValue === undefined || yValue === undefined) continue;
       if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) continue;
-      pairs.push({ xValue, yValue, label: s.pointLabels?.[i] });
+      pairs.push({ xValue, yValue, label: s.pointLabels?.[i], qValue: s.qValues?.[i] });
     }
 
     /*
@@ -623,7 +628,7 @@ export function xyMarks(
         y: yScale(p.yValue),
         value: p.yValue,
         ...(p.label !== undefined ? { label: p.label } : {}),
-        ...(options.classify ? { category: options.classify(p.xValue, p.yValue) } : {}),
+        ...(options.classify ? { category: options.classify(p.xValue, p.yValue, p.qValue) } : {}),
       }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && inRange(p.x, p.y));
 

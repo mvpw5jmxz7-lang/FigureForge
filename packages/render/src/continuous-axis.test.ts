@@ -1340,6 +1340,268 @@ describe('volcano plots', () => {
     const s = scene(makeVolcanoDocument('X,Y\n1,2\n2,4', 'simple-xy'));
     expect(collectByRole(s, 'point')).toEqual([]);
   });
+
+  it('classifies by the FDR/q-value column instead of the p-value when asked', () => {
+    // TP53's p is high (would be 'ns' by the p-value gate) but its q-value is
+    // well under the FDR cutoff; MYC's p is low but its q-value fails FDR.
+    const csv = `Gene,log2FC,p,fdr
+TP53,2.5,0.5,0.01
+MYC,-3.0,0.001,0.5`;
+    const s = scene(
+      makeVolcanoDocument(csv, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05, fdr: 0.05, significanceBy: 'fdr' },
+      }),
+    );
+    const byLabel = new Map(
+      collectByRole(s, 'point').map((p) => [
+        p.children?.find((c) => c.tag === 'title')?.text,
+        p.attrs?.['fill'],
+      ]),
+    );
+    expect(byLabel.get('TP53')).toBe('#d73027'); // up, called by FDR despite a poor p-value
+    expect(byLabel.get('MYC')).toBe('#999999'); // down by fold change, but fails FDR
+  });
+
+  it('draws the FDR-derived boundary, not the plain p-value line, once FDR classification is active', () => {
+    // A, B, C pass FDR (q <= 0.05); D's p is under 0.05 but its q fails FDR.
+    // The horizontal line should sit at the loosest (largest-p) point among
+    // A/B/C — C's p = 0.01 — not at the plain cutoff (p = 0.05).
+    const csv = `Gene,log2FC,p,fdr
+A,2,0.001,0.01
+B,-2,0.002,0.02
+C,2,0.01,0.04
+D,2,0.03,0.2`;
+    const patch = {
+      volcanoThresholds: { foldChange: 1, pValue: 0.05, fdr: 0.05, significanceBy: 'fdr' as const },
+    };
+    const doc = makeVolcanoDocument(csv, 'differential', patch);
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+
+    const expectedY = geometry.yScale.scale(-Math.log10(0.01));
+    const lines = collectByRole(scene(doc), 'threshold-line');
+    // Two vertical (±fold change) plus one horizontal (FDR boundary).
+    expect(lines).toHaveLength(3);
+    const horizontal = lines.find((n) => String(n.attrs?.['d']).startsWith('M0 '));
+    expect(horizontal).toBeDefined();
+    const drawnY = Number(String(horizontal!.attrs?.['d']).match(/M0 (-?[\d.]+)/)![1]);
+    expect(drawnY).toBeCloseTo(expectedY, 4);
+
+    // Confirm it actually differs from where the plain p-value line would be —
+    // otherwise this test would pass even with the bug this fix corrects.
+    const plainY = geometry.yScale.scale(-Math.log10(0.05));
+    expect(drawnY).not.toBeCloseTo(plainY, 1);
+  });
+
+  it('draws no horizontal FDR line when nothing currently passes it', () => {
+    const csv = `Gene,log2FC,p,fdr
+A,2,0.03,0.2
+B,-2,0.04,0.3`;
+    const s = scene(
+      makeVolcanoDocument(csv, 'differential', {
+        volcanoThresholds: { foldChange: 1, pValue: 0.05, fdr: 0.05, significanceBy: 'fdr' },
+      }),
+    );
+    // Only the two vertical fold-change lines — no boundary to draw when
+    // every point fails FDR, the same "withhold rather than approximate"
+    // stance this codebase takes elsewhere.
+    expect(collectByRole(s, 'threshold-line')).toHaveLength(2);
+  });
+
+  it('leaves the plain p-value threshold line unchanged when significanceBy is not fdr', () => {
+    const csv = `Gene,log2FC,p,fdr
+A,2,0.001,0.01
+B,-2,0.002,0.02`;
+    const doc = makeVolcanoDocument(csv, 'differential', {
+      volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+    });
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const expectedY = geometry.yScale.scale(-Math.log10(0.05));
+
+    const lines = collectByRole(scene(doc), 'threshold-line');
+    const horizontal = lines.find((n) => String(n.attrs?.['d']).startsWith('M0 '));
+    const drawnY = Number(String(horizontal!.attrs?.['d']).match(/M0 (-?[\d.]+)/)![1]);
+    expect(drawnY).toBeCloseTo(expectedY, 4);
+  });
+
+  it('uses the p-value column exactly as entered when it already is -log10(p)', () => {
+    // 2.5 as a raw p would be invalid; as -log10(p) it is a real, respectably
+    // significant value (p ≈ 0.0032) and should reach the axis unchanged.
+    const csv = `Gene,log2FC,p
+TP53,2.5,2.5`;
+    const withoutFlag = scene(makeVolcanoDocument(csv, 'differential'));
+    const withFlag = scene(
+      makeVolcanoDocument(csv, 'differential', { volcanoPValueIsNegLog10: true }),
+    );
+    // Re-transforming an already-log value produces a negative y — with the
+    // anchored-at-zero y domain, that point/tick set differs from the
+    // correctly-read one.
+    const yOf = (s: ReturnType<typeof scene>) =>
+      collectByRole(s, 'point').map((p) => Number(p.attrs?.['cy']));
+    expect(yOf(withFlag)).not.toEqual(yOf(withoutFlag));
+    expect(collectByRole(withFlag, 'point')).toHaveLength(1);
+  });
+
+  it('draws a SAM curve instead of straight threshold lines when present', () => {
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoSamCurve: {
+          up: [
+            { x: 1, y: 1 },
+            { x: 2, y: 3 },
+          ],
+          down: [
+            { x: -1, y: 1 },
+            { x: -2, y: 3 },
+          ],
+        },
+      }),
+    );
+    expect(collectByRole(s, 'threshold-line')).toEqual([]);
+    expect(collectByRole(s, 'volcano-sam-curve')).toHaveLength(2);
+  });
+
+  it('clips a SAM curve to the plot area instead of drawing past the panel', () => {
+    /*
+     * A real boundary runs off the top: as a protein's own standard error
+     * shrinks, its boundary p-value tends to zero and -log10(p) grows without
+     * limit, while the axes are sized from the plotted points alone. `y: 40`
+     * is far above this fixture's own maximum (-log10(0.0005) ≈ 3.3), and
+     * `x: 30` far to the right of its widest fold change.
+     */
+    const doc = makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+      volcanoSamCurve: {
+        up: [
+          { x: 1, y: 1 },
+          { x: 2, y: 3 },
+          { x: 30, y: 40 },
+        ],
+        down: [
+          { x: -1, y: 1 },
+          { x: -30, y: 40 },
+        ],
+      },
+    });
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+
+    const curves = collectByRole(scene(doc), 'volcano-sam-curve');
+    expect(curves).toHaveLength(2);
+
+    const coords = curves.flatMap((c) =>
+      [...String(c.attrs?.['d']).matchAll(/[ML](-?[\d.]+) (-?[\d.]+)/g)].map((m) => ({
+        x: Number(m[1]),
+        y: Number(m[2]),
+      })),
+    );
+    expect(coords.length).toBeGreaterThan(0);
+    // Nothing outside the panel. `round`'s own precision is the only slack.
+    for (const p of coords) {
+      expect(p.x).toBeGreaterThanOrEqual(-0.01);
+      expect(p.x).toBeLessThanOrEqual(geometry.plotWidth + 0.01);
+      expect(p.y).toBeGreaterThanOrEqual(-0.01);
+      expect(p.y).toBeLessThanOrEqual(geometry.plotHeight + 0.01);
+    }
+    // And it reaches the boundary rather than stopping at the last vertex
+    // that happened to be inside it — the interpolation this exists for.
+    expect(
+      coords.some(
+        (p) =>
+          Math.abs(p.y) < 0.01 ||
+          Math.abs(p.x) < 0.01 ||
+          Math.abs(p.x - geometry.plotWidth) < 0.01 ||
+          Math.abs(p.y - geometry.plotHeight) < 0.01,
+      ),
+    ).toBe(true);
+  });
+
+  it('colours by the SAM boundary, not by the fold-change cutoff', () => {
+    /*
+     * The reported defect. Every one of these genes sits well above the
+     * boundary, but none reaches the default |fold change| >= 1 the threshold
+     * rule also demands — so the drawn curve said significant and the colours
+     * said otherwise. On a real 100-protein export that split covered 47 of
+     * them.
+     */
+    const csv = `Gene,log2FC,p
+A,0.30,0.0001
+B,0.40,0.0001
+C,-0.30,0.0001
+D,-0.40,0.0001`;
+    const curve = {
+      up: [
+        { x: 0.1, y: 1 },
+        { x: 0.5, y: 0.5 },
+      ],
+      down: [
+        { x: -0.1, y: 1 },
+        { x: -0.5, y: 0.5 },
+      ],
+    };
+    const doc = makeVolcanoDocument(csv, 'differential', {
+      volcanoSamCurve: curve,
+      // Left exactly where `runSamVolcanoOn` leaves it, so this is the real
+      // configuration rather than a contrived one.
+      volcanoThresholds: { foldChange: 1, pValue: 0.05, fdr: 0.05, significanceBy: 'fdr' },
+    });
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const categories = geometry.series[0]!.points.map((p) => p.category);
+    expect(categories).toEqual(['up', 'up', 'down', 'down']);
+
+    // And the same document without the curve still follows the cutoffs
+    // exactly as it did before, so nothing about an ordinary volcano moved.
+    const withoutCurve = makeVolcanoDocument(csv, 'differential', {
+      volcanoThresholds: { foldChange: 1, pValue: 0.05, fdr: 0.05, significanceBy: 'fdr' },
+    });
+    const plain = Object.values(withoutCurve.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const plainGeometry = computePlotGeometry(
+      plain,
+      withoutCurve,
+      NATURE_THEME,
+    ) as ContinuousPlotGeometry;
+    expect(plainGeometry.series[0]!.points.map((p) => p.category)).toEqual([
+      'ns',
+      'ns',
+      'ns',
+      'ns',
+    ]);
+  });
+
+  it('greys a point that clears the fold-change cutoff but sits under the boundary', () => {
+    // The converse direction: the curve can also be stricter than the cutoffs
+    // were, so this is not simply "colour more points".
+    const csv = `Gene,log2FC,p
+A,3.0,0.04`;
+    const doc = makeVolcanoDocument(csv, 'differential', {
+      volcanoSamCurve: {
+        up: [
+          { x: 1, y: 6 },
+          { x: 4, y: 5 },
+        ],
+        down: [],
+      },
+      volcanoThresholds: { foldChange: 1, pValue: 0.05 },
+    });
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot') as PlotNode;
+    const geometry = computePlotGeometry(plotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    expect(geometry.series[0]!.points.map((p) => p.category)).toEqual(['ns']);
+  });
+
+  it('draws no fold-change line for a cutoff wider than the data', () => {
+    // A scale extrapolates outside its domain rather than returning NaN, so
+    // without a bounds check this drew two lines beside the panel.
+    const s = scene(
+      makeVolcanoDocument(DIFFERENTIAL_CSV, 'differential', {
+        volcanoThresholds: { foldChange: 50, pValue: 0.05 },
+      }),
+    );
+    // The horizontal p-value line survives; neither vertical one does.
+    const lines = collectByRole(s, 'threshold-line');
+    expect(lines).toHaveLength(1);
+    expect(String(lines[0]!.attrs?.['d'])).toMatch(/^M0 /);
+  });
 });
 
 describe('volcano point labels', () => {

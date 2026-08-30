@@ -5,6 +5,8 @@ Five responsibilities, deliberately narrow:
   * /analyze       — run a statistical test, return numbers and a methods sentence
   * /pca           — reduce a sample x feature matrix to principal component scores
   * /umap          — reduce a sample x feature matrix to a 2D UMAP embedding
+  * /volcano-test  — a Perseus-style permutation (SAM) significance test,
+                     two-sample or one-sample
   * /export        — convert a rendered SVG to PDF/EPS/PNG/TIFF
   * /decode-image  — decode a format the browser cannot open (TIFF) to a PNG proxy
 
@@ -28,6 +30,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from .export.renderer import ExportRequest, render, shutdown_browser
 from .images.decode import DecodeError, TooLargeError, decode
 from .pca import compute_pca
+from .sam_volcano import compute_sam_volcano, compute_sam_volcano_one_sample
 from .stats.methods import methods_sentence, software_versions
 from .stats.tests import run_test
 from .umap import compute_umap
@@ -146,6 +149,16 @@ def _sanitize(value: float | None) -> float | None:
     return value if value == value and abs(value) != float("inf") else None
 
 
+def _sanitize_or(value: float | None, fallback: float) -> float:
+    """`_sanitize(value) or fallback` looks equivalent and is not: Python's
+    `or` treats a legitimate `0.0` as falsy, so it silently replaces a
+    maximally significant p-value or q-value (or any other genuine zero)
+    with the fallback meant only for NaN/Infinity. Checking `is not None`
+    instead is what actually distinguishes "not a real number" from "zero"."""
+    sanitized = _sanitize(value)
+    return sanitized if sanitized is not None else fallback
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     try:
@@ -189,9 +202,9 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
             ComparisonOut(
                 groupA=c.groupA,
                 groupB=c.groupB,
-                statistic=_sanitize(c.statistic) or 0.0,
-                p=_sanitize(c.p) or 1.0,
-                pAdjusted=_sanitize(c.pAdjusted) or 1.0,
+                statistic=_sanitize_or(c.statistic, 0.0),
+                p=_sanitize_or(c.p, 1.0),
+                pAdjusted=_sanitize_or(c.pAdjusted, 1.0),
                 df=_sanitize(c.df),
                 ci=(
                     (_sanitize(c.ci[0]), _sanitize(c.ci[1]))
@@ -261,11 +274,11 @@ async def pca(request: PcaRequest) -> PcaResponse:
 
     return PcaResponse(
         sampleLabels=outcome.sampleLabels,
-        scores=[[_sanitize(v) or 0.0 for v in row] for row in outcome.scores],
+        scores=[[_sanitize_or(v, 0.0) for v in row] for row in outcome.scores],
         components=[
             PcaComponentOut(
                 label=c.label,
-                explainedVarianceRatio=_sanitize(c.explainedVarianceRatio) or 0.0,
+                explainedVarianceRatio=_sanitize_or(c.explainedVarianceRatio, 0.0),
             )
             for c in outcome.components
         ],
@@ -322,10 +335,130 @@ async def umap(request: UmapRequest) -> UmapResponse:
 
     return UmapResponse(
         sampleLabels=outcome.sampleLabels,
-        coords=[[_sanitize(v) or 0.0 for v in row] for row in outcome.coords],
+        coords=[[_sanitize_or(v, 0.0) for v in row] for row in outcome.coords],
         droppedSamples=outcome.droppedSamples,
         warnings=outcome.warnings,
         nNeighborsUsed=outcome.nNeighborsUsed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Volcano test (Perseus-style permutation / SAM significance)
+# ---------------------------------------------------------------------------
+
+# Same reasoning as MAX_PCA_SAMPLES/MAX_UMAP_SAMPLES: a defensive dimension
+# cap, not a performance tune — the permutation pass is the heaviest of the
+# three, but still bounded CPU work with no external process to hang.
+MAX_VOLCANO_TEST_ROWS = 20000
+MAX_VOLCANO_TEST_SAMPLES = 100
+
+
+class VolcanoTestRequest(BaseModel):
+    rowLabels: list[str] = Field(min_length=1, max_length=MAX_VOLCANO_TEST_ROWS)
+    values: list[list[float | None]]
+    mode: Literal["two-sample", "one-sample"] = "two-sample"
+    groupAIndices: list[int] | None = None
+    groupBIndices: list[int] | None = None
+    valueIndices: list[int] | None = None
+    s0: float = 0.0
+    fdrPercent: float = 5.0
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> VolcanoTestRequest:
+        if len(self.values) != len(self.rowLabels):
+            raise ValueError("rowLabels and values must have the same length.")
+        if self.values and len(self.values[0]) > MAX_VOLCANO_TEST_SAMPLES:
+            raise ValueError(f"The volcano test is limited to {MAX_VOLCANO_TEST_SAMPLES} samples.")
+        if self.mode == "two-sample":
+            if self.groupAIndices is None or len(self.groupAIndices) < 2:
+                raise ValueError("Each group needs at least 2 replicate columns.")
+            if self.groupBIndices is None or len(self.groupBIndices) < 2:
+                raise ValueError("Each group needs at least 2 replicate columns.")
+        else:
+            if self.valueIndices is None or len(self.valueIndices) < 3:
+                raise ValueError("A one-sample test needs at least 3 replicate columns.")
+        return self
+
+
+class SamVolcanoRowOut(BaseModel):
+    label: str
+    log2FoldChange: float
+    pValue: float
+    qValue: float
+    category: str
+
+
+class VolcanoTestResponse(BaseModel):
+    rows: list[SamVolcanoRowOut]
+    curveUp: list[list[float]]
+    curveDown: list[list[float]]
+    droppedRows: list[str]
+    warnings: list[str]
+    deltaUsed: float
+    fdrAchieved: float
+    # The two resolved cutoffs on `d`. Reported separately rather than as one
+    # magnitude because they are genuinely independent — see
+    # `sam_methods_sentence` for why they need not be symmetric.
+    cutUp: float
+    cutLow: float
+    permutations: int
+    permutationsExhaustive: bool
+    # Composed on this side, beside the numbers, exactly as `/analyze`'s own
+    # `methodsSentence` is.
+    methodsSentence: str
+
+
+@app.post("/volcano-test", response_model=VolcanoTestResponse)
+async def volcano_test(request: VolcanoTestRequest) -> VolcanoTestResponse:
+    try:
+        if request.mode == "one-sample":
+            outcome = compute_sam_volcano_one_sample(
+                request.rowLabels,
+                request.values,
+                value_indices=request.valueIndices or [],
+                s0=request.s0,
+                fdr_percent=request.fdrPercent,
+            )
+        else:
+            outcome = compute_sam_volcano(
+                request.rowLabels,
+                request.values,
+                group_a_indices=request.groupAIndices or [],
+                group_b_indices=request.groupBIndices or [],
+                s0=request.s0,
+                fdr_percent=request.fdrPercent,
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("Volcano test failed")
+        raise HTTPException(status_code=500, detail=f"Volcano test failed: {error}") from error
+
+    return VolcanoTestResponse(
+        rows=[
+            SamVolcanoRowOut(
+                label=r.label,
+                log2FoldChange=_sanitize_or(r.log2FoldChange, 0.0),
+                pValue=_sanitize_or(r.pValue, 1.0),
+                qValue=_sanitize_or(r.qValue, 1.0),
+                category=r.category,
+            )
+            for r in outcome.rows
+        ],
+        curveUp=[[x, y] for x, y in outcome.curveUp],
+        curveDown=[[x, y] for x, y in outcome.curveDown],
+        droppedRows=outcome.droppedRows,
+        warnings=outcome.warnings,
+        deltaUsed=outcome.deltaUsed,
+        fdrAchieved=outcome.fdrAchieved,
+        # A cutoff of +/-inf is a real answer (nothing was called on that side),
+        # so it is carried to the client as a finite sentinel rather than
+        # dropped — `_sanitize_or` is the same guard every other route uses.
+        cutUp=_sanitize_or(outcome.cutUp, 0.0),
+        cutLow=_sanitize_or(outcome.cutLow, 0.0),
+        permutations=outcome.permutations,
+        permutationsExhaustive=outcome.permutationsExhaustive,
+        methodsSentence=outcome.methodsSentence,
     )
 
 

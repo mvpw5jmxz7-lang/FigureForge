@@ -70,6 +70,7 @@ import {
   tickCountForLength,
   tickLabelRuns,
   volcanoCategory,
+  volcanoCurveClassifier,
   xyMarks,
   type LinearScaleOptions,
   type MarkOrientation,
@@ -90,6 +91,7 @@ import {
   truncateToWidth,
 } from './text-width.js';
 import { layoutPointLabels, nearestRectPoint, type LabelCandidate, type Rect } from './point-labels.js';
+import { clipPolylineToRect } from './clip.js';
 
 /**
  * Above this many points, a continuous plot's marks are drawn as one raster
@@ -1175,10 +1177,17 @@ function continuousGeometry(
      * representable positive double keeps the point on the chart, at its
      * extreme top, rather than silently dropping the most significant row in
      * the table.
+     *
+     * `volcanoPValueIsNegLog10` skips all of this: a Perseus/Prism export
+     * routinely hands over a column that already IS `-log10(p)`, and
+     * transforming it a second time turns a respectably significant value
+     * into a negative one — the double-transform this option exists to stop.
      */
     const transformed = {
       ...raw,
-      values: raw.values.map((p) => negLog10(p > 0 ? p : Number.MIN_VALUE)),
+      values: node.volcanoPValueIsNegLog10
+        ? raw.values
+        : raw.values.map((p) => negLog10(p > 0 ? p : Number.MIN_VALUE)),
     };
 
     const xScale = makeScale({
@@ -1230,7 +1239,21 @@ function continuousGeometry(
         showPoints: true,
         pointSizeMm: node.pointSizeMm,
         colors,
-        classify: (xValue, yValue) => volcanoCategory(xValue, yValue, thresholds),
+        /*
+         * A drawn SAM boundary decides the colours itself. Anything else
+         * makes the line say one thing and the colours another — and the
+         * cutoffs are not a second opinion but a wrong one, since they add a
+         * fold-change gate the boundary does not have. Measured against the
+         * service's own verdict on a real export, the cutoffs disagreed on 47
+         * of 100 proteins. See `volcanoCurveClassifier` for why "above the
+         * curve" *is* the test's decision rather than an approximation of it.
+         *
+         * Built once, outside the per-point callback: the classifier sorts
+         * both branches on construction and a real gene list is 10-20k points.
+         */
+        classify: node.volcanoSamCurve
+          ? volcanoCurveClassifier(node.volcanoSamCurve)
+          : (xValue, yValue, qValue) => volcanoCategory(xValue, yValue, thresholds, qValue),
         clipToXRange: clipsToRange(node.x),
         clipToYRange: [clipsToRange(node.y)],
       }),
@@ -2810,6 +2833,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
         ...renderGridlines(node, theme, geometry),
         ...renderCascadeAxis(node, theme, geometry),
         ...renderVolcanoThresholds(node, theme, geometry),
+        ...renderVolcanoSamCurve(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
         // After every mark, including the raster: a label emitted inside a
         // series group would paint under a baked point cloud, which is the
@@ -3093,6 +3117,11 @@ function renderVolcanoThresholds(
 ): SceneNode[] {
   if (node.plotType !== 'volcano' || geometry.kind !== 'continuous') return [];
   if (node.volcanoThresholdLines === 'hide') return [];
+  // A Perseus-style permutation curve already encodes both cutoffs jointly —
+  // straight lines alongside it would be redundant at best and, since the
+  // curve's own fold-change asymptote need not match `thresholds.foldChange`,
+  // actively misleading at worst.
+  if (node.volcanoSamCurve) return [];
   const t = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
 
   const dashAttrs = {
@@ -3106,7 +3135,11 @@ function renderVolcanoThresholds(
   const lines: SceneNode[] = [];
   for (const fc of [-t.foldChange, t.foldChange]) {
     const x = geometry.xScale.scale(fc);
-    if (!Number.isFinite(x)) continue;
+    // A scale extrapolates outside its domain rather than returning NaN, so a
+    // cutoff wider than the data would draw a line beside the panel instead
+    // of inside it — the same "never mark a value the axis does not show"
+    // rule a broken axis already follows.
+    if (!Number.isFinite(x) || x < 0 || x > geometry.plotWidth) continue;
     lines.push(
       el(
         'path',
@@ -3116,8 +3149,29 @@ function renderVolcanoThresholds(
       ),
     );
   }
-  const yCut = geometry.yScale.scale(negLog10(t.pValue));
-  if (Number.isFinite(yCut)) {
+  /*
+   * A q-value is not a fixed offset from p — it depends on the whole
+   * distribution's rank, so there is no formula converting `thresholds.fdr`
+   * into a p-value the way `thresholds.pValue` already is one. But the
+   * boundary is directly readable from what `volcanoCategory` already
+   * decided: the loosest (smallest `-log10 p`) value among the points it
+   * called `'up'`/`'down'` *is* the effective cutoff, since every point
+   * below it failed FDR. Reading it off the already-classified points is an
+   * exact readout of that decision, not an approximation.
+   */
+  const yValue =
+    t.significanceBy === 'fdr'
+      ? (() => {
+          const significant = geometry.series[0]?.points.filter(
+            (p) => p.category === 'up' || p.category === 'down',
+          );
+          if (!significant || significant.length === 0) return undefined;
+          return Math.min(...significant.map((p) => p.value));
+        })()
+      : negLog10(t.pValue);
+
+  const yCut = yValue !== undefined ? geometry.yScale.scale(yValue) : NaN;
+  if (Number.isFinite(yCut) && yCut >= 0 && yCut <= geometry.plotHeight) {
     lines.push(
       el(
         'path',
@@ -3128,6 +3182,65 @@ function renderVolcanoThresholds(
     );
   }
   return lines;
+}
+
+/**
+ * A Perseus-style permutation (SAM) significance boundary, drawn as two
+ * dashed curves through `node.volcanoSamCurve`'s own points — each one a
+ * real protein's boundary fold change at its own standard error, not a
+ * fitted closed-form hyperbola, so the curve is exact to the computation
+ * that produced it. Sorted by x before drawing: the points arrive in
+ * whatever row order the source table had, and an unsorted polyline would
+ * zig-zag across itself instead of tracing a curve.
+ */
+function renderVolcanoSamCurve(
+  node: PlotNode,
+  theme: Theme,
+  geometry: PlotGeometry,
+): SceneNode[] {
+  if (node.plotType !== 'volcano' || geometry.kind !== 'continuous') return [];
+  const curve = node.volcanoSamCurve;
+  if (!curve) return [];
+
+  const branch = (points: readonly { x: number; y: number }[]): SceneNode | null => {
+    const placed = points
+      .map((p) => ({ x: geometry.xScale.scale(p.x), y: geometry.yScale.scale(p.y) }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+      .sort((a, b) => a.x - b.x);
+    if (placed.length < 2) return null;
+    /*
+     * The axes are sized from the plotted points, never from this curve — and
+     * the curve is not bounded by them: as a protein's own standard error
+     * shrinks its boundary p-value tends to zero, so this runs off the top of
+     * the panel and over whatever is beside it. Clipped rather than
+     * truncated, so the curve ends exactly on the boundary instead of at
+     * whichever protein happened to be the last one inside it.
+     */
+    const runs = clipPolylineToRect(placed, geometry.plotWidth, geometry.plotHeight);
+    if (runs.length === 0) return null;
+    // One node carrying every surviving run as its own sub-path: a curve that
+    // leaves the panel and returns is still one boundary, and splitting it
+    // into several nodes would make a `volcano-sam-curve` role count depend
+    // on the data.
+    const d = runs
+      .map((run) => run.map((p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.y)}`).join(' '))
+      .join(' ');
+    return el(
+      'path',
+      {
+        d,
+        fill: 'none',
+        stroke: theme.foreground,
+        'stroke-width': theme.stroke.hairlineMinMm,
+        'stroke-dasharray': '1.5 1',
+        'stroke-opacity': 0.5,
+      },
+      undefined,
+      { role: 'volcano-sam-curve' },
+    );
+  };
+
+  return [branch(curve.up), branch(curve.down)].filter((n): n is SceneNode => n !== null);
 }
 
 /**

@@ -44,6 +44,26 @@ export type DataFormat =
    */
   | 'contingency'
   /**
+   * ProteinID,Sample1,Sample2,… — per-sample intensities (LFQ and the like),
+   * one row per protein.
+   *
+   * Structurally identical to `replicate`, and deliberately a separate member
+   * for exactly the reason `contingency` above is: the numbers mean something
+   * different, and a different set of tests applies. A replicate table's rows
+   * are treatment groups to compare against each other; these rows are
+   * *features*, and comparing one protein against another is not a question
+   * anyone is asking. The comparison runs down the columns instead — which is
+   * what the Perseus-style S0/FDR permutation volcano test does, and it is
+   * the only test offered here.
+   *
+   * Never auto-inferred, the same stance `contingency`, `matrix`,
+   * `differential` and `survival` all take: nothing at the cell level
+   * separates this from any other table of replicate measurements, so the
+   * author declares it. That declaration is also what keeps the volcano test
+   * from being offered beside every unrelated table in the document.
+   */
+  | 'proteomics'
+  /**
    * Prism's *Grouped*: RowLabel, then one block of replicate columns per group.
    *
    *     Table format   Group A          Group B
@@ -228,6 +248,23 @@ export interface Dataset {
    * `analysisInputHash` reads the rows.
    */
   editedAt?: string;
+  /**
+   * The dataset this one was computed from, when it is an analysis output
+   * rather than something imported.
+   *
+   * Stored rather than re-derived from the generated name: a name is editable
+   * in the dataset list, and two derivations of one fact are how the two come
+   * to disagree — the same discipline `analysisInputHash` and
+   * `scaleBarWidthMm` are each held to.
+   *
+   * What it buys is that re-running an analysis can *replace* its previous
+   * output instead of appending a second copy of it, the same stance
+   * `replaceAnalysisForPlot` already takes for statistical tests. Only the
+   * volcano test writes it today; PCA and UMAP deliberately still append,
+   * since neither was reported as a problem and changing them would alter
+   * behaviour nobody asked about.
+   */
+  derivedFrom?: { datasetId: DatasetId; kind: 'volcano-test' };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +728,15 @@ export interface Series {
    * needs.
    */
   pointLabels?: readonly string[];
+  /**
+   * Per-point FDR/q-value, parallel to `x`/`pointLabels` — a 4th column,
+   * present only when a `'differential'` dataset supplies one. Unlike
+   * `x`/`values`/`pointLabels`, a blank cell does **not** drop the row: a
+   * missing q-value means "no FDR call for this point," not "this point
+   * does not exist" (a real per-protein output — Perseus's own "Significant"
+   * columns are exactly this sparse). Recorded as `NaN` at that index.
+   */
+  qValues?: number[];
 }
 
 /** How a two-factor series is named, so nothing composes it a second way. */
@@ -778,6 +824,11 @@ export function toSeries(ds: Dataset): Series[] {
       return out;
     }
 
+    // A proteomics intensity table reads structurally exactly as a replicate
+    // one — a label column then numbers — so the generic reading is shared.
+    // What differs is which *tests* apply to it, which is settled in the
+    // Stats tab, not here.
+    case 'proteomics':
     case 'replicate': {
       // Row-per-treatment; the replicate columns collapse into one series.
       const valueCols = ds.columns.slice(1);
@@ -898,9 +949,13 @@ export function toSeries(ds: Dataset): Series[] {
     }
 
     case 'differential': {
+      // A 4th column, when present, is an FDR/q-value per point — detected
+      // purely by column count, the same convention `toSurvivalGroups`
+      // already uses for its optional trailing `Group` column.
       const [labelCol, fcCol, pCol] = ds.columns;
       if (!labelCol || !fcCol || !pCol) return [];
-      return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
+      const qIndex = ds.columns.length >= 4 ? 3 : undefined;
+      return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0, qIndex) }];
     }
 
     case 'matrix': {
@@ -1191,10 +1246,18 @@ function numericPairsAt(
    * a point with no identity is not a point `pointLabels`' callers can use.
    */
   labelIndex?: number,
-): { values: number[]; x: number[]; pointLabels?: string[] } {
+  /**
+   * Column holding a per-point FDR/q-value, e.g. a differential table's
+   * optional 4th column. Unlike `labelIndex`, a missing or non-numeric cell
+   * does NOT drop the row — it is recorded as `NaN`, meaning "no FDR call for
+   * this point," which is a different fact from "this point does not exist."
+   */
+  qIndex?: number,
+): { values: number[]; x: number[]; pointLabels?: string[]; qValues?: number[] } {
   const values: number[] = [];
   const x: number[] = [];
   const pointLabels: string[] | undefined = labelIndex === undefined ? undefined : [];
+  const qValues: number[] | undefined = qIndex === undefined ? undefined : [];
   for (const row of ds.rows) {
     const xValue = row[xIndex];
     const yValue = row[yIndex];
@@ -1206,8 +1269,12 @@ function numericPairsAt(
     }
     x.push(xValue);
     values.push(yValue);
+    if (qIndex !== undefined) {
+      const q = row[qIndex];
+      qValues!.push(typeof q === 'number' ? q : NaN);
+    }
   }
-  return { values, x, ...(pointLabels ? { pointLabels } : {}) };
+  return { values, x, ...(pointLabels ? { pointLabels } : {}), ...(qValues ? { qValues } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1378,40 @@ export function removeColumn(ds: Dataset, at: number): Dataset {
     .filter((g) => g.to >= g.from);
 
   return { ...retyped(ds, rows, columns), ...(groups ? { columnGroups: groups } : {}) };
+}
+
+/**
+ * Swap column `at` with its left (`'left'`) or right (`'right'`) neighbour —
+ * metadata and every row's cell together, so a moved column keeps its data.
+ *
+ * A no-op at either boundary, and a no-op whenever `columnGroups` is
+ * declared: a block is a contiguous *range* of indices, and swapping two
+ * columns can move one across a block boundary without there being a
+ * sensible new contiguous range to describe it — the same reasoning
+ * `insertColumn`/`removeColumn` apply to *shifting* a range does not extend
+ * to *swapping within* one. This is for the ungrouped shapes
+ * (`differential`, `pca`, `umap`, `simple-xy`, `survival`, `matrix`), which
+ * is also where a raw export's column order most often needs correcting
+ * before choosing a layout.
+ */
+export function moveColumn(ds: Dataset, at: number, direction: 'left' | 'right'): Dataset {
+  if (ds.columnGroups && ds.columnGroups.length > 0) return ds;
+  const other = direction === 'left' ? at - 1 : at + 1;
+  if (at < 0 || at >= ds.columns.length || other < 0 || other >= ds.columns.length) return ds;
+
+  const rows = copyRows(ds).map((r) => {
+    const next = [...r];
+    const a = next[at]!;
+    next[at] = next[other]!;
+    next[other] = a;
+    return next;
+  });
+  const columns = [...ds.columns];
+  const a = columns[at]!;
+  columns[at] = columns[other]!;
+  columns[other] = a;
+
+  return retyped(ds, rows, columns);
 }
 
 export function renameColumn(ds: Dataset, at: number, name: string): Dataset {

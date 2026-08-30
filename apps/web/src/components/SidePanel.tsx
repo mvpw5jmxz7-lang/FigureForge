@@ -12,6 +12,7 @@ import {
   applyAutoLayout,
   childrenOf,
   dataPathFor,
+  DEFAULT_VOLCANO_THRESHOLDS,
   defaultAnalysisOptions,
   deleteNode,
   effectiveDpi,
@@ -39,6 +40,7 @@ import {
   toMatrix,
   toSeries,
   toSurvivalGroups,
+  updateNode,
   xForHash,
   type Analysis,
   type Correction,
@@ -60,7 +62,7 @@ import {
   type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
-import { analyze, ApiError, runPca, runUmap } from '../api.js';
+import { analyze, ApiError, runPca, runUmap, runVolcanoTest } from '../api.js';
 import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
@@ -139,7 +141,15 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
   {
     id: 'differential',
     label: 'Feature, log2 fold change, p-value',
-    hint: 'Exactly three columns in this order: a feature name, an effect size and a significance value. A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran.',
+    hint: 'Three columns in this order: a feature name, an effect size and a significance value — plus an optional 4th column, an FDR/q-value per point (use the ‹ › buttons above to reorder columns first). A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran. If your significance column already is −log10(p) rather than a raw p-value, say so in the plot’s Inspector after import.',
+  },
+  {
+    // Directly under the differential layout: the two are neighbours in
+    // meaning — this is the table a volcano test is run *on*, that is the
+    // table it produces.
+    id: 'proteomics',
+    label: 'Proteomics — replicate intensities (LFQ)',
+    hint: 'Column 1 names the protein; every other column is one sample’s intensity (LFQ, iBAQ, a normalised ratio). Its rows are features, not treatment groups, so the comparison runs down the columns: this is the only layout the Perseus-style volcano test is offered on, and the ordinary group-comparison tests are withheld. Imported as a table only, with no panel — it is the input to a test, not a figure. Choose it explicitly; nothing in the numbers themselves separates it from any other replicate table.',
   },
   {
     id: 'matrix',
@@ -162,6 +172,20 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
 const XY_REPLICATE_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
   'prism',
   'xy-replicates',
+]);
+
+/**
+ * Layouts where "row names in column 1" is a real question.
+ *
+ * Exactly the set `Dataset.hasRowNames` names as meaningful: the xy layouts,
+ * where column 0 either holds x values or labels the rows and only the author
+ * can say which. Every other format reads column 0 as a label by definition,
+ * so offering the toggle there is a control that changes nothing.
+ */
+const ROW_NAME_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
+  'simple-xy',
+  'prism',
+  'sigmaplot',
 ]);
 
 export interface SidePanelProps {
@@ -313,10 +337,24 @@ function DataTab({
     // the one thing `data/` exists to prevent.
     dataOriginals.set(dataPathFor(dataset), pasted);
 
+    /*
+     * A proteomics intensity table is the *input* to a test, not a figure.
+     * Drawn as the layout would have it, a real one is hundreds or thousands
+     * of bar-dot series over protein rows — a panel nobody wants and every
+     * author would immediately delete. The sample document already leaves its
+     * own proteomics table unattached for exactly this reason; this makes a
+     * real import behave the way the sample already says is right.
+     *
+     * Scoped to this one layout. A `'matrix'` still opens as a heatmap, which
+     * genuinely is a figure.
+     */
+    const dataOnly = dataset.format === 'proteomics';
+
     api.transaction('Import data', () => {
       commit('Add dataset', (draft) => {
         draft.datasets = [...draft.datasets, dataset];
       });
+      if (dataOnly) return;
       commit('Add panel', (draft) => {
         // The author already labelled their columns; asking them to type the
         // same two words into the Inspector is work the header row did.
@@ -351,7 +389,16 @@ function DataTab({
 
     setPasted('');
     setName('');
-    onError(null);
+    // An import that visibly does nothing to the page reads as one that
+    // failed, so the data-only path says what it did and where to go next —
+    // the same informational use of `onError` the PCA/UMAP actions make.
+    onError(
+      dataOnly
+        ? `Imported “${dataset.name}” (${dataset.rows.length} rows) as a table only — a ` +
+            'proteomics intensity table is the input to a test, not a figure. Use “Run volcano ' +
+            'test (Perseus-style) →” on its row below to draw one.'
+        : null,
+    );
   };
 
   // Divides each feature by its own sample SD before PCA — off by default,
@@ -360,6 +407,22 @@ function DataTab({
   // always wanted.
   const [pcaStandardize, setPcaStandardize] = useState(false);
   const [pcaBusyId, setPcaBusyId] = useState<NodeId | null>(null);
+
+  // Which dataset's inline "Run volcano test" form is open — unlike PCA/UMAP,
+  // this action needs the author to say which columns are which group before
+  // anything can run, so it expands a form rather than running on one click.
+  const [samFormId, setSamFormId] = useState<string | null>(null);
+  // Two-sample mode: which columns are Group A / Group B. One-sample mode:
+  // which columns are replicate values (tested against zero) — a separate
+  // piece of state rather than overloading `samGroups`'s two-value type,
+  // since "not one of two groups" and "not selected as a replicate value"
+  // are different questions the UI asks depending on `samMode`.
+  const [samMode, setSamMode] = useState<'two-sample' | 'one-sample'>('two-sample');
+  const [samGroups, setSamGroups] = useState<Record<number, 'a' | 'b'>>({});
+  const [samValueCols, setSamValueCols] = useState<Record<number, boolean>>({});
+  const [samS0, setSamS0] = useState(0.1);
+  const [samFdrPercent, setSamFdrPercent] = useState(5);
+  const [samBusyId, setSamBusyId] = useState<NodeId | null>(null);
 
   /*
    * PCA is the first action in this app that creates a *new* dataset from an
@@ -547,6 +610,174 @@ function DataTab({
     } finally {
       setBusy(null);
       setUmapBusyId(null);
+    }
+  };
+
+  /*
+   * The Perseus-style permutation (SAM) volcano test. Unlike PCA/UMAP it
+   * needs the author to say which columns are which group before it can run
+   * at all — there is no way to guess a two-group split from column names
+   * alone — so the trigger button expands an inline form (`samFormId`)
+   * rather than running immediately. Once run, this follows PCA/UMAP's own
+   * mechanism exactly: a new derived dataset and panel, with no live link
+   * back to `source`.
+   */
+  const runSamVolcanoOn = async (
+    source: Dataset,
+    params:
+      | { mode: 'two-sample'; groupAIndices: number[]; groupBIndices: number[] }
+      | { mode: 'one-sample'; valueIndices: number[] },
+    s0: number,
+    fdrPercent: number,
+  ): Promise<void> => {
+    const matrix = toMatrix(source);
+    setSamBusyId(source.id);
+    setBusy('Running volcano test');
+    onError(null);
+
+    try {
+      const result = await runVolcanoTest({
+        rowLabels: matrix.rowLabels,
+        values: matrix.cells,
+        mode: params.mode,
+        ...(params.mode === 'two-sample'
+          ? { groupAIndices: params.groupAIndices, groupBIndices: params.groupBIndices }
+          : { valueIndices: params.valueIndices }),
+        s0,
+        fdrPercent,
+      });
+
+      /*
+       * A second run on the same source replaces the first result rather than
+       * appending a second copy of it — the same "replace, don't accumulate"
+       * stance `replaceAnalysisForPlot` already takes for statistical tests,
+       * and for the same reason: two panels answering one question, differing
+       * only in which parameters produced them, is not something a reader can
+       * tell apart on the page.
+       *
+       * The link is the stored `derivedFrom`, never the generated name: the
+       * name is editable in the list above.
+       */
+      const existing = doc.datasets.find(
+        (d) => d.derivedFrom?.kind === 'volcano-test' && d.derivedFrom.datasetId === source.id,
+      );
+      const samName = existing?.name ?? `${source.name} — volcano test`;
+      const samDataset: Dataset = {
+        // Keeping the id is what makes this a replacement: every plot already
+        // pointing here keeps pointing here, so its panel does not move and
+        // its point labels — keyed on the label text, and the same proteins
+        // come back — survive the re-run.
+        id: existing?.id ?? newId(),
+        name: samName,
+        format: 'differential',
+        columns: [
+          { name: 'Feature', kind: 'text' },
+          { name: 'log2FoldChange', kind: 'number' },
+          { name: 'pValue', kind: 'number' },
+          { name: 'qValue', kind: 'number' },
+        ],
+        rows: result.rows.map((r) => [r.label, r.log2FoldChange, r.pValue, r.qValue]),
+        sourcePath: null,
+        sourceFilename: null,
+        importedAt: new Date().toISOString(),
+        derivedFrom: { datasetId: source.id, kind: 'volcano-test' },
+      };
+      const volcanoPatch: Partial<PlotNode> = {
+        volcanoThresholds: {
+          ...DEFAULT_VOLCANO_THRESHOLDS,
+          fdr: result.fdrAchieved,
+          significanceBy: 'fdr',
+        },
+        volcanoSamCurve: {
+          up: result.curveUp.map(([x, y]) => ({ x, y })),
+          down: result.curveDown.map(([x, y]) => ({ x, y })),
+        },
+        // The record that lets this boundary be written up. Stored in the same
+        // patch as the curve it describes, so a re-run replaces both together
+        // and a figure can never carry a methods sentence for a boundary it no
+        // longer draws.
+        volcanoTest: {
+          s0,
+          fdrPercent,
+          fdrAchieved: result.fdrAchieved,
+          deltaUsed: result.deltaUsed,
+          cutUp: result.cutUp,
+          cutLow: result.cutLow,
+          mode: params.mode,
+          nTested: result.rows.length,
+          nUp: result.rows.filter((r) => r.category === 'up').length,
+          nDown: result.rows.filter((r) => r.category === 'down').length,
+          methodsSentence: result.methodsSentence,
+        },
+      };
+      // A panel is still built when the author deleted the previous one, so a
+      // re-run recovers rather than appearing to do nothing.
+      const reusedPlots = existing ? plotsUsingDataset(doc.nodes, existing.id) : [];
+      const replaced = existing !== undefined && reusedPlots.length > 0;
+
+      api.transaction('Run volcano test', () => {
+        commit(replaced ? 'Update volcano test dataset' : 'Add volcano test dataset', (draft) => {
+          draft.datasets = existing
+            ? draft.datasets.map((d) => (d.id === existing.id ? samDataset : d))
+            : [...draft.datasets, samDataset];
+        });
+        commit(replaced ? 'Update volcano test panel' : 'Add volcano test panel', (draft) => {
+          if (replaced) {
+            for (const plot of reusedPlots) updateNode<PlotNode>(draft, plot.id, volcanoPatch);
+            // Nothing was added, so nothing is re-laid-out or re-lettered:
+            // re-running a test must not shuffle the author's page.
+            return;
+          }
+          const { plot } = addPanelWithPlot(draft, newId, {
+            frame: nextPanelFrame(draft, { width: 60, height: 50 }),
+            name: samName,
+            datasetId: samDataset.id,
+            plotType: 'volcano',
+            xTitle: 'Log2 fold change',
+            yTitle: '-Log10 p-value',
+          });
+          updateNode<PlotNode>(draft, plot.id, volcanoPatch);
+          applyAutoLayout(draft, {
+            marginMm: theme.spacing.marginMm,
+            gutterMm: theme.spacing.panelGutterMm,
+            labelGutterMm: 4,
+          });
+          relabelPanels(draft, newId, {
+            uppercase: theme.panelLabelCase === 'upper',
+            fontSizePt: theme.type.panelLabelPt,
+            offsetMm: 4,
+          });
+          reflowBrackets(draft, theme);
+        });
+      });
+
+      setSamFormId(null);
+      setSamGroups({});
+      setSamValueCols({});
+
+      const dropped =
+        result.droppedRows.length > 0
+          ? ` ${result.droppedRows.length} row(s) dropped for a missing value in either group.`
+          : '';
+      onError(
+        `Volcano test on ${source.name}: reached ${(result.fdrAchieved * 100).toFixed(1)}% FDR ` +
+          `at delta ${result.deltaUsed.toFixed(3)}. ` +
+          // Said explicitly, or the absence of a new panel reads as a run that
+          // failed silently.
+          (replaced
+            ? `Updated the existing “${samName}” table and panel in place.`
+            : `Added “${samName}” as a new table and panel.`) +
+          dropped,
+      );
+    } catch (error) {
+      onError(
+        error instanceof ApiError
+          ? `Volcano test failed: ${error.message}`
+          : `Could not reach the analysis service. Is the API running? (${String(error)})`,
+      );
+    } finally {
+      setBusy(null);
+      setSamBusyId(null);
     }
   };
 
@@ -962,8 +1193,11 @@ function DataTab({
             />
           </label>
 
+          {/* The label has to keep its own promise: a proteomics table is
+              imported without a panel, so saying "as new panel" there would
+              be a control describing something it does not do. */}
           <button className="primary" onClick={importDataset}>
-            Import as new panel
+            {preview.format === 'proteomics' ? 'Import data table' : 'Import as new panel'}
           </button>
         </div>
       )}
@@ -985,6 +1219,23 @@ function DataTab({
           // UMAP's own minimum, stricter than PCA's 3: it needs a real local
           // neighbourhood to mean anything.
           const umapEligible = matrix !== null && matrix.rowLabels.length >= 4;
+          /*
+           * `toMatrix` is purely structural (column 0 a label, the rest plain
+           * numbers) and never reads `dataset.format` at all — which is
+           * exactly why the format gate has to do the deciding. Nothing in the
+           * cells separates a proteomics intensity table from any other table
+           * of replicate measurements, so a structural gate put this button
+           * beside every unrelated dataset in the document, enabled. It is
+           * offered on the declared `'proteomics'` layout alone: the author
+           * says the rows are features, and only then is a test that compares
+           * down the columns a sensible thing to offer.
+           */
+          const samMatrix = dataset.format === 'proteomics' ? toMatrix(dataset) : null;
+          // At least 3 columns — the one-sample mode's own minimum; the
+          // two-sample mode's stricter 2+2 is enforced by the inline form's
+          // own `ready` check once a mode is chosen.
+          const samEligible =
+            samMatrix !== null && samMatrix.rowLabels.length >= 4 && samMatrix.colLabels.length >= 3;
           return (
             <li key={dataset.id}>
               {/* Editable in place: the name propagates to the panel and plot,
@@ -1063,18 +1314,42 @@ function DataTab({
                     Run UMAP →
                   </button>
                 )}
-                <label className="check" title="Column 1 labels the rows rather than holding data">
-                  <input
-                    type="checkbox"
-                    checked={dataset.hasRowNames ?? false}
-                    onChange={(e) =>
-                      commit('Change first column', (draft) =>
-                        setDatasetReading(draft, dataset.id, { hasRowNames: e.target.checked }),
-                      )
+                {dataset.format === 'proteomics' && (
+                  <button
+                    title={
+                      samEligible
+                        ? "Choose the groups to compare (or replicate values), an S0 cutoff and a target FDR — Perseus's own volcano-plot significance test"
+                        : 'Needs at least 4 rows and 3+ replicate columns (2+2 for a two-group test)'
                     }
-                  />
-                  Row names in column 1
-                </label>
+                    disabled={!samEligible || samBusyId === dataset.id}
+                    onClick={() => {
+                      setSamGroups({});
+                      setSamValueCols({});
+                      setSamFormId(samFormId === dataset.id ? null : dataset.id);
+                    }}
+                  >
+                    Run volcano test (Perseus-style) →
+                  </button>
+                )}
+                {/* Only the xy layouts read this. Every other format already
+                    treats column 0 as a label by definition, so the checkbox
+                    was a control that visibly did nothing on most of the
+                    tables it appeared beside — see `Dataset.hasRowNames`'s
+                    own doc comment, which has said so since it was added. */}
+                {ROW_NAME_FORMATS.has(dataset.format) && (
+                  <label className="check" title="Column 1 labels the rows rather than holding data">
+                    <input
+                      type="checkbox"
+                      checked={dataset.hasRowNames ?? false}
+                      onChange={(e) =>
+                        commit('Change first column', (draft) =>
+                          setDatasetReading(draft, dataset.id, { hasRowNames: e.target.checked }),
+                        )
+                      }
+                    />
+                    Row names in column 1
+                  </label>
+                )}
                 {dataset.editedAt && (
                   <span className="muted" title={`Last edited ${dataset.editedAt}`}>
                     edited
@@ -1103,6 +1378,156 @@ function DataTab({
                   </>
                 )}
               </div>
+              {samFormId === dataset.id && samMatrix && (
+                <div className="sam-volcano-form">
+                  <p className="hint">
+                    Perseus's own volcano-plot test: choose the groups to compare (or replicate
+                    values), an S0 cutoff, and a target FDR.
+                  </p>
+                  <label className="field">
+                    Test design
+                    <select
+                      value={samMode}
+                      onChange={(e) => {
+                        setSamMode(e.target.value as 'two-sample' | 'one-sample');
+                        setSamGroups({});
+                        setSamValueCols({});
+                      }}
+                    >
+                      <option value="two-sample">Two groups (raw replicate measurements)</option>
+                      <option value="one-sample">
+                        One sample (replicate values vs. zero, e.g. per-replicate ratios)
+                      </option>
+                    </select>
+                  </label>
+                  {samMode === 'two-sample' ? (
+                    <>
+                      <p className="hint">
+                        Assign each sample column to Group A or Group B — the volcano's fold
+                        change is Group B minus Group A.
+                      </p>
+                      <div className="field-row">
+                        {samMatrix.colLabels.map((label, i) => (
+                          <label key={i} className="field">
+                            {label}
+                            <select
+                              value={samGroups[i] ?? ''}
+                              onChange={(e) =>
+                                setSamGroups((prev) => {
+                                  const next = { ...prev };
+                                  const value = e.target.value;
+                                  if (value === 'a' || value === 'b') next[i] = value;
+                                  else delete next[i];
+                                  return next;
+                                })
+                              }
+                            >
+                              <option value="">—</option>
+                              <option value="a">Group A</option>
+                              <option value="b">Group B</option>
+                            </select>
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="hint">
+                        Check each column that holds a replicate value to test against zero —
+                        leave any other column (e.g. a per-replicate p-value) unchecked.
+                      </p>
+                      <div className="field-row">
+                        {samMatrix.colLabels.map((label, i) => (
+                          <label key={i} className="check">
+                            <input
+                              type="checkbox"
+                              checked={samValueCols[i] ?? false}
+                              onChange={(e) =>
+                                setSamValueCols((prev) => ({ ...prev, [i]: e.target.checked }))
+                              }
+                            />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <div className="field-row">
+                    <label className="field">
+                      s0
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        value={samS0}
+                        onChange={(e) => setSamS0(Math.max(0, Number(e.target.value) || 0))}
+                      />
+                    </label>
+                    <label className="field">
+                      Target FDR (%)
+                      <input
+                        type="number"
+                        min={0.01}
+                        max={100}
+                        step={0.1}
+                        value={samFdrPercent}
+                        onChange={(e) =>
+                          setSamFdrPercent(Math.min(100, Math.max(0.01, Number(e.target.value) || 0.01)))
+                        }
+                      />
+                    </label>
+                  </div>
+                  {(() => {
+                    if (samMode === 'one-sample') {
+                      const valueIndices = Object.entries(samValueCols)
+                        .filter(([, checked]) => checked)
+                        .map(([i]) => Number(i));
+                      const ready = valueIndices.length >= 3;
+                      return (
+                        <button
+                          className="primary"
+                          disabled={!ready || samBusyId === dataset.id}
+                          title={ready ? undefined : 'Needs at least 3 replicate columns'}
+                          onClick={() =>
+                            void runSamVolcanoOn(
+                              dataset,
+                              { mode: 'one-sample', valueIndices },
+                              samS0,
+                              samFdrPercent,
+                            )
+                          }
+                        >
+                          Run
+                        </button>
+                      );
+                    }
+                    const groupA = Object.entries(samGroups)
+                      .filter(([, g]) => g === 'a')
+                      .map(([i]) => Number(i));
+                    const groupB = Object.entries(samGroups)
+                      .filter(([, g]) => g === 'b')
+                      .map(([i]) => Number(i));
+                    const ready = groupA.length >= 2 && groupB.length >= 2;
+                    return (
+                      <button
+                        className="primary"
+                        disabled={!ready || samBusyId === dataset.id}
+                        title={ready ? undefined : 'Each group needs at least 2 columns'}
+                        onClick={() =>
+                          void runSamVolcanoOn(
+                            dataset,
+                            { mode: 'two-sample', groupAIndices: groupA, groupBIndices: groupB },
+                            samS0,
+                            samFdrPercent,
+                          )
+                        }
+                      >
+                        Run
+                      </button>
+                    );
+                  })()}
+                </div>
+              )}
             </li>
           );
         })}
@@ -1302,11 +1727,15 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    * numeric-x plot, the shape `xyCorrelation` exists to allow.
    */
   const differential = dataset?.format === 'differential';
-  const xyCorrelation =
-    CORRELATION_TESTS.has(test) &&
-    series.length === 1 &&
-    series[0]?.x !== undefined &&
-    !differential;
+  /*
+   * Whether a correlation/regression *could* run here at all, asked of the
+   * data alone. Split out from `xyCorrelation` below — which is the same
+   * question plus "and one is currently selected" — because the dropdown has
+   * to decide what to offer before a test is chosen, and deciding that from a
+   * predicate that already depends on the choice is circular.
+   */
+  const correlationPossible = series.length === 1 && series[0]?.x !== undefined && !differential;
+  const xyCorrelation = CORRELATION_TESTS.has(test) && correlationPossible;
   /*
    * A survival curve's x is continuous time too, exactly the shape
    * `blockedByContinuousAxis` exists to refuse group comparisons on — so
@@ -1332,39 +1761,6 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 
   // Counts and measurements take disjoint tests; see COUNT_TESTS.
   const counts = dataset !== undefined && isContingency(dataset);
-  /*
-   * Log-rank is the only test that reads a subject's time and event flag
-   * together rather than treating a group as a plain sample of measurements
-   * — offered only for a survival-format dataset, and it is the only test
-   * offered there, the same two-way gate `COUNT_TESTS` already runs for a
-   * contingency table.
-   */
-  const offeredTests = TESTS.filter((t) => {
-    if (t.id === 'log-rank') return survival;
-    if (survival) return false;
-    return COUNT_TESTS.has(t.id) === counts;
-  });
-
-  // Keep the dropdown honest when the selected plot's dataset changes kind.
-  const [testEcho, setTestEcho] = useState(counts);
-  if (testEcho !== counts) {
-    setTestEcho(counts);
-    if (COUNT_TESTS.has(test) !== counts) setTest(counts ? 'chi-square' : 'ttest-welch');
-  }
-  /*
-   * `null`, not `survival`, so the correction below always runs on this
-   * component's first render — `StatsTab` mounts fresh every time the Stats
-   * tab is opened (`{tab === 'stats' && <StatsTab .../>}`), so a survival
-   * plot can already be selected before this component exists at all, and
-   * `useState(survival)` would start "in sync" and never correct the
-   * hardcoded `'ttest-welch'` default.
-   */
-  const [survivalEcho, setSurvivalEcho] = useState<boolean | null>(null);
-  if (survivalEcho !== survival) {
-    setSurvivalEcho(survival);
-    if (survival && test !== 'log-rank') setTest('log-rank');
-    if (!survival && test === 'log-rank') setTest('ttest-welch');
-  }
 
   /*
    * Nested data is plotted but not tested.
@@ -1389,6 +1785,64 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    */
   const matrix = dataset?.format === 'matrix';
 
+  /*
+   * A proteomics intensity table reads through `toSeries` as one series per
+   * *protein*, so an ordinary group comparison here would compare one protein
+   * against another — not a question anyone is asking of this table. Its own
+   * comparison runs down the columns, and that is the volcano test in the
+   * Data tab, not anything here. Refused for the same reason `matrix` is.
+   */
+  const proteomics = dataset?.format === 'proteomics';
+
+  /*
+   * Formats that carry no runnable test at all. Their controls are hidden
+   * rather than shown-and-disabled: a dropdown of tests that cannot run,
+   * above a button that refuses, is a longer way of saying nothing applies.
+   */
+  const noTestApplies = nested || differential || matrix || proteomics;
+
+  /*
+   * Log-rank is the only test that reads a subject's time and event flag
+   * together rather than treating a group as a plain sample of measurements
+   * — offered only for a survival-format dataset, and it is the only test
+   * offered there, the same two-way gate `COUNT_TESTS` already runs for a
+   * contingency table.
+   *
+   * A numeric-x plot narrows the list the same way: only the correlation
+   * family has any meaning without categories to span, and only when the
+   * series actually carries the paired x it consumes.
+   */
+  const offeredTests = TESTS.filter((t) => {
+    if (noTestApplies || blockedByHorizontalOrientation) return false;
+    if (t.id === 'log-rank') return survival;
+    if (survival) return false;
+    if (COUNT_TESTS.has(t.id) !== counts) return false;
+    if (continuousPlot) return CORRELATION_TESTS.has(t.id) && correlationPossible;
+    return true;
+  });
+
+  /*
+   * One correction, not one per reason the list can change.
+   *
+   * This replaced a `counts` echo and a `survival` echo that each fixed up
+   * `test` for their own case; narrowing the list further (continuous plots,
+   * the formats above) would have wanted a third. Three mechanisms
+   * maintaining one invariant is how they come to disagree — asking the list
+   * itself whether the selection is still in it covers every reason at once,
+   * present and future.
+   *
+   * `null` rather than the first offered id, so this runs on the component's
+   * very first render: `StatsTab` mounts fresh each time the tab is opened,
+   * and a plot can already be selected before it exists at all.
+   */
+  const offeredKey = offeredTests.map((t) => t.id).join(',');
+  const [offeredEcho, setOfferedEcho] = useState<string | null>(null);
+  if (offeredEcho !== offeredKey) {
+    setOfferedEcho(offeredKey);
+    const first = offeredTests[0];
+    if (first && !offeredTests.some((t) => t.id === test)) setTest(first.id);
+  }
+
   const run = async (): Promise<void> => {
     if (matrix) {
       onError(
@@ -1409,6 +1863,14 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         'Nested data needs a hierarchical model, which this build does not have. Pooling the ' +
           'subcolumns would treat observations within a subject as independent and report a ' +
           'p-value that is too small.',
+      );
+      return;
+    }
+    if (proteomics) {
+      onError(
+        'A proteomics intensity table’s rows are proteins, not groups — a test here would ' +
+          'compare one protein against another. Its comparison runs down the columns: use ' +
+          '“Run volcano test (Perseus-style)” on the Data tab.',
       );
       return;
     }
@@ -1599,27 +2061,35 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </select>
       </label>
 
-      <label className="field block">
-        Test
-        <select value={test} onChange={(e) => setTest(e.target.value as StatTest)}>
-          {offeredTests.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {/* Hidden outright where nothing can run, rather than offered and then
+          refused. What stays is the one line saying why — that is the tab's
+          own state, not a missing option, and an entirely blank Analysis tab
+          reads as broken. */}
+      {offeredTests.length > 0 && (
+        <>
+          <label className="field block">
+            Test
+            <select value={test} onChange={(e) => setTest(e.target.value as StatTest)}>
+              {offeredTests.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
 
-      <label className="field block">
-        Multiple comparisons
-        <select value={correction} onChange={(e) => setCorrection(e.target.value as Correction)}>
-          {CORRECTIONS.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.label}
-            </option>
-          ))}
-        </select>
-      </label>
+          <label className="field block">
+            Multiple comparisons
+            <select value={correction} onChange={(e) => setCorrection(e.target.value as Correction)}>
+              {CORRECTIONS.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
 
       <p className="hint">
         {counts ? 'Rows' : 'Groups'}:{' '}
@@ -1643,11 +2113,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
-      {blockedByContinuousAxis && !nested && !differential && (
+      {continuousPlot && !noTestApplies && !survival && (
         <p className="hint">
-          This plot has a numeric x axis, so there are no groups to compare and nowhere to
-          anchor a significance bracket. Select a categorical plot, or a correlation/regression
-          test, to run.
+          This plot has a numeric x axis, so there are no groups to compare and nowhere to anchor
+          a significance bracket.{' '}
+          {correlationPossible
+            ? 'Only correlation and regression are offered, which read the paired x values instead.'
+            : 'Correlation and regression would read paired x values, and this dataset has one series carrying none — so no test is offered here. Select a categorical plot to compare groups.'}
         </p>
       )}
 
@@ -1683,20 +2155,50 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </p>
       )}
 
-      <button
-        className="primary"
-        onClick={() => void run()}
-        disabled={
-          !minGroupsMet ||
-          blockedByContinuousAxis ||
-          blockedByHorizontalOrientation ||
-          nested ||
-          differential ||
-          matrix
-        }
-      >
-        Run and annotate
-      </button>
+      {proteomics && (
+        <p className="hint">
+          This table's rows are proteins, not groups — a test here would compare one protein
+          against another. Its comparison runs down the columns instead: use “Run volcano test
+          (Perseus-style)” on the Data tab.
+        </p>
+      )}
+
+      {/* The test that produced this table, where every other methods sentence
+          lives. It completes the notices above rather than contradicting them:
+          there is nothing to run *here*, and this is what was run. */}
+      {activePlot?.volcanoTest && (
+        <div className="analysis">
+          <h4>Volcano test</h4>
+          <p className="hint">
+            S0 {activePlot.volcanoTest.s0}, target FDR {activePlot.volcanoTest.fdrPercent}% —
+            reached {(activePlot.volcanoTest.fdrAchieved * 100).toFixed(1)}% at delta{' '}
+            {activePlot.volcanoTest.deltaUsed.toFixed(3)}, calling{' '}
+            {activePlot.volcanoTest.nUp} of {activePlot.volcanoTest.nTested} features up and{' '}
+            {activePlot.volcanoTest.nDown} down.
+          </p>
+          <details>
+            <summary>Methods sentence</summary>
+            <p className="methods">{activePlot.volcanoTest.methodsSentence}</p>
+            <button
+              onClick={() =>
+                void navigator.clipboard?.writeText(activePlot.volcanoTest?.methodsSentence ?? '')
+              }
+            >
+              Copy
+            </button>
+          </details>
+        </div>
+      )}
+
+      {offeredTests.length > 0 && (
+        <button
+          className="primary"
+          onClick={() => void run()}
+          disabled={!minGroupsMet || blockedByContinuousAxis || blockedByHorizontalOrientation}
+        >
+          Run and annotate
+        </button>
+      )}
 
       {notice && <p className="hint notice">{notice}</p>}
 

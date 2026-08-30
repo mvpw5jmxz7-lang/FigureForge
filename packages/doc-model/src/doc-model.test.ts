@@ -18,6 +18,7 @@ import {
   dataBlocks,
   insertColumn,
   insertRow,
+  moveColumn,
   pasteBlock,
   removeColumn,
   removeRow,
@@ -262,6 +263,32 @@ describe('delimited parsing', () => {
     expect(series[0]!.pointLabels).toEqual(['TP53']);
     expect(series[0]!.x).toEqual([2.1]);
     expect(series[0]!.values).toEqual([0.001]);
+  });
+
+  it('reads a differential table\'s optional 4th column as per-point FDR/q-values', () => {
+    const table: Dataset = {
+      ...dataset(
+        'Gene,log2FC,p,fdr\nTP53,2.1,0.001,0.01\nMYC,-1.8,0.02,\nEGFR,0.1,0.5,0.9',
+      ),
+      format: 'differential',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    // A blank FDR cell is NaN, not a dropped row — unlike label/x/p, a
+    // missing q-value means "no FDR call for this point," not "this point
+    // does not exist."
+    expect(series[0]!.pointLabels).toEqual(['TP53', 'MYC', 'EGFR']);
+    expect(series[0]!.qValues?.[0]).toBe(0.01);
+    expect(series[0]!.qValues?.[1]).toBeNaN();
+    expect(series[0]!.qValues?.[2]).toBe(0.9);
+  });
+
+  it('has no qValues on an ordinary 3-column differential table', () => {
+    const table: Dataset = {
+      ...dataset('Gene,log2FC,p\nTP53,2.1,0.001'),
+      format: 'differential',
+    };
+    expect(toSeries(table)[0]!.qValues).toBeUndefined();
   });
 
   it('never infers matrix from a bare row×column table', () => {
@@ -1232,6 +1259,9 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('survival')).toBe('survival');
     expect(defaultPlotTypeFor('pca')).toBe('scatter');
     expect(defaultPlotTypeFor('umap')).toBe('scatter');
+    // Same reading as `replicate`, whose shape it shares — what differs is
+    // which tests apply, which is not this function's business.
+    expect(defaultPlotTypeFor('proteomics')).toBe('bar-dot');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -2168,6 +2198,201 @@ describe('.figureforge archive', () => {
     const bytes = saveArchive(buildArchiveContents(doc));
     const loaded = loadArchive(bytes);
     expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a proteomics dataset and its derivedFrom link', () => {
+    /*
+     * Both are optional additions, so `SCHEMA_VERSION` stays 1 — and zod
+     * strips a key present only on the TS type, which is what makes a
+     * round-trip the check that matters rather than a type assertion.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const source: Dataset = {
+        ...dataset('Protein,C1,C2,T1,T2\nP1,1,2,8,9\nP2,3,4,3,4', newId()),
+        format: 'proteomics',
+      };
+      const derived: Dataset = {
+        ...dataset('Feature,log2FoldChange,pValue,qValue\nP1,3,0.001,0.01', newId()),
+        format: 'differential',
+        derivedFrom: { datasetId: source.id, kind: 'volcano-test' },
+      };
+      draft.datasets = [source, derived];
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    expect(loaded.document.datasets[0]!.format).toBe('proteomics');
+    expect(loaded.document.datasets[1]!.derivedFrom).toEqual({
+      datasetId: doc.datasets[0]!.id,
+      kind: 'volcano-test',
+    });
+  });
+
+  it('reads a proteomics table exactly as it reads a replicate one', () => {
+    /*
+     * The two layouts are structurally identical on purpose — what separates
+     * them is which tests apply, decided in the Stats tab, not here. If the
+     * generic reading ever diverges, every consumer of `toSeries` starts
+     * seeing two different tables where the author declared one shape.
+     */
+    const csv = 'Protein,C1,C2,T1\nP1,1,2,8\nP2,3,4,5';
+    const newId = createIdFactory();
+    const asReplicate: Dataset = { ...dataset(csv, newId()), format: 'replicate' };
+    const asProteomics: Dataset = { ...dataset(csv, newId()), format: 'proteomics' };
+    expect(toSeries(asProteomics)).toEqual(toSeries(asReplicate));
+    expect(toSeries(asProteomics).map((s) => s.name)).toEqual(['P1', 'P2']);
+  });
+
+  it('never infers the proteomics layout from the numbers alone', () => {
+    // Nothing at the cell level separates it from an ordinary replicate
+    // table — which is exactly why declaring it is what gates the volcano
+    // test, and why a plain paste must never land on it by accident.
+    const columns = dataset('Protein,C1,C2,T1,T2\nP1,1,2,8,9\nP2,3,4,5,6', createIdFactory()())
+      .columns;
+    expect(inferFormat(columns)).not.toBe('proteomics');
+  });
+
+  it('round-trips the volcano test record, including both cutoffs', () => {
+    /*
+     * Optional, so `SCHEMA_VERSION` stays 1 — and zod strips a key present
+     * only on the TS type, so a round-trip is the check that matters. Both
+     * cutoffs specifically: they are stored separately because SAM resolves
+     * each tail independently and they are not mirror images, so a schema
+     * that kept only one magnitude would quietly lose half the record.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const record = {
+      s0: 0.5,
+      fdrPercent: 5,
+      fdrAchieved: 0.032,
+      deltaUsed: 0.5587,
+      cutUp: 0.5306,
+      cutLow: -1.0644,
+      mode: 'two-sample' as const,
+      nTested: 100,
+      nUp: 59,
+      nDown: 24,
+      methodsSentence: 'Differential abundance was assessed by a SAM permutation test.',
+    };
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p,fdr\nTP53,2.1,0.001,0.01', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'volcano';
+        plotNode.volcanoTest = record;
+      }
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' ? plot.volcanoTest : undefined).toEqual(record);
+  });
+
+  it('round-trips FDR thresholds, volcanoPValueIsNegLog10 and volcanoSamCurve', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p,fdr\nTP53,2.1,0.001,0.01', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'volcano';
+        plotNode.volcanoThresholds = {
+          foldChange: 1,
+          pValue: 0.05,
+          fdr: 0.02,
+          significanceBy: 'fdr',
+        };
+        plotNode.volcanoPValueIsNegLog10 = true;
+        plotNode.volcanoSamCurve = {
+          up: [{ x: 1, y: 2 }],
+          down: [{ x: -1, y: 2 }],
+        };
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('leaves the new volcano fields absent when never set', () => {
+    // A figure whose author never touched FDR/curve/representation fields
+    // must still round-trip byte-identically — otherwise every existing
+    // saved volcano plot would gain fields on its next open.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,log2FC,p\nTP53,2.1,0.001', newId()),
+        format: 'differential',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Volcano',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') plotNode.plotType = 'volcano';
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    for (const node of Object.values(loaded.document.nodes)) {
+      if (node.type !== 'plot') continue;
+      expect(node.volcanoPValueIsNegLog10).toBeUndefined();
+      expect(node.volcanoSamCurve).toBeUndefined();
+      expect(node.volcanoThresholds?.fdr).toBeUndefined();
+      expect(node.volcanoThresholds?.significanceBy).toBeUndefined();
+    }
   });
 
   it('round-trips volcanoLabels, with no cap enforced at the schema layer', () => {
@@ -3538,6 +3763,37 @@ describe('dataset editing', () => {
     };
     // An empty group is not a group.
     expect(removeColumn(ds, 1).columnGroups).toEqual([{ name: 'Group B', from: 1, to: 1 }]);
+  });
+
+  it('swaps two adjacent columns, data and header together', () => {
+    const ds = dataset('Feature,B,C\nPDCD6,2.14,3.02\nCDK1,1.74,2.04');
+    const moved = moveColumn(ds, 1, 'right');
+    expect(moved.columns.map((c) => c.name)).toEqual(['Feature', 'C', 'B']);
+    expect(moved.rows).toEqual([
+      ['PDCD6', 3.02, 2.14],
+      ['CDK1', 2.04, 1.74],
+    ]);
+
+    // Moving back is the inverse.
+    expect(moveColumn(moved, 2, 'left').rows).toEqual(ds.rows);
+  });
+
+  it('is a no-op at either boundary', () => {
+    const ds = dataset('Feature,B,C\nPDCD6,2.14,3.02');
+    expect(moveColumn(ds, 0, 'left')).toBe(ds);
+    expect(moveColumn(ds, 2, 'right')).toBe(ds);
+  });
+
+  it('is a no-op once column groups are declared', () => {
+    const ds: Dataset = {
+      ...dataset('Variant,A1,A2,B1,B2\nWT,1,2,3,4'),
+      format: 'grouped-replicates',
+      columnGroups: [
+        { name: 'Group A', from: 1, to: 2 },
+        { name: 'Group B', from: 3, to: 4 },
+      ],
+    };
+    expect(moveColumn(ds, 1, 'right')).toBe(ds);
   });
 
   it('pastes a block from Excel, growing the table to fit', () => {

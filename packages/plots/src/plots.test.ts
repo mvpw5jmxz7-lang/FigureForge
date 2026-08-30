@@ -25,6 +25,7 @@ import {
   tickCountForLength,
   tickLabelRuns,
   volcanoCategory,
+  volcanoCurveClassifier,
   xyMarks,
   type MarkOptions,
   type XyMarkOptions,
@@ -1061,6 +1062,142 @@ describe('volcano classification', () => {
 
   it('reads a p of exactly zero as maximally significant, not invalid', () => {
     expect(volcanoCategory(2, negLog10(Number.MIN_VALUE), thresholds)).toBe('up');
+  });
+
+  describe('FDR-based significance', () => {
+    const fdrThresholds = { ...thresholds, fdr: 0.05, significanceBy: 'fdr' as const };
+
+    it('classifies by the FDR cutoff instead of the p-value cutoff', () => {
+      // p is well above the p-value cutoff, but the q-value is under the FDR
+      // cutoff — FDR mode reads it as significant anyway.
+      expect(volcanoCategory(2, negLog10(0.5), fdrThresholds, 0.01)).toBe('up');
+      // p is well under the p-value cutoff, but the q-value fails FDR.
+      expect(volcanoCategory(2, negLog10(0.001), fdrThresholds, 0.2)).toBe('ns');
+    });
+
+    it('still gates on fold change in FDR mode', () => {
+      expect(volcanoCategory(0.5, negLog10(0.5), fdrThresholds, 0.01)).toBe('ns');
+    });
+
+    it('falls back to the p-value gate when no q-value is supplied', () => {
+      expect(volcanoCategory(2, negLog10(0.001), fdrThresholds)).toBe('up');
+      expect(volcanoCategory(2, negLog10(0.001), fdrThresholds, Number.NaN)).toBe('up');
+    });
+
+    it('falls back to the p-value gate when no fdr cutoff is set', () => {
+      const noCutoff = { ...thresholds, significanceBy: 'fdr' as const };
+      expect(volcanoCategory(2, negLog10(0.5), noCutoff, 0.01)).toBe('ns');
+    });
+
+    it('ignores a supplied q-value when significanceBy is absent/p-value', () => {
+      expect(volcanoCategory(2, negLog10(0.5), thresholds, 0.01)).toBe('ns');
+    });
+  });
+
+  describe('classification against a drawn SAM boundary', () => {
+    /*
+     * A stand-in for the real hyperbola: falling y as |x| grows away from the
+     * asymptote at |x| = 1. Deliberately supplied out of order, since the
+     * service emits whatever order its sweep produced.
+     */
+    const curve = {
+      up: [
+        { x: 3, y: 1 },
+        { x: 1, y: 5 },
+        { x: 2, y: 2 },
+      ],
+      down: [
+        { x: -2, y: 2 },
+        { x: -3, y: 1 },
+        { x: -1, y: 5 },
+      ],
+    };
+
+    it('calls a point above the boundary, and one below it not', () => {
+      const classify = volcanoCurveClassifier(curve);
+      expect(classify(2, 3)).toBe('up');
+      expect(classify(2, 1)).toBe('ns');
+      expect(classify(-2, 3)).toBe('down');
+      expect(classify(-2, 1)).toBe('ns');
+    });
+
+    it('interpolates between samples rather than stepping between them', () => {
+      const classify = volcanoCurveClassifier(curve);
+      // Midway from (1, 5) to (2, 2) the boundary is 3.5.
+      expect(classify(1.5, 3.6)).toBe('up');
+      expect(classify(1.5, 3.4)).toBe('ns');
+    });
+
+    it('ignores the fold-change cutoff that volcanoThresholds would apply', () => {
+      /*
+       * The reported defect, pinned directly: this point is comfortably above
+       * the boundary but its |fold change| is under the default cutoff of 1,
+       * so the threshold rule called it 'ns' while the drawn curve said
+       * otherwise. On a real export that disagreement covered 47 of 100
+       * proteins.
+       */
+      const tight = { up: [{ x: 0.1, y: 1 }, { x: 0.5, y: 0.5 }], down: [] };
+      expect(volcanoCurveClassifier(tight)(0.3, 4)).toBe('up');
+      expect(volcanoCategory(0.3, 4, { foldChange: 1, pValue: 0.05 })).toBe('ns');
+    });
+
+    it('calls a point sitting exactly on the boundary', () => {
+      // SAM's rule is inclusive and `cut` is set to the least extreme protein
+      // it calls, so that protein lies exactly on the curve. A bare `>=` on
+      // two independent floating-point evaluations drops it.
+      const classify = volcanoCurveClassifier(curve);
+      expect(classify(2, 2)).toBe('up');
+      expect(classify(2, 2 - 1e-9)).toBe('up');
+      // Inside the tolerance: this is the interpolation error of the drawn
+      // polyline, measured at 1.6e-5 on a real export.
+      expect(classify(2, 2 - 5e-5)).toBe('up');
+      // Outside it — a real, if small, distance below the boundary.
+      expect(classify(2, 2 - 1e-3)).toBe('ns');
+    });
+
+    it('never calls a point inside the vertical asymptote, however significant', () => {
+      // No standard error makes the boundary fold change this small, so the
+      // boundary does not exist here — withheld rather than extrapolated.
+      expect(volcanoCurveClassifier(curve)(0.5, 300)).toBe('ns');
+    });
+
+    it('clamps past the far end rather than reading it as not-significant', () => {
+      // The boundary flattens toward a floor; an enormous fold change with a
+      // decent p-value must not fall off the end into 'ns'.
+      const classify = volcanoCurveClassifier(curve);
+      expect(classify(50, 1.5)).toBe('up');
+      expect(classify(50, 0.5)).toBe('ns');
+    });
+
+    it('reads a non-finite input, or a zero fold change, as not-significant', () => {
+      const classify = volcanoCurveClassifier(curve);
+      expect(classify(Number.NaN, 3)).toBe('ns');
+      expect(classify(Number.POSITIVE_INFINITY, 3)).toBe('ns');
+      expect(classify(2, Number.NaN)).toBe('ns');
+      // Zero belongs to neither branch.
+      expect(classify(0, 300)).toBe('ns');
+    });
+
+    it('is unaffected by the order the samples arrive in', () => {
+      const sorted = {
+        up: [...curve.up].sort((a, b) => a.x - b.x),
+        down: [...curve.down].sort((a, b) => a.x - b.x),
+      };
+      const a = volcanoCurveClassifier(curve);
+      const b = volcanoCurveClassifier(sorted);
+      for (const x of [-4, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 4]) {
+        for (const y of [0.2, 1, 2.5, 6]) {
+          expect(a(x, y)).toBe(b(x, y));
+        }
+      }
+    });
+
+    it('reads an empty branch as not-significant on that side only', () => {
+      const oneSided = { up: curve.up, down: [] };
+      const classify = volcanoCurveClassifier(oneSided);
+      expect(classify(2, 3)).toBe('up');
+      expect(classify(-2, 3)).toBe('ns');
+    });
   });
 });
 

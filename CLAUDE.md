@@ -256,6 +256,41 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 19 (the volcano methods sentence; the asymmetry
+investigated and confirmed correct):** 833 TypeScript tests, 190 Python tests,
+`tsc --build --force`, `eslint .` and `ruff check` clean, 46-check acceptance
+run unaffected, and 15 browser checks in each of light and dark. **Measured**:
+every point of a drawn boundary inverts to one constant `cut` (spread
+2.1e-11), equal to the classification's own cutoff to 2.2e-16; and mirrored
+data yields `cutUp == -cutLow` exactly at both `s0 = 0.1` and `0.5`, which is
+what shows the asymmetry belongs to the data and not the code. See "Round 19"
+below.
+
+**Verified after round 18 (colouring by the drawn boundary):** 832 TypeScript
+tests, 184 Python tests unchanged, `tsc --build --force`, `eslint .` and
+`ruff check` clean, 46-check acceptance run unaffected, and 7 browser checks in
+each of light and dark against the reported data. **Measured**: the rule that
+shipped disagreed with the volcano test's own verdict on **47 of 100**
+proteins; classifying against the drawn curve agrees on 100 of 100, and on
+400 of 400 of a set where 380 are not significant. See "Round 18" below.
+
+**Verified after round 17 (the FDR boundary's sampling, proteomics import,
+menu order):** 821 TypeScript tests unchanged, 184 Python tests, `tsc --build
+--force`, `eslint .` and `ruff check` clean, 46-check acceptance run
+unaffected, and 11 browser checks in each of light and dark **against the
+reported data itself**. **Measured**: on `Data samples.xlsx` columns T–Z the
+boundary covered 0.6% of the panel's width and 4% of its height before, and
+100% / 95% after. See "Round 17" below.
+
+**Verified after round 16 (FDR curve clipping, re-run in place, the declared
+proteomics layout, hidden inapplicable options):** 821 TypeScript tests, 182
+Python tests unchanged, `tsc --build --force` and lint clean, 46-check
+acceptance run unaffected, and 27 browser checks in each of light and dark.
+**Measured**: on the sample data the unclipped FDR boundary ran to `x = -8.77`
+against an x domain starting at `-2.59`, 8 of its 20 points outside the panel.
+See "Round 16" below — and the note above it about rounds 11–15, which built
+the volcano test this extends and are **not** written up in this file.
+
 **Verified after phase 8 stage 3 (streaming the archive):** 789 TypeScript
 tests, 152 Python tests unchanged, typecheck and lint clean, 46-check
 acceptance run unaffected, a 21-check desktop smoke run and a 6-check browser
@@ -1199,10 +1234,11 @@ none of the three. Both spacings exported single-page at exactly
 XObjects.
 
 **Not done, deliberately:** the group blocks are still invisible in the import
-preview grid (only listed as muted text beside the count), and *First column:
-Row names* is still offered on a grouped table where it does nothing —
+preview grid (only listed as muted text beside the count). *First column: Row
+names* was also still offered on a grouped table where it does nothing —
 `inferFormat` short-circuits on declared blocks and `toSeries` hardcodes column 0
-as the row label.
+as the row label — **fixed in round 16**, which shows the toggle only for the
+xy layouts its own doc comment names.
 
 ### Round 6 — six reported bugs
 
@@ -3081,6 +3117,434 @@ to equal contents rather than pretending the bytes match.
 
 ---
 
+### Rounds 11–15 — the Perseus-style volcano test (not written up here)
+
+**A gap, stated rather than papered over.** Five rounds of reported work built
+the proteomics volcano surface this file's Round 16 section below extends:
+`services/api/figureforge/sam_volcano.py` (SAM/S0 permutation significance,
+two-sample and one-sample), `POST /volcano-test`, `PlotNode.volcanoSamCurve`/
+`volcanoThresholds.significanceBy`/`volcanoPValueIsNegLog10`, the Data tab's
+"Run volcano test (Perseus-style) →" action, and the real Prism-derived sample
+data in `apps/web/src/sample.ts`. They also fixed a live serialization bug in
+`main.py` — `_sanitize(x) or fallback` treats a legitimate `0.0` as falsy, so a
+maximally significant p or q came back as `1.0` across `/analyze`, `/pca`,
+`/umap` and `/volcano-test`; `_sanitize_or` is the fix and
+`services/api/tests/test_main_routes.py` is the first test in this repo to
+exercise a route over real HTTP rather than calling `compute_*` directly.
+
+Those rounds were not recorded here at the time. Rather than reconstruct their
+reasoning from memory — this file's standard is that every claim in it was
+checked against real output — read the code and its comments, which are
+complete. Round 16 below is written to the usual standard.
+
+### Round 16 — FDR curve clipping, re-run in place, a declared proteomics layout, hidden inapplicable options
+
+Four items from real use of the volcano test above. Two of the four were the
+"a control that visibly does nothing is a defect" class this file already
+names; one was a genuine geometry bug; one needed a new declared format.
+**No `SCHEMA_VERSION` bump** — one optional field and one widened enum.
+
+- **The FDR boundary drew outside the panel.** `renderVolcanoSamCurve` scaled
+  its points and filtered only on `Number.isFinite`, and a scale
+  *extrapolates* outside its domain rather than returning NaN. The curve is
+  genuinely unbounded: the server emits one point per protein at
+  `(cut·(s+s0), -log10(p_boundary))`, so as a protein's own `s` shrinks the
+  boundary p tends to zero and `-log10(p)` grows without limit — while the
+  axes are resolved from the *plotted points* only. **Measured on the sample
+  data**: the down branch ran to `x = -8.77` against an x domain starting at
+  `-2.59`, with **8 of its 20 points outside the axes**, drawn over the
+  neighbouring panel.
+  `packages/render/src/clip.ts` is the fix — `clipPolylineToRect`,
+  Liang–Barsky per segment, its own small DOM-free module on
+  `point-labels.ts`'s precedent. Three things it does deliberately:
+  - **Interpolates the crossing rather than dropping the vertex.** Dropping
+    would end the curve at whichever protein happened to be last inside,
+    visibly short of the axis it is claiming a boundary against. The reported
+    ask — "this may require interpolation between data points" — is exactly
+    right.
+  - **Returns several runs, not one.** A curve that leaves and re-enters must
+    not be joined: the join is a straight chord across the panel that the
+    computation never produced. The runs become sub-paths of a **single**
+    `<path>` per branch, so a `volcano-sam-curve` role count cannot start
+    depending on the data.
+  - `renderVolcanoThresholds` got the same bounds check in the same pass — a
+    fold-change cutoff wider than the data drew two straight lines beside the
+    panel, the same extrapolation, the same "never mark a value the axis does
+    not show" rule a broken axis already follows.
+
+- **Re-running the test replaces its output instead of appending a second
+  copy.** `runSamVolcanoOn` always minted a new dataset id and always built a
+  new panel, so a second run left two panels answering one question, differing
+  only in parameters a reader cannot see. `Dataset.derivedFrom?: {datasetId,
+  kind: 'volcano-test'}` is the link — **stored, not re-derived from the
+  generated name**, which is editable in the dataset list; the same discipline
+  `analysisInputHash` and `scaleBarWidthMm` are each held to, and the same
+  "replace, don't accumulate" stance `replaceAnalysisForPlot` already takes.
+  - The derived dataset **keeps its id**, which is what makes this a
+    replacement rather than a swap: every plot already pointing at it keeps
+    pointing at it, so the panel does not move and the author's
+    `volcanoLabels`/`pointLabelOffsets` survive — they are keyed on label
+    text, and the same proteins come back.
+  - **No `applyAutoLayout`, no `relabelPanels` on the replace path.** Nothing
+    was added, and re-laying out would shuffle the page as a side effect of
+    re-running a test.
+  - A previous run whose panel the author *deleted* still overwrites the
+    dataset and rebuilds one panel, so a re-run recovers rather than appearing
+    to do nothing. The confirmation says which of the two happened, or the
+    absence of a new panel reads as a run that failed silently.
+  - **Deliberately not extended to PCA/UMAP**, which still append: neither was
+    reported, and changing them here is behaviour nobody asked about.
+
+- **A declared `'proteomics'` layout, because nothing in the numbers can say
+  it.** The button had been gated structurally (`'matrix' || 'replicate'`),
+  which put it — enabled — beside `Cell viability`, a 4×4 dose-response table.
+  There is no cell-level signal separating a proteomics intensity matrix from
+  any other table of replicate measurements, so this is exactly the situation
+  `'contingency'` is already in relative to `'replicate'`: identical shape,
+  separate member, because the numbers mean something different and a
+  different set of tests applies. Its rows are *features*; comparing one
+  protein against another is not a question anyone is asking, and its own
+  comparison runs down the columns.
+  Never auto-inferred (no `inferFormat` branch, and a test pins that);
+  `toSeries` shares `'replicate'`'s case arm, since the generic reading really
+  is identical; `defaultPlotTypeFor` needed **no change at all**, because
+  `'replicate'` already falls to the `default` arm it should share. The Stats
+  tab refuses it outright, the same stance as `matrix`/`nested`/`differential`.
+  The sample document's intensity table declares it, so the button is still in
+  front of a new user on first launch — Round 14's actual goal — while no
+  longer appearing on the two unrelated tables beside it.
+
+- **Inapplicable options are hidden, not shown-and-disabled.** The user chose
+  hiding over an explanation in its place, and `typesFor` had already
+  established hiding as this Inspector's pattern for plot types.
+  - `showPointsRelevant` excludes `volcano`, `scatter` and `histogram` on top
+    of `heatmap`/`survival`. **Verified against the renderer, not assumed**:
+    `computePlotGeometry`'s volcano branch hardcodes `showPoints: true`, its
+    scatter/line branch forces it true for a scatter, and its histogram branch
+    never reads the field at all — three plot types where the checkbox did
+    nothing whatever.
+  - The **Second y axis** section is hidden with its heading, not left as a
+    header over an explanation of why there is no control.
+  - Four "why this is unavailable" hints are gone, and `typesFor` no longer
+    returns a `reason` at all. The hints that *describe an applicable control*
+    stay — survival's censor/CI note, the line error-display note, the
+    gap-fraction note.
+  - The **Stats tab** narrows the Test dropdown to what can actually run: only
+    the correlation family on a numeric-x plot, and only when the series
+    carries the paired x it consumes; nothing at all for
+    `nested`/`differential`/`matrix`/`proteomics` or a horizontal categorical
+    plot, where the Test/Correction/Run controls are hidden entirely.
+    `correlationPossible` is split out of `xyCorrelation` because the dropdown
+    has to decide what to offer *before* a test is chosen, and deciding that
+    from a predicate depending on the choice is circular.
+    The `counts` and `survival` echoes that corrected `test` are replaced by
+    **one** guard asking whether the selection is still in the offered list —
+    narrowing it further would have wanted a third echo, and three mechanisms
+    maintaining one invariant is how they come to disagree.
+  - **One deliberate exception to "say nothing":** where no test applies, the
+    single line saying why is kept. That is the tab's own state rather than a
+    missing option, and an entirely blank Analysis tab reads as broken.
+  - **"Row names in column 1" is now shown only for the xy layouts**, which is
+    exactly what `Dataset.hasRowNames`'s own doc comment has always said it is
+    meaningful for. This closes the gap round 5 stage 4 recorded as known.
+
+Driven in a real browser, light **and** dark, **27 checks each**: the volcano
+button absent on both unrelated replicate tables and present on the declared
+proteomics one; a first run adding exactly one dataset and one panel; a second
+run adding **neither**, reporting "Updated the existing … table and panel in
+place", with the panel count and lettering unmoved; the SAM curve's every
+drawn coordinate inside `[0, 69] × [0, 21]` mm with the down branch ending
+exactly on `x = 0` — the interpolated boundary, against the 8 out-of-panel
+points measured above; the volcano Inspector showing `Thresholds`/`Colours`/
+`Labels` and no "Show replicate points" or Second y axis; the Stats tab
+offering no test controls for the differential table while still saying why,
+and the full measurement list (Welch, Student, paired, Mann-Whitney, ANOVA)
+still offered on the categorical panel. No console errors in either theme.
+
+**Verified:** 821 TypeScript tests (807 + 14 new: a `clip.test.ts` suite
+covering interpolation at each edge, the leave-and-re-enter two-run case and
+the degenerate ones, two `continuous-axis.test.ts` cases for the clipped curve
+and the out-of-domain fold-change line, and `doc-model.test.ts` round-trip /
+`toSeries`-equivalence / never-inferred / `defaultPlotTypeFor` cases for the
+new format and field), 182 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and lint clean, 46-check acceptance run
+unaffected.
+
+**Not done, deliberately:** PCA and UMAP still append a new dataset and panel
+on every run — the `derivedFrom` mechanism is general enough to cover them and
+is deliberately not wired in, since neither was reported. The volcano test is
+still offered only on a two-group or one-sample column split chosen by hand;
+nothing reads sample names to suggest one.
+
+### Round 17 — the FDR boundary was sampled too narrowly to see
+
+Reported as "no dashed lines at all" after Run volcano test, on
+`reference-and-test-files/Data samples.xlsx` columns T–Z (100 proteins,
+3 control vs 3 treatment). Reproduced against that exact data through the live
+endpoint before anything was changed, which is what kept the fix off the wrong
+file:
+
+| | x span | y span |
+|---|---|---|
+| the plot's own window | −2.32 … 4.09 | 0 … 6.19 |
+| **the boundary as it shipped** | **0.131 … 0.167** | **0.699 … 0.961** |
+| after this round | −82.3 … 87.9 | 0.31 … 11.6 |
+
+The boundary covered **0.6% of the panel's width and 4% of its height**,
+pressed against the axes as a sub-millimetre dash. On screen that is no
+boundary at all.
+
+- **Round 16's clipping was innocent, and checking that first mattered.** All
+  100 of the old curve's points were already *inside* the window, so clipping
+  removed nothing here — the curve had been this small on this data all along.
+  Two further checks ruled out the other suspects: a fresh import and a re-run
+  both drew the curve correctly, and the boundary was confirmed *correct*
+  (110 points agreeing with the reported categories, 0 disagreeing). The defect
+  was never in the maths or the drawing; it was in where the maths was sampled.
+- **The cause: `curve_points` evaluated the boundary once per protein, at that
+  protein's own standard error.** Those 100 standard errors spanned only
+  `s ∈ [0.064, 0.109]`, so the sampled points covered a correspondingly tiny
+  slice of a boundary that is defined for every `s > 0`. Whether the curve is
+  visible depended on how much the experiment's standard errors happened to
+  vary — which is not a property of the boundary at all.
+- **The fix sweeps `s` over a wide geometric grid** (`CURVE_SAMPLE_POINTS`,
+  `CURVE_S_SPAN` in `sam_volcano.py`), same closed form, same `cut`/`s0`/`df`.
+  Geometric rather than linear because the curvature is concentrated near the
+  vertical asymptote `x = cut·s0`, which is exactly where the points need to be
+  dense; and wide (×/÷1000 past the observed range) because the boundary has to
+  reach the edges of an axis window this module never sees. This is the *same
+  computation evaluated at more places*, not a hyperbola fitted to it — a
+  distinction the module docstring's item 6 now makes explicitly, since its
+  previous text argued for the per-protein rule as a deliberate choice.
+  Round 16's `clipPolylineToRect` then does exactly the right thing with the
+  result: trims the sweep to the panel, interpolating the crossings.
+- **Both test designs are fixed at once** — `curve_points` lives inside
+  `_resolve_significance`, which the two-sample and one-sample paths already
+  share.
+- **A table with no within-group variance has no observed scale to bracket**,
+  so `geomspace` has no positive bounds. The sweep falls back to `s0`'s own
+  scale rather than being abandoned: the asymptote `cut·s0` is still well
+  defined there. That is the degenerate table `test_main_routes.py` already
+  posts.
+
+Two import-surface items reported alongside it:
+
+- **A proteomics import adds a table and no panel.** A proteomics intensity
+  table is the input to a test, not a figure — drawn as its layout would have
+  it, a real one is hundreds of bar-dot series over protein rows. The sample
+  document already left its own proteomics table unattached for this reason, so
+  this makes a real import behave the way the sample already said was right.
+  The primary button reads **"Import data table"** for that layout rather than
+  "Import as new panel", which would be a control describing something it does
+  not do; and the import reports what it did and points at "Run volcano test
+  (Perseus-style) →", because an import that visibly changes nothing on the
+  page otherwise reads as one that failed. Scoped to `'proteomics'` — a
+  `'matrix'` still opens as a heatmap, which genuinely is a figure.
+- **The layout menu lists Proteomics directly under "Feature, log2 fold change,
+  p-value."** The two are neighbours in meaning: one is the table a volcano
+  test runs *on*, the other the table it produces. A pure reorder of
+  `DATA_FORMATS` — the `<select>` renders in array order and the only other
+  reader is a `.find` by id.
+
+Driven in a real browser against the reported data, light **and** dark,
+**11 checks each**: Proteomics listed immediately after the differential
+layout; the button reading "Import data table"; the import leaving the panel
+count at 3 and saying so; the run adding one panel with both boundary branches
+drawn; and the boundary now spanning **100% of the panel's width and 95% of its
+height** (69.0 × 21.0 mm plot) with every coordinate still inside it — against
+the 0.6% / 4% measured before. Re-running still replaced in place. No console
+errors.
+
+**Verified:** 821 TypeScript tests unchanged (nothing here touches
+`packages/` — the wire shape is still `[x, y]` pairs, just more of them and
+better placed), 184 Python tests (182 + 2 new: the boundary must span past the
+plotted data on both axes, and the zero-variance fallback must stay finite),
+`tsc --build --force`, `eslint .` and `ruff check` clean, 46-check acceptance
+run unaffected. The new span test was **confirmed to fail against the old
+sampling** on its own fixture (curve x max 0.155 against data reaching 5.391)
+rather than assumed to be a regression guard.
+
+**Not done, deliberately:** the straight fold-change and p-value lines stay
+suppressed while a SAM curve is present. That has a stated reason — the curve
+encodes both cutoffs jointly and its own fold-change asymptote need not match
+`thresholds.foldChange` — and with the boundary now visible the case for
+bringing them back goes away.
+
+### Round 18 — colour the volcano by the boundary that is actually drawn
+
+Two reports, one defect seen from two sides: the points were not coloured by
+the curve, and the Inspector's cutoff fields "did not do anything".
+
+- **The drawn line and the colours came from different rules.** The boundary
+  was the SAM permutation curve; the colours were
+  `volcanoCategory(x, y, thresholds, qValue)`, which asks `q <= thresholds.fdr`
+  **and** `|log2FC| >= thresholds.foldChange`. `runSamVolcanoOn` leaves that
+  fold-change cutoff at its default of 1 and the SAM boundary has no such gate,
+  so the figure said two different things at once. **Measured against the
+  service's own per-protein verdict on the reported data (100 proteins): the
+  shipped rule disagreed on 47 of them.**
+- **Classifying against the curve is exact, not a proxy — and that is why this
+  is the right fix rather than a convenient one.** For a protein with effect
+  `fc` and standard error `s`, SAM calls it up when `fc >= cut·(s+s0)`. The
+  curve is `X(s) = cut·(s+s0)`, `Y(s) = -log10(2·sf(X(s)/s, df))`, with `X`
+  strictly increasing in `s` and `Y` strictly decreasing; writing `s*` for the
+  `s` at which `X(s*) = fc`, `fc >= cut·(s+s0)` ⟺ `s <= s*` ⟺ `fc/s >= fc/s*`
+  ⟺ `y >= Y(s*)`. Every step an equivalence. **"Above the drawn curve" *is*
+  the test's decision.** Verified rather than left as algebra: the new rule
+  agrees with the service on **100 of 100** proteins of the reported export and
+  **400 of 400** of a mostly-not-significant synthetic set — the discriminating
+  case, where 380 are `ns`.
+- **`volcanoCurveClassifier` (`packages/plots/src/volcano.ts`) is a factory,
+  not a per-point function.** The branches must be sorted before they can be
+  interpolated and a real gene list is 10–20k points, so sorting inside the
+  callback would be `O(n·m log m)`. Both branches are normalised to ascending
+  `|x|` — the down branch's x negated — so one lookup path serves both rather
+  than two mirrored ones that can drift. Inside the vertical asymptote it
+  returns `'ns'`: no standard error makes the boundary fold change that small,
+  so the boundary genuinely does not exist there and is withheld rather than
+  extrapolated. Past the far end it clamps to the curve's floor, because
+  reading an enormous fold change as *not* significant would be the wrong way
+  to fail.
+- **`volcanoCategory` is untouched**, and still serves every volcano built from
+  an ordinary `differential` import with its own q-value column. The one
+  `classify` call site in `render-document.ts` picks between them, so the
+  vector path and the rasterised point-cloud path cannot diverge.
+- **Two compounding reasons a bare `>=` fails at the boundary, both measured.**
+  SAM's rule is inclusive and `cut` is *set to* the `d` of the least extreme
+  protein it calls, so that protein sits exactly on the curve. And the boundary
+  reaching the classifier is a sampled polyline whose chords lie above the
+  convex curve they approximate, so interpolation systematically over-states it
+  and under-calls significance. At 256 samples the two boundary-defining
+  proteins missed by 3.1e-4 and 1.9e-4 — enough to grey them out.
+  `CURVE_SAMPLE_POINTS` is now **1024**, which brings the worst interpolation
+  error to **1.6e-5**; `BOUNDARY_EPSILON` is **1e-4**, set from the science
+  rather than from that measurement so it does not quietly depend on one
+  dataset: it is a factor of 1.00023 in p, a 0.02% difference, and it still
+  clears the residual error six times over. A first attempt at concentrating
+  samples over the *observed* `s` range made this worse, not better — a
+  protein's boundary is evaluated at `s* = fc/cut - s0`, which ranges across
+  the whole sweep, not just the band the experiment produced.
+- **The Inspector stops offering cutoffs the boundary overrides.** With a SAM
+  curve present, `|log2 fold change| ≥`, `Classify significance by` and the
+  `FDR ≤` / `p-value ≤` field are hidden and replaced by a line saying the
+  boundary decides and naming the FDR the test reached. Round 16's
+  "a control that visibly does nothing is a defect" rule, sharpened: one of
+  these was not merely inert but quietly wrong, since setting a fold-change
+  gate here made the figure disagree with its own test.
+  `volcanoThresholds` is still written by the run — `fdr` is the record of what
+  was achieved, and is what the new line reports.
+
+Driven in a real browser on the reported data, light **and** dark, **7 checks
+each**: 100 proteins drawn, **100 coloured and 0 grey with 0 mismatches**
+against the boundary read out of the DOM — every coloured point above the drawn
+line and every grey one below, measured rather than eyeballed — and the
+Inspector offering none of the three cutoffs while still explaining what
+decides. No console errors. Before this round the same measurement found 2
+mismatches and 2 proteins greyed against their own test.
+
+**Verified:** 832 TypeScript tests (821 + 11 new: a `volcanoCurveClassifier`
+suite in `plots.test.ts` covering branch selection, interpolation, the
+exactly-on-boundary case, the asymptote and far-end rules, sample order and an
+empty branch; plus two `continuous-axis.test.ts` cases pinning the reported
+regression in both directions — points above the curve but under the
+fold-change cutoff must colour, and a point clearing the cutoff but under the
+curve must not), 184 Python tests unchanged, `tsc --build --force`, `eslint .`
+and `ruff check` clean, 46-check acceptance run unaffected.
+
+**Not done, deliberately:** the stored curve grew from 256 to 1024 samples per
+branch, which is ~4k numbers in `document.json` per volcano plot. The
+alternative — storing `cut`/`s0`/`df` and evaluating the boundary analytically
+in TypeScript — would need an incomplete-beta implementation to own and test,
+and would make the colours disagree with the drawn polyline by exactly the
+interpolation error this round is removing. One boundary, drawn and used, is
+the property worth keeping.
+
+### Round 19 — a methods sentence for the volcano test, and the asymmetry answered
+
+Two queries. One was a feature; the other turned out to be a question about
+whether the code was right, and the answer was that it is.
+
+#### The asymmetric boundary is correct — three checks, not an assurance
+
+Reported: at `s0 = 0.5` the two branches sit at visibly different distances
+from zero. **They should, and the drawing is exact.** Established before
+anything was written, because "that's expected" is worthless unasserted:
+
+- **Every drawn point inverts to one constant `cut`.** Solving each emitted
+  `(X, Y)` back through the closed form — `t = t.isf(10⁻ʸ/2, df)`,
+  `s = |X|/t`, `cut = X/(s + s0)` — gives a single value across all 1024
+  points of a branch (spread **2.1e-11**), equal to the cutoff the
+  classification uses to **2.2e-16**. No interpolation or calculation error.
+- **Mirrored data gives exactly opposite cutoffs.** On a set built so every
+  protein has an exact opposite, `cutUp == -cutLow` to floating-point at both
+  `s0 = 0.1` and `0.5`, with equal up and down counts. An implementation bug
+  could not be symmetric here and asymmetric elsewhere — this is the check
+  that separates "the data is lopsided" from "the code is".
+- **The reported data is genuinely lopsided** — 63 up against 37 down.
+
+Why `s0` magnifies it: each branch's asymptote sits at `cut · s0`, so the gap
+between the asymptotes scales linearly with `s0`. Measured: +0.081/−0.076 at
+`s0 = 0.1` (invisible) against +0.265/−0.532 at `0.5` (a factor of two).
+Nothing changes but the magnification.
+
+This is the published SAM rule: `cutup` and `cutlow` are found by walking
+inward from each tail independently, each judged against its own side of the
+permutation null, so they coincide only when the data is symmetric. **A
+symmetric-boundary option was offered and declined** — forcing symmetry would
+change the statistic, not the picture. Both checks above are now regression
+tests (`TestBoundarySymmetry`, `TestCurveFidelity`), so a future change to
+`cutoffs_at` cannot quietly break the symmetric case while leaving the
+asymmetric one looking plausible.
+
+#### The methods sentence
+
+- **Composed in Python, beside the numbers**, as `stats/methods.py` already is
+  for every other test — `sam_methods_sentence` in `sam_volcano.py`. The
+  alternative, re-deriving the wording client-side from stored parameters, is
+  how a figure and its own methods text come to disagree.
+- **It reports the permutation scheme that actually ran**, not the default:
+  `MAX_EXHAUSTIVE_PERMUTATIONS` decides at run time, so claiming an exhaustive
+  enumeration that never happened would be an unverifiable statement in
+  someone's methods section. A test asserts the Monte-Carlo wording appears
+  only above that bound.
+- **It states both cutoffs**, which is what makes the asymmetry answerable
+  from the figure rather than from this file.
+- `SamVolcanoOutcome`/`VolcanoTestResponse` gained `cutUp`/`cutLow`,
+  `permutations`/`permutationsExhaustive` and `methodsSentence`.
+- **`PlotNode.volcanoTest`** stores the parameters *and* the sentence side by
+  side — the shape `StatResult` already has (`comparisons` beside
+  `methodsSentence`). One fact in two forms, not two derivations: the sentence
+  is composed once by the service and never recomputed. Optional, so
+  `SCHEMA_VERSION` stays 1. Written in the same `updateNode` patch as
+  `volcanoSamCurve`, so a re-run replaces both together and a figure can never
+  carry a methods sentence for a boundary it no longer draws.
+- **Shown in the Stats tab**, where every other methods sentence lives, in the
+  same `<details>` + Copy shape. It completes the "there is no test to run on
+  this table here" notice rather than contradicting it: nothing to run *here*,
+  and this is what was run. **Deliberately not made an `Analysis`** — that
+  shape is built around `Comparison[]`, an omnibus and an `inputHash` over
+  series values, none of which a volcano test produces, and the analyses list
+  would render an empty comparison table.
+- The Inspector gains one line naming both cutoffs and why they differ, so the
+  asymmetry is answered where it is seen and not only in the methods text.
+
+Driven in a real browser on the reported data at `s0 = 0.5`, light **and**
+dark, **15 checks each**: the Stats tab showing the block with S0 and both FDR
+figures, exactly one methods disclosure with a working Copy button, the
+sentence naming `S0 = 0.5`, the target FDR, Tusher, both cutoffs and the
+relabelling scheme; the Inspector reading `d ≥ 0.531 and d ≤ -1.064`; and a
+re-run at `s0 = 0.1` replacing the sentence rather than adding a second. No
+console errors.
+
+**Verified:** 833 TypeScript tests (832 + 1: a `volcanoTest` round-trip
+asserting *both* cutoffs survive, since a schema keeping one magnitude would
+quietly lose half the record), 190 Python tests (184 + 6: the sentence's
+contents, the permutation-scheme claim, the one-sample wording, the two
+symmetry controls and the curve-fidelity inversion), `tsc --build --force`,
+`eslint .` and `ruff check` clean, 46-check acceptance run unaffected.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -3140,7 +3604,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), and stage 5 by one more again (`umap`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

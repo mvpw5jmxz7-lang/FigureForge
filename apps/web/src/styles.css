@@ -282,7 +282,7 @@ h4 { margin: 0 0 6px; font-size: 13px; }
   margin-bottom: 8px;
 }
 
-.preview { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; }
+.preview, .sam-volcano-form { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; }
 .preview-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
 .preview table, .results-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; }
 .preview th, .preview td, .results-table th, .results-table td {

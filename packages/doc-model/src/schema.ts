@@ -170,13 +170,41 @@ const plotSchema = z.object({
   barGapFraction: finite.min(0).max(0.9).optional(),
   groupGapFraction: finite.min(0).max(0.9).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
-  volcanoThresholds: z.object({ foldChange: nonNeg, pValue: finite.gt(0).max(1) }).optional(),
+  volcanoThresholds: z
+    .object({
+      foldChange: nonNeg,
+      pValue: finite.gt(0).max(1),
+      fdr: finite.gt(0).max(1).optional(),
+      significanceBy: z.enum(['p-value', 'fdr']).optional(),
+    })
+    .optional(),
   volcanoColors: z
     .object({ down: z.string(), ns: z.string(), up: z.string() })
     .optional(),
   volcanoThresholdLines: z.enum(['show', 'hide']).optional(),
   // Deliberately no `.max()` — see the field's own doc comment in nodes.ts.
   volcanoLabels: z.array(z.string()).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  volcanoPValueIsNegLog10: z.boolean().optional(),
+  volcanoSamCurve: z
+    .object({ up: z.array(pointSchema), down: z.array(pointSchema) })
+    .optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  volcanoTest: z
+    .object({
+      s0: finite,
+      fdrPercent: finite,
+      fdrAchieved: finite,
+      deltaUsed: finite,
+      cutUp: finite,
+      cutLow: finite,
+      mode: z.enum(['two-sample', 'one-sample']),
+      nTested: z.number().int().min(0),
+      nUp: z.number().int().min(0),
+      nDown: z.number().int().min(0),
+      methodsSentence: z.string(),
+    })
+    .optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   pointLabelOffsets: z.record(z.string(), pointSchema).optional(),
   pointLabelSizePt: finite.positive().optional(),
@@ -328,6 +356,7 @@ const datasetSchema = z.object({
     'survival',
     'pca',
     'umap',
+    'proteomics',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
@@ -339,6 +368,9 @@ const datasetSchema = z.object({
     .array(z.object({ name: z.string(), from: z.number().int().min(0), to: z.number().int().min(0) }))
     .optional(),
   editedAt: z.string().optional(),
+  derivedFrom: z
+    .object({ datasetId: z.string(), kind: z.literal('volcano-test') })
+    .optional(),
   sourcePath: z.string().nullable(),
   sourceFilename: z.string().nullable(),
   importedAt: z.string(),

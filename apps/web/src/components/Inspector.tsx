@@ -33,6 +33,7 @@ import {
   ungroup,
   updateNode,
   type CalibrationSource,
+  type Dataset,
   type FigureDocument,
   type AxisSpec,
   type FigureNode,
@@ -100,32 +101,19 @@ function typesFor(
   series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[],
   hasMatrix: boolean,
   hasSurvival: boolean,
-): {
-  offered: typeof OFFERED_PLOT_TYPES;
-  reason: string | null;
-} {
+): typeof OFFERED_PLOT_TYPES {
   const hasX = series.length > 0 && series.every((s) => s.x !== undefined && s.x.length > 0);
   const single = series.length === 1;
   const hasLabels = single && (series[0]?.pointLabels?.length ?? 0) > 0;
 
-  const blocked: string[] = [];
-  if (!hasX) blocked.push('Scatter and line need a dataset with an x column');
-  if (!single) blocked.push('Histogram needs a single group');
-  if (!hasLabels) blocked.push('Volcano needs a dataset with a label, fold change and p-value per row');
-  if (!hasMatrix) blocked.push('Heatmap needs a matrix dataset');
-  if (!hasSurvival) blocked.push('Survival needs a time/event dataset');
-
-  return {
-    offered: OFFERED_PLOT_TYPES.filter((t) => {
-      if (t.id === 'scatter' || t.id === 'line') return hasX;
-      if (t.id === 'histogram') return single;
-      if (t.id === 'volcano') return hasLabels;
-      if (t.id === 'heatmap') return hasMatrix;
-      if (t.id === 'survival') return hasSurvival;
-      return true;
-    }),
-    reason: blocked.length > 0 ? `${blocked.join('. ')}.` : null,
-  };
+  return OFFERED_PLOT_TYPES.filter((t) => {
+    if (t.id === 'scatter' || t.id === 'line') return hasX;
+    if (t.id === 'histogram') return single;
+    if (t.id === 'volcano') return hasLabels;
+    if (t.id === 'heatmap') return hasMatrix;
+    if (t.id === 'survival') return hasSurvival;
+    return true;
+  });
 }
 
 /** Types that draw the whole distribution, so a centre and error bar say nothing extra. */
@@ -146,12 +134,14 @@ const VOLCANO_CATEGORY_LABELS: Record<VolcanoCategory, string> = {
  */
 function VolcanoColorControls({
   node,
+  dataset,
   theme,
   setPlot,
   picking,
   onLabelPickNodeChange,
 }: {
   node: PlotNode;
+  dataset: Dataset | undefined;
   theme: Theme;
   setPlot: (label: string, patch: Partial<PlotNode>) => void;
   picking: boolean;
@@ -160,55 +150,154 @@ function VolcanoColorControls({
   const thresholds = node.volcanoThresholds ?? DEFAULT_VOLCANO_THRESHOLDS;
   const colors = { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors };
   const conflicts = findColorConflicts(Object.values(colors));
+  // A 4th column is an FDR/q-value per point — offering the FDR control on a
+  // 3-column table would be a control that visibly does nothing, since
+  // `volcanoCategory` only reads it once a q-value actually exists.
+  const hasFdrColumn = (dataset?.columns.length ?? 0) >= 4;
+  const significanceBy = thresholds.significanceBy ?? 'p-value';
+  /*
+   * A drawn permutation boundary decides significance on its own, so the
+   * fixed cutoffs below are not merely unused — offering them would invite an
+   * author to set a fold-change gate the boundary does not have and quietly
+   * disagree with their own test. Hidden rather than shown-and-ignored, the
+   * same rule the rest of this Inspector follows.
+   */
+  const cutoffsApply = !node.volcanoSamCurve;
 
   return (
     <>
       <h4>Thresholds</h4>
-      <label className="field">
-        |log2 fold change| ≥
-        <input
-          type="number"
-          min={0}
-          step={0.1}
-          value={thresholds.foldChange}
-          onChange={(e) => {
-            const foldChange = Number(e.target.value);
-            if (Number.isFinite(foldChange) && foldChange >= 0) {
-              setPlot('Change fold-change cutoff', {
-                volcanoThresholds: { ...thresholds, foldChange },
-              });
+      {cutoffsApply && (
+        <label className="field">
+          |log2 fold change| ≥
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={thresholds.foldChange}
+            onChange={(e) => {
+              const foldChange = Number(e.target.value);
+              if (Number.isFinite(foldChange) && foldChange >= 0) {
+                setPlot('Change fold-change cutoff', {
+                  volcanoThresholds: { ...thresholds, foldChange },
+                });
+              }
+            }}
+          />
+        </label>
+      )}
+      {cutoffsApply && hasFdrColumn && (
+        <label className="field">
+          Classify significance by
+          <select
+            value={significanceBy}
+            onChange={(e) =>
+              setPlot('Change significance basis', {
+                volcanoThresholds: {
+                  ...thresholds,
+                  significanceBy: e.target.value as 'p-value' | 'fdr',
+                },
+              })
             }
-          }}
-        />
-      </label>
-      <label className="field">
-        p-value ≤
-        <input
-          type="number"
-          min={0}
-          max={1}
-          step={0.01}
-          value={thresholds.pValue}
-          onChange={(e) => {
-            const pValue = Number(e.target.value);
-            if (Number.isFinite(pValue) && pValue > 0 && pValue <= 1) {
-              setPlot('Change p-value cutoff', { volcanoThresholds: { ...thresholds, pValue } });
-            }
-          }}
-        />
-      </label>
+          >
+            <option value="p-value">p-value</option>
+            <option value="fdr">FDR (q-value)</option>
+          </select>
+        </label>
+      )}
+      {!cutoffsApply ? null : significanceBy === 'fdr' ? (
+        <label className="field">
+          FDR ≤
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={thresholds.fdr ?? ''}
+            onChange={(e) => {
+              const fdr = Number(e.target.value);
+              if (Number.isFinite(fdr) && fdr > 0 && fdr <= 1) {
+                setPlot('Change FDR cutoff', { volcanoThresholds: { ...thresholds, fdr } });
+              }
+            }}
+          />
+        </label>
+      ) : (
+        <label className="field">
+          p-value ≤
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={thresholds.pValue}
+            onChange={(e) => {
+              const pValue = Number(e.target.value);
+              if (Number.isFinite(pValue) && pValue > 0 && pValue <= 1) {
+                setPlot('Change p-value cutoff', { volcanoThresholds: { ...thresholds, pValue } });
+              }
+            }}
+          />
+        </label>
+      )}
       <label className="check">
         <input
           type="checkbox"
-          checked={node.volcanoThresholdLines !== 'hide'}
+          checked={node.volcanoPValueIsNegLog10 ?? false}
           onChange={(e) =>
-            setPlot('Change threshold lines', {
-              volcanoThresholdLines: e.target.checked ? 'show' : 'hide',
+            setPlot('Change p-value representation', {
+              volcanoPValueIsNegLog10: e.target.checked,
             })
           }
         />
-        Show threshold lines
+        P-values are already −log10 transformed
       </label>
+      {node.volcanoSamCurve ? (
+        <>
+          <p className="hint">
+            Significance is the dashed permutation boundary itself — a point is called up or
+            down exactly when it sits above the curve
+            {thresholds.fdr !== undefined
+              ? `, which the test resolved at ${(thresholds.fdr * 100).toFixed(1)}% FDR`
+              : ''}
+            . That is why there are no fold-change or p-value cutoffs here: the boundary
+            already carries both, and a separate fold-change gate would disagree with your own
+            test. Re-run the volcano test on the source data to change it.
+          </p>
+          {/* Answered where it is seen, not only in the methods text: the two
+              branches sitting at different distances from zero is the first
+              thing a reader notices at a larger S0. */}
+          {node.volcanoTest && (
+            <p className="hint">
+              The two branches need not mirror each other, and here they sit at d ≥{' '}
+              {node.volcanoTest.cutUp.toFixed(3)} and d ≤ {node.volcanoTest.cutLow.toFixed(3)}.
+              SAM resolves each tail against its own side of the permutation null, so the
+              cutoffs are independent and match only when the data itself is symmetric. Each
+              branch's asymptote sits at cut × S0, so raising S0 magnifies the difference
+              without changing it. The full statement is in the Stats tab's methods sentence.
+            </p>
+          )}
+        </>
+      ) : (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={node.volcanoThresholdLines !== 'hide'}
+            onChange={(e) =>
+              setPlot('Change threshold lines', {
+                volcanoThresholdLines: e.target.checked ? 'show' : 'hide',
+              })
+            }
+          />
+          Show threshold lines
+        </label>
+      )}
+      {!node.volcanoSamCurve && (
+        <p className="hint">
+          For Perseus's own S0/FDR permutation boundary — not just a q-value column — paste your
+          raw replicate matrix and use "Run volcano test (Perseus-style) →" in the Data tab.
+        </p>
+      )}
 
       <h4>Colours</h4>
       <div className="swatches">
@@ -727,11 +816,7 @@ function PlotFields({
   const dataset = findDataset(doc, node.datasetId);
   const series = dataset ? toSeries(dataset) : [];
   const colors = paletteColors(node.palette, Math.max(1, series.length));
-  const { offered, reason } = typesFor(
-    series,
-    dataset?.format === 'matrix',
-    dataset?.format === 'survival',
-  );
+  const offered = typesFor(series, dataset?.format === 'matrix', dataset?.format === 'survival');
 
   /*
    * Whether a continuous plot has anything to summarise.
@@ -870,6 +955,35 @@ function PlotFields({
   const clipToRangeRelevant =
     node.plotType === 'scatter' || node.plotType === 'line' || node.plotType === 'volcano';
 
+  /*
+   * Whether `showPoints` is read at all, checked against the renderer rather
+   * than assumed. `computePlotGeometry`'s volcano branch hardcodes
+   * `showPoints: true`, its scatter/line branch forces it true for a scatter,
+   * and its histogram branch never reads the field — so on those three the
+   * checkbox was a control that visibly did nothing. Heatmap and survival
+   * never had it.
+   */
+  const showPointsRelevant =
+    node.plotType !== 'heatmap' &&
+    node.plotType !== 'survival' &&
+    node.plotType !== 'volcano' &&
+    node.plotType !== 'scatter' &&
+    node.plotType !== 'histogram';
+
+  /*
+   * Whether a second y axis is on offer. A cascade already spends the
+   * vertical axis on separation; a categorical plot's bands carry the reading
+   * rather than its values; a volcano is always exactly one series; and
+   * comparing survival arms against different probability scales would defeat
+   * the comparison. Composed once so the heading can be hidden with the
+   * control rather than left standing over nothing.
+   */
+  const secondAxisRelevant =
+    !hasCascadeOffset(node, series.length) &&
+    CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
+    node.plotType !== 'volcano' &&
+    node.plotType !== 'survival';
+
   return (
     <>
       <h4>Data</h4>
@@ -925,6 +1039,7 @@ function PlotFields({
       {node.plotType === 'volcano' ? (
         <VolcanoColorControls
           node={node}
+          dataset={dataset}
           theme={theme}
           setPlot={setPlot}
           picking={picking}
@@ -1059,19 +1174,9 @@ function PlotFields({
           ))}
         </select>
       </label>
-      {reason && <p className="hint">{reason}</p>}
 
-      {node.plotType === 'heatmap' ? (
-        <p className="hint">
-          A heatmap's cells are coloured by value, not summarised — there is no centre or error
-          bar to set here. See the colour scale controls above.
-        </p>
-      ) : node.plotType === 'survival' ? (
+      {node.plotType === 'heatmap' ? null : node.plotType === 'survival' ? (
         <>
-          <p className="hint">
-            A Kaplan–Meier curve is already a stepped estimate of survival probability, so there
-            is no centre or error bar to set here — see the confidence band toggle below.
-          </p>
           <label className="check">
             <input
               type="checkbox"
@@ -1094,19 +1199,9 @@ function PlotFields({
             clutter before they read as data, so the band is off by default.
           </p>
         </>
-      ) : DISTRIBUTION_TYPES.has(node.plotType) ? (
-        <p className="hint">
-          A {node.plotType} already shows the full distribution, so the centre and error
-          bars are not drawn. Switch to a bar or dot plot to set them.
-        </p>
-      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && !summarisable ? (
-        <p className="hint">
-          A {node.plotType} plots every observation against a numeric x axis.{' '}
-          {node.plotType === 'line'
-            ? 'This table measures each x once, so there is no spread at a point to summarise.'
-            : 'It shows the raw observations, so there is no group to summarise with a centre or error bar.'}
-        </p>
-      ) : (
+      ) : DISTRIBUTION_TYPES.has(node.plotType) ? null : CONTINUOUS_X_PLOT_TYPES.has(
+          node.plotType,
+        ) && !summarisable ? null : (
         <>
           <label className="field block">
             Error bars
@@ -1206,7 +1301,7 @@ function PlotFields({
         </>
       )}
 
-      {node.plotType !== 'heatmap' && node.plotType !== 'survival' && (
+      {showPointsRelevant && (
         <label className="check">
           <input
             type="checkbox"
@@ -1409,17 +1504,11 @@ function PlotFields({
         onChange={(patch, label) => setPlot(label, { x: { ...node.x, ...patch } })}
       />
 
-      <h4>Second y axis</h4>
-      {hasCascadeOffset(node, series.length) ? (
-        <p className="hint">
-          A cascade already spends the vertical axis on separation — comparing traces against
-          different probability scales while they are also offset for display would defeat the
-          point of either. Reduce the offset to 0 to use a second axis instead.
-        </p>
-      ) : CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
-      node.plotType !== 'volcano' &&
-      node.plotType !== 'survival' ? (
+      {/* Heading and control together: a section header standing over an
+          explanation of why there is no control is furniture. */}
+      {secondAxisRelevant && (
         <>
+          <h4>Second y axis</h4>
           <label className="check">
             <input
               type="checkbox"
@@ -1469,12 +1558,6 @@ function PlotFields({
             </>
           )}
         </>
-      ) : (
-        <p className="hint">
-          A second axis is offered on scatter and line plots only. Two bar series drawn
-          against different scales cannot be compared by length, which is the only thing a
-          bar chart is for.
-        </p>
       )}
     </>
   );
