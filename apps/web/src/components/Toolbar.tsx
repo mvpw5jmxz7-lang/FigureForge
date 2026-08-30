@@ -12,6 +12,7 @@ import {
   suggestGrid,
   templatesForPanelCount,
   findLayoutTemplate,
+  ungroup,
   type DisplayUnit,
   type FigureDocument,
   type NodeId,
@@ -77,6 +78,11 @@ export function Toolbar({
       ? doc.nodes[selectedIds[0]!]
       : null;
 
+  // Ungroup is offered only for a lone group — the same one-node gate
+  // `selectedImage` above uses for the scale bar button.
+  const selectedGroup =
+    selectedIds.length === 1 && doc.nodes[selectedIds[0]!]?.type === 'group' ? selectedIds[0]! : null;
+
   const insertFrame = (width: number, height: number): RectMm => {
     const origin = annotationOrigin(doc, selectedIds);
     return { ...origin, width, height };
@@ -134,6 +140,14 @@ export function Toolbar({
       const group = addGroup(draft, newId, selectedIds);
       if (group) onSelectionChange([group.id]);
     });
+
+  const ungroupSelection = (): void => {
+    if (!selectedGroup) return;
+    commit('Ungroup', (draft) => {
+      const members = ungroup(draft, selectedGroup);
+      if (members.length > 0) onSelectionChange(members);
+    });
+  };
 
   const panelCount = Object.values(doc.nodes).filter((n) => n.type === 'panel').length;
   const grid = suggestGrid(panelCount);
@@ -352,6 +366,17 @@ export function Toolbar({
           }
         >
           Group
+        </button>
+        <button
+          onClick={ungroupSelection}
+          disabled={selectedGroup === null}
+          title={
+            selectedGroup === null
+              ? 'Select a group first'
+              : 'Ungroup — members return to their own selection, keeping their page position'
+          }
+        >
+          Ungroup
         </button>
       </div>
 
