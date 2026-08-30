@@ -256,6 +256,15 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 20 (a montage tile that wouldn't move or resize):** 836
+TypeScript tests, 190 Python tests unchanged, `tsc --build --force`, `eslint .`
+clean, 46-check acceptance run unaffected. **Measured, not assumed**: driven
+live in a real browser before any fix was written, a plain click on any of
+four freshly-imported montage tiles selected and dragged the *whole panel*,
+symmetrically across all four positions — not a top-left-specific fault, as
+first reported, but the click-selects-the-container rule applying exactly as
+documented to every tile alike. See "Round 20" below.
+
 **Verified after round 19 (the volcano methods sentence; the asymmetry
 investigated and confirmed correct):** 833 TypeScript tests, 190 Python tests,
 `tsc --build --force`, `eslint .` and `ruff check` clean, 46-check acceptance
@@ -3542,6 +3551,86 @@ quietly lose half the record), 190 Python tests (184 + 6: the sentence's
 contents, the permutation-scheme claim, the one-sample wording, the two
 symmetry controls and the curve-fidelity inversion), `tsc --build --force`,
 `eslint .` and `ruff check` clean, 46-check acceptance run unaffected.
+
+---
+
+### Round 20 — a montage tile that wouldn't move or resize
+
+Reported: in a panel holding several tiled images, clicking one to move it
+sometimes did nothing; specifically, on a test import of four images this
+happened with the top-left tile, but clicking a different tile worked.
+
+**The top-left specificity did not survive live reproduction.** Two rounds of
+static investigation turned up several plausible mechanisms — a
+`contentGrid` cell with no size floor, a coincidence between a tile's own
+corner and the panel's resize handle at that same corner — but driving the
+*actual* reported sequence in a real browser, cleanly (a fresh import, no
+prior drags contaminating tile positions), showed something simpler and
+**exactly symmetric across all four tiles**: a plain click on any montage
+tile selected and dragged the *whole panel*, not that tile. This is
+`selectionTarget`'s documented, deliberate rule (`Canvas.tsx`) — a click
+resolves to the outermost container by default, and only a double-click
+steps inside far enough to reach an individual tile — applying exactly as
+written. Nothing was actually top-left-specific; that was very likely just
+the order the reporter happened to test in, since the very first click any
+montage receives always hits this path regardless of which tile.
+
+- **A pure montage panel now resolves a plain click straight to the tile.**
+  `isPureMontagePanel` (`Canvas.tsx`) is a narrow predicate — a panel with a
+  `contentGrid` whose every child is a `plot`/`image`, i.e. a panel whose
+  only purpose is holding tiles. `selectionTarget` special-cases exactly this
+  case to skip the outermost-container step, as if the panel were already
+  entered. Every other case — a single-plot panel, a group, a montage panel
+  that also carries an annotation or caption child — keeps today's exact
+  behaviour, which is what protects the two bugs this rule already exists to
+  fix ("Panels can't be deleted", "Group doesn't group": see the
+  reported-bug-rounds section above). Confirmed live, cleanly, in both
+  directions: all four tiles now select and drag independently on the first
+  click, and clicking a bar/plot in an ordinary single-plot panel, deleting
+  it, and grouping two panels together (shift-click, Group, click a member to
+  select the group) all still work exactly as before.
+- **A tiled panel's cells had no minimum size**, a real but separate gap
+  found during investigation: `fillPanelChildren`
+  (`packages/doc-model/src/operations.ts`) tiles a panel's own frame via
+  `gridCells`, which clamps a cell to `Math.max(0, ...)` with no floor — so a
+  panel shrunk enough (past what its grid needs) could hand a tile a
+  near-zero frame, whose resize handles then collapse to an ungrabbable
+  point. Not what the reporter hit (a fresh montage, freshly auto-laid-out,
+  is nowhere near this small), but reachable by hand and worth closing.
+  `ResizeOptions` gained optional `minWidthMm`/`minHeightMm`
+  (`packages/doc-model/src/layout.ts`), additive alongside the existing
+  scalar `minMm` so every other caller of `resizeFrame` is unchanged; the
+  canvas resize path computes a montage panel's own grid-derived minimum
+  (`cols/rows * MIN_TILE_MM` plus gutters and padding) and passes it instead
+  of the generic 5 mm floor, so the panel physically cannot be dragged
+  smaller than its grid needs. `MIN_TILE_MM` is exported once from
+  `operations.ts` and read by both that computation and a backstop in
+  `fillPanelChildren` itself (for any other caller that can still reach a
+  too-small frame — a template applied onto an already-small panel, or an
+  imported document that started too small): if tiling would hand any cell
+  below the floor, every child keeps its prior frame rather than a
+  degenerate one, the same "extras keep their size" stance the
+  more-children-than-cells case already takes.
+- **No schema change.** Both fixes are code-level (a canvas interaction rule,
+  a resize-options extension); no document field changed.
+
+Driven in a real browser: a fresh four-image import selected and dragged each
+of the four tiles independently on a single click, with zero console errors;
+dragging a montage panel's own `se` handle hard toward its origin stopped at
+its grid's derived minimum (four ~28×27 px tiles, not a collapse) rather than
+the generic 5 mm floor; and the panel-delete and grouping regressions above
+were confirmed with real canvas clicks (not the Layers list, which does not
+support shift-click multi-select) rather than assumed safe.
+
+**Verified:** 836 TypeScript tests (833 + 3: a per-axis `resizeFrame` minimum
+test, and two `fillPanelChildren` cases — refusing a degenerate tile when the
+panel is too small for its grid, and still tiling normally when merely
+tight), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected. `selectionTarget`/`isPureMontagePanel` have no unit test — this
+codebase verifies canvas interaction live rather than through component unit
+tests (there is no existing precedent for one), so this was verified the same
+way the live reproduction was: driving the real app.
 
 ---
 

@@ -75,6 +75,7 @@ import {
   removeDataset,
   renameDataset,
   reorderNode,
+  MIN_TILE_MM,
   reparentNode,
   replaceAnalysisForPlot,
   repositionBrackets,
@@ -1023,6 +1024,31 @@ describe('layout', () => {
     const clamped = resizeFrame(original, 'e', -500, 0, { minMm: 5 });
     expect(clamped.width).toBeCloseTo(5, 6);
     expect(clamped.height).toBeGreaterThan(0);
+  });
+
+  it('honours a per-axis minimum distinct from the generic floor', () => {
+    // A tiled panel needs a wider floor than a plain node — e.g. a 2×2 grid
+    // needs ~12 mm of width to keep every cell at the usual 5 mm minimum, not
+    // 5 mm total. `minWidthMm`/`minHeightMm` override `minMm` per axis; a
+    // caller that only ever passed `minMm` sees no change.
+    const original = { x: 0, y: 0, width: 40, height: 20 };
+
+    const clamped = resizeFrame(original, 'e', -500, 0, {
+      minMm: 5,
+      minWidthMm: 12,
+    });
+    expect(clamped.width).toBeCloseTo(12, 6);
+
+    // The other axis still floors at the generic minimum.
+    const clampedHeight = resizeFrame(original, 's', 0, -500, {
+      minMm: 5,
+      minHeightMm: 8,
+    });
+    expect(clampedHeight.height).toBeCloseTo(8, 6);
+
+    // Absent, both fall back to `minMm` exactly as before this option existed.
+    const withoutOverride = resizeFrame(original, 'e', -500, 0, { minMm: 5 });
+    expect(withoutOverride.width).toBeCloseTo(5, 6);
   });
 
   it('locks to a square from every corner and edge under aspectLock 1', () => {
@@ -3685,6 +3711,42 @@ describe('panel tile grid', () => {
       .filter((n) => n.type === 'image')
       .sort((a, b) => a.z - b.z);
     expect(tiles[2]!.frame).not.toEqual(tiles[3]!.frame);
+  });
+
+  it('refuses to hand a tile a degenerate frame when the panel is too small for its grid', () => {
+    // Reported bug: shrink a montage panel enough (or apply a template onto
+    // one already too small) and a cell can collapse toward 0×0, leaving that
+    // tile's own resize handles an ungrabbable point. The live drag path can
+    // no longer reach this state (`panelGridMinimumMm` in `Canvas.tsx` floors
+    // the resize), but any other caller of `resizePanel` still can, so this
+    // is the backstop: every child keeps its prior frame rather than being
+    // handed a degenerate one.
+    const { doc, panel, tiles: before } = montage(4);
+    const tooSmall = editDocument(doc, (draft) => resizePanel(draft, panel.id, { x: 0, y: 0, width: 6, height: 6 }));
+
+    const after = Object.values(tooSmall.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    expect(after.map((t) => t.frame)).toEqual(before.map((t) => t.frame));
+    // The panel itself still shrank — only its children were protected.
+    const shrunkPanel = tooSmall.nodes[panel.id]!;
+    expect(shrunkPanel.frame).toEqual({ x: 0, y: 0, width: 6, height: 6 });
+  });
+
+  it('keeps tiling once the panel is merely tight, not degenerate', () => {
+    // The backstop above must not fire early: a panel that can still give
+    // every cell a real (if modest) size keeps tiling normally.
+    const { doc, panel } = montage(4);
+    const tight = editDocument(doc, (draft) => resizePanel(draft, panel.id, { x: 0, y: 0, width: 24, height: 24 }));
+
+    const tiles = Object.values(tight.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    for (const tile of tiles) {
+      expect(tile.frame.width).toBeGreaterThanOrEqual(MIN_TILE_MM);
+      expect(tile.frame.height).toBeGreaterThanOrEqual(MIN_TILE_MM);
+    }
+    expect(new Set(tiles.map((t) => `${t.frame.x},${t.frame.y}`)).size).toBe(4);
   });
 });
 

@@ -10,11 +10,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   absoluteFrame,
   ancestorsOf,
+  childrenOf,
   deleteNode,
   duplicateNode,
   fitAspect,
   isDerivedNode,
   isLocked,
+  MIN_TILE_MM,
   normaliseCrop,
   recordBracketOffset,
   rescaleArrowPoints,
@@ -137,8 +139,44 @@ function aspectLockFor(node: FigureDocument['nodes'][string]): number | null {
   return null;
 }
 
+/**
+ * The smallest a panel's own frame can be before its `contentGrid` can no
+ * longer give every tile a usable, grabbable size.
+ *
+ * Absent a grid, this is just the generic 5 mm floor every node already gets.
+ * With one, `resizeFrame`'s `minWidthMm`/`minHeightMm` read this instead, so
+ * a montage panel refuses to shrink into the state where `fillPanelChildren`
+ * would otherwise have to hand a tile a near-zero frame — the panel simply
+ * cannot reach that state, rather than reaching it and papering over it.
+ * `MIN_TILE_MM` is the same constant `fillPanelChildren`'s own backstop reads,
+ * so the two cannot quietly disagree about what "too small" means.
+ */
+function panelGridMinimumMm(node: FigureDocument['nodes'][string]): { width: number; height: number } {
+  const grid = node.type === 'panel' ? node.contentGrid : undefined;
+  if (!grid) return { width: MIN_TILE_MM, height: MIN_TILE_MM };
+  const padding = node.type === 'panel' ? node.paddingMm : 0;
+  return {
+    width: grid.cols * MIN_TILE_MM + (grid.cols - 1) * grid.gutterMm + 2 * padding,
+    height: grid.rows * MIN_TILE_MM + (grid.rows - 1) * grid.gutterMm + 2 * padding,
+  };
+}
+
 /** Node types a click groups into rather than through. */
 const CONTAINER_TYPES = new Set(['panel', 'group', 'image']);
+
+/**
+ * A panel whose only purpose is holding tiled content — a montage.
+ *
+ * A single-plot panel, a panel carrying a caption or annotation alongside its
+ * plot, and every other container still resolve to the panel first (see
+ * `selectionTarget`'s own history below) — this is deliberately narrow.
+ */
+function isPureMontagePanel(doc: FigureDocument, panelId: NodeId): boolean {
+  const panel = doc.nodes[panelId];
+  if (!panel || panel.type !== 'panel' || !panel.contentGrid) return false;
+  const children = childrenOf(doc.nodes, panelId);
+  return children.length > 1 && children.every((c) => c.type === 'plot' || c.type === 'image');
+}
 
 /**
  * The node a click on `id` should actually select.
@@ -153,6 +191,16 @@ const CONTAINER_TYPES = new Set(['panel', 'group', 'image']);
  * container steps inside it, which is how every other layout editor behaves.
  * `enteredId` is the container the user has stepped into; clicks within it
  * select one level deeper.
+ *
+ * One exception: a pure montage panel (`isPureMontagePanel`) has nothing to
+ * select *but* its tiles — resolving to the panel first buys nothing the way
+ * it does for a single-plot panel (which still needs a plain click to reach
+ * for moving/deleting/grouping) and only costs an extra double-click before
+ * every tile move or resize. Confirmed live: a fresh click on any tile of a
+ * multi-image import selected and dragged the whole panel instead of that
+ * tile, symmetrically across all four positions — reported as "the image
+ * doesn't move." Skip straight to the tile here, exactly as if the panel
+ * were already entered.
  */
 function selectionTarget(doc: FigureDocument, id: NodeId, enteredId: NodeId | null): NodeId {
   // ancestorsOf is nearest-first; outermost-first is what a click walks down.
@@ -165,7 +213,12 @@ function selectionTarget(doc: FigureDocument, id: NodeId, enteredId: NodeId | nu
     // Clicked outside the container being edited; the entry is dropped by the
     // caller and this click behaves like any other.
   }
-  return chain[0]!.id;
+
+  const outer = chain[0]!;
+  if (outer.type === 'panel' && isPureMontagePanel(doc, outer.id)) {
+    return chain[1]?.id ?? id;
+  }
+  return outer.id;
 }
 
 /** A text node being edited in place. */
@@ -459,9 +512,12 @@ export function Canvas({
          * insert-then-drag — so this same path is what "draw a square" means.
          */
         const aspect = event.shiftKey ? 1 : aspectLockFor(primary);
+        const gridMin = panelGridMinimumMm(primary);
         const resized = resizeFrame(primaryOriginal, drag.handle, dxMm, dyMm, {
           aspectLock: aspect,
           minMm: 5,
+          minWidthMm: gridMin.width,
+          minHeightMm: gridMin.height,
           rotationDeg: primary.rotation,
         });
 

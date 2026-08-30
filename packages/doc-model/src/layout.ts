@@ -324,6 +324,19 @@ export interface ResizeOptions {
   /** Floor on either dimension, so a panel cannot be dragged to nothing. */
   minMm?: number;
   /**
+   * Per-axis floor, overriding `minMm` on that axis only. Absent means
+   * "use `minMm`" — additive, so every existing caller is unaffected.
+   *
+   * A tiled panel's own children need more than the generic 5 mm floor: once
+   * the panel is smaller than its grid needs, a cell collapses toward 0×0 and
+   * that tile's resize handles collapse to an ungrabbable point. The caller
+   * (`Canvas.tsx`) computes the grid's own minimum and passes it here rather
+   * than this function knowing anything about `contentGrid` — `resizeFrame`
+   * stays pure geometry either way.
+   */
+  minWidthMm?: number;
+  minHeightMm?: number;
+  /**
    * The node's own `rotation`, in degrees clockwise about its frame centre.
    *
    * Absent or `0` leaves every line of arithmetic below exactly as it was, so
@@ -366,6 +379,8 @@ export function resizeFrame(
   options: ResizeOptions = {},
 ): RectMm {
   const min = Math.max(0.1, options.minMm ?? 5);
+  const minWidth = Math.max(0.1, options.minWidthMm ?? min);
+  const minHeight = Math.max(0.1, options.minHeightMm ?? min);
   const dirX = HANDLE_X[handle];
   const dirY = HANDLE_Y[handle];
   const rotation = options.rotationDeg ?? 0;
@@ -393,15 +408,15 @@ export function resizeFrame(
     }
   }
 
-  width = Math.max(min, width);
-  height = Math.max(min, height);
+  width = Math.max(minWidth, width);
+  height = Math.max(minHeight, height);
 
   if (aspect && aspect > 0) {
     // Re-derive after clamping, or the floor would break the locked ratio.
     if (width / height > aspect) width = height * aspect;
     else height = width / aspect;
-    width = Math.max(min, width);
-    height = Math.max(min, height);
+    width = Math.max(minWidth, width);
+    height = Math.max(minHeight, height);
   }
 
   // Anchor the edge opposite the handle. Handles on an axis' centre leave that

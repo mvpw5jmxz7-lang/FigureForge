@@ -579,6 +579,16 @@ export function applyAutoLayout(
 }
 
 /**
+ * A tile below this size has no usable resize handle left to grab — see
+ * `panelGridMinimumMm` in `apps/web/src/components/Canvas.tsx`, which reads
+ * the same constant to stop a panel resize from ever reaching this state in
+ * the first place. This export is the backstop for every other path that
+ * can still call `resizePanel`/`applyAutoLayout` against a too-small frame
+ * (a template application, or a document imported already too small).
+ */
+export const MIN_TILE_MM = 5;
+
+/**
  * Size a panel's content children to it — filling it, or tiled into its grid.
  *
  * One implementation shared by `applyAutoLayout` and `resizePanel`. They had
@@ -623,6 +633,14 @@ function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm
       gutterMm: grid.gutterMm,
     },
   );
+
+  // A frame too small for its own grid (a template applied onto a
+  // too-small panel, or an already-too-small imported document — the live
+  // drag path can no longer reach this, see `panelGridMinimumMm`) leaves
+  // every child exactly where it was rather than handing it a degenerate,
+  // ungrabbable frame. The same "extras keep their size" stance the
+  // more-children-than-cells case above already takes.
+  if (cells.some((cell) => cell.width < MIN_TILE_MM || cell.height < MIN_TILE_MM)) return;
 
   children.forEach((child, index) => {
     const cell = cells[index];
