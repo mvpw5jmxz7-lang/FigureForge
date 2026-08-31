@@ -256,6 +256,16 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 21 (a group's resize handles scaled nothing):** 844
+TypeScript tests, 190 Python tests unchanged, `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected. **Measured, not
+assumed**: a plain, ungrouped panel drag was confirmed live to leave its
+letter label behind — moved 40.5 × 32.4 px while the label stayed at the
+same pixel — before the fix, then confirmed carrying the label afterward;
+grouping two panels and resizing the group grew and repositioned both, with
+both labels following, not just the one nearer the dragged corner. See
+"Round 21" below.
+
 **Verified after round 20 (a montage tile that wouldn't move or resize):** 836
 TypeScript tests, 190 Python tests unchanged, `tsc --build --force`, `eslint .`
 clean, 46-check acceptance run unaffected. **Measured, not assumed**: driven
@@ -3631,6 +3641,90 @@ unaffected. `selectionTarget`/`isPureMontagePanel` have no unit test — this
 codebase verifies canvas interaction live rather than through component unit
 tests (there is no existing precedent for one), so this was verified the same
 way the live reproduction was: driving the real app.
+
+---
+
+### Round 21 — a group's resize handles scaled nothing
+
+An "Ungroup" toolbar button was added first — `ungroup` (`operations.ts`) had
+existed and been unit-tested since grouping was built, but nothing in the UI
+ever called it. Straightforward wiring: enabled only for a lone `group`
+selection, dissolves it back into its members with their page positions
+preserved (verified pixel-for-pixel live), selects the freed members after.
+
+Then reported: selecting a grouped panel and dragging its resize handles did
+nothing visible; double-clicking again (stepping inside the group to select
+the panel itself) made resizing work. Confirmed by reading the code before
+touching it: `renderNode` (`packages/render/src/render-document.ts`) only
+ever *translates* a node — no node type is ever visually scaled by an SVG
+transform. Every resizable type instead has its content reshaped at the
+**model** level (`resizePanel` re-tiles a panel's children, `rescaleArrowPoints`
+rescales an arrow's point array) — and `group`'s render case is a bare
+wrapper around its children with no such step. The canvas resize commit
+dispatched `panel`/`arrow` to their real handlers and let everything else,
+`group` included, fall to a bare `node.frame = snapped.frame`: the group's
+own bounding box updated (so its handles visibly moved), but nothing under
+it did. "Double-click and it scales" was just the member's own working
+resize, once double-clicking (`enteredId`) reached it — `group` staying a
+`CONTAINER_TYPES` entry is deliberate and unchanged, the same reasoning
+Round 20's `isPureMontagePanel` exception stopped short of applying here:
+grouping panels together is specifically for moving/resizing them as one
+unit, so a plain click resolving to the group first is the point, not the
+bug.
+
+- **`resizeGroup`** (`packages/doc-model/src/operations.ts`, beside
+  `ungroup`) scales every member proportionally about the group's own local
+  origin — panels, shapes, arrows, nested groups — the way a group resize
+  behaves everywhere else (Illustrator, Figma). Dispatches by member type:
+  `panel` → a new `resizePanelGeometry` (the frame/tiling half of
+  `resizePanel`, split out so this caller can reuse it without also running
+  the label shim below), `arrow` → the existing `rescaleArrowPoints`
+  unchanged, `group` → recurse, everything else → direct frame assignment
+  (identical to what a plain, ungrouped resize already does for those
+  types). Individual member `rotation` and text `fontSizePt`/stroke widths
+  are deliberately untouched — only `shape`/`arrow`/`text` can be rotated
+  and their angle stays fixed while position/size scale, and this codebase
+  already keeps type sizes independent of frame geometry everywhere else;
+  scaling either would be new, unrequested scope.
+- **A second, broader bug found while tracing the first, and fixed in the
+  same pass**: a `panel-label` is a top-level node with no parent of its
+  own, positioned by a static frame that only `relabelPanels` (relettering)
+  and `resizePanel`'s own shim ever rewrite. The canvas **move** commit
+  never called either — it only ever rewrote `frame.x/y` for the literal
+  dragged node id(s). **Confirmed live before writing any fix**: dragging a
+  plain, ungrouped panel moved it 40.5 × 32.4 px while its letter label
+  stayed exactly still. `snapshotPanelAbsolutePositions` /
+  `syncPanelLabelsFromSnapshot` (`operations.ts`, exported for `Canvas.tsx`)
+  read every affected panel's `absoluteFrame` before a move or a group
+  resize, then reconcile each panel-label by the delta afterward — one
+  mechanism for both call sites, since a move is a resize with a scale
+  factor of 1, and `absoluteFrame` already sums any depth of ancestors
+  correctly on both reads, so nothing needs to track *how* the geometry
+  changed at each nesting level, only that it did.
+- **No schema change.** Both fixes are code-level; no document field
+  changed.
+
+Driven in a real browser: grouping two panels and dragging the group's `nw`
+handle grew and repositioned both panels together with **both** their
+letters following, not just the one nearer the dragged corner; a plain,
+ungrouped panel drag now carries its label with it while an untouched
+sibling panel's label stays exactly put; and the Round 20 montage-tile and
+Group/Ungroup/Delete regressions were re-run rather than assumed unaffected.
+
+**Verified:** 844 TypeScript tests (836 + 8: proportional scaling of a shape
+member, a panel member's plot/tiles re-filled rather than left at a bare
+frame, an arrow member's points rescaled, a nested group scaling correctly
+through two levels with no accumulator needed, a panel's label landing
+beside its new absolute position after a group resize, rotation/`fontSizePt`
+left untouched, and two cases for the move-time label sync — a plain panel
+and a panel dragged as part of a group, with its untouched sibling's label
+confirmed unmoved), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected. `resizeGroup` and the label-sync helpers are
+plain functions with real unit tests, the same story as `resizePanel`/
+`ungroup`; the `Canvas.tsx` wiring has none, matching this file's standing
+note that canvas interaction is verified live rather than through a
+component test that doesn't otherwise exist in this codebase.
 
 ---
 

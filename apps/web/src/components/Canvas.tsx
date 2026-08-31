@@ -21,6 +21,7 @@ import {
   recordBracketOffset,
   rescaleArrowPoints,
   resizeFrame,
+  resizeGroup,
   resizePanel,
   resyncScaleBars,
   setArrowPoint,
@@ -29,12 +30,15 @@ import {
   snapFrame,
   snapResize,
   snapRotation,
+  snapshotPanelAbsolutePositions,
+  syncPanelLabelsFromSnapshot,
   type AlignmentGuide,
   type Crop01,
   type FigureDocument,
   type FigureNode,
   type NodeId,
   type PlotNode,
+  type PointMm,
   type RectMm,
   type ResizeHandle,
 } from '@figureforge/doc-model';
@@ -562,6 +566,10 @@ export function Canvas({
           // An arrow's points are frame-relative, so stretching the box has to
           // stretch the line inside it or the grips drift off the arrow.
           else if (node.type === 'arrow') rescaleArrowPoints(draft, drag.nodeId, snapped.frame);
+          // A group's own frame used to be the only thing a handle touched —
+          // nothing scales a node by its frame, only translates it, so the
+          // group's bounding box changed while its members visibly did not.
+          else if (node.type === 'group') resizeGroup(draft, drag.nodeId, snapped.frame);
           else node.frame = snapped.frame;
 
           // A resized image changes what a millimetre on it represents.
@@ -606,11 +614,25 @@ export function Canvas({
       const appliedDy = snapped.frame.y - primaryOriginal.y;
 
       api.commit('Move', (draft) => {
+        // A panel-label is a top-level node with no parent of its own, so
+        // moving a panel — directly, or as part of a dragged group — leaves
+        // its letter behind unless something explicitly tells the label to
+        // follow. Snapshot every panel under every dragged node first, move
+        // everything, then reconcile from the absolute-position delta.
+        const before = new Map<NodeId, PointMm>();
+        for (const id of drag.originalFrames.keys()) {
+          for (const [panelId, abs] of snapshotPanelAbsolutePositions(draft.nodes, id)) {
+            before.set(panelId, abs);
+          }
+        }
+
         for (const [id, original] of drag.originalFrames) {
           const node = draft.nodes[id];
           if (!node || isLocked(draft, id)) continue;
           node.frame = { ...original, x: original.x + appliedDx, y: original.y + appliedDy };
         }
+
+        syncPanelLabelsFromSnapshot(draft, before);
       });
     },
     [api, doc, theme, zoom],

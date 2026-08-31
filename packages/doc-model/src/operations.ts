@@ -27,7 +27,13 @@ import {
   type LayoutOptions,
 } from './layout.js';
 import type { LayoutTemplate } from './templates.js';
-import { CONTINUOUS_X_PLOT_TYPES, DEFAULT_VOLCANO_THRESHOLDS } from './nodes.js';
+import {
+  absoluteFrame,
+  childrenOf,
+  CONTINUOUS_X_PLOT_TYPES,
+  DEFAULT_VOLCANO_THRESHOLDS,
+  descendantsOf,
+} from './nodes.js';
 import type {
   ArrowNode,
   AssetId,
@@ -651,6 +657,22 @@ function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm
 }
 
 /**
+ * The frame half of `resizePanel`, without its label shim.
+ *
+ * Split out so `resizeGroup` can reuse the plot/tile re-fill without also
+ * running the label shim below — which assumes the panel's *parent* didn't
+ * itself move, untrue inside a group being scaled. `resizeGroup` reconciles
+ * every descendant panel's label once, correctly, from a before/after
+ * absolute-position snapshot instead.
+ */
+function resizePanelGeometry(draft: FigureDocument, panelId: NodeId, frame: RectMm): void {
+  const panel = draft.nodes[panelId];
+  if (!panel) return;
+  panel.frame = frame;
+  fillPanelChildren(draft, panel.id, frame);
+}
+
+/**
  * Resize one panel, keeping everything that depends on its frame in step.
  *
  * A panel's plot is its child and so follows automatically in page space, but
@@ -663,9 +685,7 @@ export function resizePanel(draft: FigureDocument, panelId: NodeId, frame: RectM
 
   const dx = frame.x - panel.frame.x;
   const dy = frame.y - panel.frame.y;
-  panel.frame = frame;
-
-  fillPanelChildren(draft, panel.id, frame);
+  resizePanelGeometry(draft, panelId, frame);
 
   for (const node of Object.values(draft.nodes)) {
     if (node.type === 'panel-label' && node.panelId === panel.id) {
@@ -1711,6 +1731,118 @@ export function ungroup(draft: FigureDocument, groupId: NodeId): NodeId[] {
 
   delete draft.nodes[groupId];
   return children.map((c) => c.id);
+}
+
+/**
+ * Every panel's absolute page position, for `rootId` and everything under it.
+ *
+ * Read before a move or a group resize touches any frame, and compared
+ * against the same read taken after, by `syncPanelLabelsFromSnapshot`. A
+ * panel-label is a top-level node with no parent of its own, so nothing
+ * about *how* a panel's absolute position changed — a plain translate, a
+ * proportional scale nested three groups deep, anything — needs to be
+ * tracked; only that it did.
+ */
+export function snapshotPanelAbsolutePositions(nodes: NodeMap, rootId: NodeId): Map<NodeId, PointMm> {
+  const snapshot = new Map<NodeId, PointMm>();
+  const record = (id: NodeId): void => {
+    if (nodes[id]?.type !== 'panel') return;
+    const frame = absoluteFrame(nodes, id);
+    if (frame) snapshot.set(id, { x: frame.x, y: frame.y });
+  };
+  record(rootId);
+  for (const descendant of descendantsOf(nodes, rootId)) record(descendant.id);
+  return snapshot;
+}
+
+/**
+ * Shift every panel-label whose panel's absolute position moved since
+ * `before` was captured, by exactly that delta.
+ *
+ * The panel's own frame is not touched here — only its top-level, page-space
+ * label sibling, which `resizePanel`'s own `dx/dy` shim cannot reach
+ * correctly once the panel's *parent* (a group) has also moved or scaled.
+ */
+export function syncPanelLabelsFromSnapshot(draft: FigureDocument, before: ReadonlyMap<NodeId, PointMm>): void {
+  for (const [panelId, prev] of before) {
+    const frame = absoluteFrame(draft.nodes, panelId);
+    if (!frame) continue;
+    const dx = frame.x - prev.x;
+    const dy = frame.y - prev.y;
+    if (dx === 0 && dy === 0) continue;
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'panel-label' && node.panelId === panelId) {
+        node.frame = { ...node.frame, x: node.frame.x + dx, y: node.frame.y + dy };
+      }
+    }
+  }
+}
+
+/**
+ * A per-child size floor during a group scale, purely against numerical
+ * degeneracy (a child never reaches this from a live drag: the group's own
+ * frame is already floored at 5 mm by `panelGridMinimumMm` in `Canvas.tsx`,
+ * so no proportional share of it can hit zero). Not a usability floor the
+ * way `MIN_TILE_MM` is for a panel's own tiles — a free-form group has no
+ * grid to reason about, and every member already carries its own size floor
+ * from whenever it was last resized directly.
+ */
+const MIN_GROUP_MEMBER_MM = 0.01;
+
+/**
+ * The frame half of `resizeGroup`, recursing into nested groups and reusing
+ * each member type's own resize primitive.
+ *
+ * Every child's frame is already relative to the group's own origin (see
+ * `reparentNode`), so scaling each child's local `x/y/width/height` by the
+ * same factor the group's own frame just scaled by reproduces an ordinary
+ * "resize group" — Illustrator, Figma — without needing any extra offset
+ * math per level of nesting.
+ */
+function resizeGroupGeometry(draft: FigureDocument, groupId: NodeId, frame: RectMm): void {
+  const group = draft.nodes[groupId];
+  if (group?.type !== 'group') return;
+
+  const old = group.frame;
+  const sx = old.width > 0 ? frame.width / old.width : 1;
+  const sy = old.height > 0 ? frame.height / old.height : 1;
+  group.frame = frame;
+
+  for (const child of childrenOf(draft.nodes, groupId)) {
+    const target: RectMm = {
+      x: child.frame.x * sx,
+      y: child.frame.y * sy,
+      width: Math.max(child.frame.width * sx, MIN_GROUP_MEMBER_MM),
+      height: Math.max(child.frame.height * sy, MIN_GROUP_MEMBER_MM),
+    };
+    if (child.type === 'panel') resizePanelGeometry(draft, child.id, target);
+    else if (child.type === 'arrow') rescaleArrowPoints(draft, child.id, target);
+    else if (child.type === 'group') resizeGroupGeometry(draft, child.id, target);
+    else draft.nodes[child.id]!.frame = target;
+  }
+}
+
+/**
+ * Resize a group, scaling every member proportionally — panels, shapes,
+ * arrows, nested groups — the way a group resize behaves everywhere else.
+ *
+ * Before this, a group's own frame was the only thing a resize handle
+ * touched: nothing under `packages/render` ever scales a node by its
+ * `frame.width/height`, only translates it, so the group's bounding box
+ * changed while its members visibly did not move at all.
+ *
+ * Individual member `rotation` and text `fontSizePt`/stroke widths are
+ * deliberately left untouched — only position and size scale, matching
+ * standard group-resize behaviour, and this codebase already keeps type
+ * sizes independent of frame geometry everywhere else.
+ */
+export function resizeGroup(draft: FigureDocument, groupId: NodeId, frame: RectMm): void {
+  if (draft.nodes[groupId]?.type !== 'group') return;
+
+  const before = snapshotPanelAbsolutePositions(draft.nodes, groupId);
+  resizeGroupGeometry(draft, groupId, frame);
+  syncPanelLabelsFromSnapshot(draft, before);
+  resyncScaleBars(draft);
 }
 
 export function addDataset(draft: FigureDocument, dataset: Dataset): void {

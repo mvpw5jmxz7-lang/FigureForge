@@ -79,8 +79,11 @@ import {
   reparentNode,
   replaceAnalysisForPlot,
   repositionBrackets,
+  resizeGroup,
   resizePanel,
   scaleBarWidthMm,
+  snapshotPanelAbsolutePositions,
+  syncPanelLabelsFromSnapshot,
   setArrowPoint,
   setDatasetReading,
   setImageCrop,
@@ -2073,6 +2076,300 @@ describe('grouping', () => {
       group = addGroup(draft, newId, [ids[0]!]);
     });
     expect(group).toBeNull();
+  });
+
+  describe('resizeGroup', () => {
+    it('scales every member proportionally about the group origin', () => {
+      const { doc, ids, newId } = twoShapes();
+      let groupId = '';
+      const grouped = editDocument(doc, (draft) => {
+        groupId = addGroup(draft, newId, ids)!.id;
+      });
+      const group = grouped.nodes[groupId]!;
+      const origin = { x: group.frame.x, y: group.frame.y };
+
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, groupId, {
+          x: group.frame.x,
+          y: group.frame.y,
+          width: group.frame.width * 2,
+          height: group.frame.height * 2,
+        });
+      });
+
+      for (const id of ids) {
+        const before = absoluteFrame(grouped.nodes, id)!;
+        const after = absoluteFrame(resized.nodes, id)!;
+        // Distance from the group's own (unmoved) corner doubles along with
+        // the group, exactly like an ordinary anchored resize.
+        expect(after.x - origin.x).toBeCloseTo((before.x - origin.x) * 2, 6);
+        expect(after.y - origin.y).toBeCloseTo((before.y - origin.y) * 2, 6);
+        expect(after.width).toBeCloseTo(before.width * 2, 6);
+        expect(after.height).toBeCloseTo(before.height * 2, 6);
+      }
+      expect(resized.nodes[groupId]!.frame.width).toBeCloseTo(group.frame.width * 2, 6);
+    });
+
+    it("re-fills a panel member's content, not just its bare frame", () => {
+      const { doc, newId } = imageDocument();
+      const ds = dataset('Treatment,R1,R2\nA,1,2\nB,3,4', newId());
+      let groupId = '';
+      let panelId = '';
+      const grouped = editDocument(doc, (draft) => {
+        draft.datasets = [...draft.datasets, ds];
+        const { panel } = addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 40, height: 30 },
+          datasetId: ds.id,
+          name: 'Panel',
+        });
+        panelId = panel.id;
+        const shape = addShape(draft, newId, {
+          shape: 'rect',
+          frame: { x: 50, y: 0, width: 10, height: 10 },
+        });
+        groupId = addGroup(draft, newId, [panel.id, shape.id])!.id;
+      });
+
+      const group = grouped.nodes[groupId]!;
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, groupId, {
+          x: group.frame.x,
+          y: group.frame.y,
+          width: group.frame.width * 2,
+          height: group.frame.height * 2,
+        });
+      });
+
+      const panelAfter = resized.nodes[panelId]!;
+      const plotAfter = Object.values(resized.nodes).find(
+        (n) => n.type === 'plot' && n.parentId === panelId,
+      )!;
+      // The plot fills the panel's *new* frame -- fillPanelChildren ran,
+      // rather than the panel just being handed a bigger bare rectangle.
+      expect(plotAfter.frame).toEqual({
+        x: 0,
+        y: 0,
+        width: panelAfter.frame.width,
+        height: panelAfter.frame.height,
+      });
+    });
+
+    it("rescales an arrow member's points", () => {
+      const { doc, newId } = imageDocument();
+      let groupId = '';
+      let arrowId = '';
+      const grouped = editDocument(doc, (draft) => {
+        const arrow = addArrow(draft, newId, { frame: { x: 0, y: 0, width: 20, height: 10 } });
+        arrowId = arrow.id;
+        const shape = addShape(draft, newId, {
+          shape: 'rect',
+          frame: { x: 30, y: 0, width: 10, height: 10 },
+        });
+        groupId = addGroup(draft, newId, [arrow.id, shape.id])!.id;
+      });
+
+      const group = grouped.nodes[groupId]!;
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, groupId, {
+          x: group.frame.x,
+          y: group.frame.y,
+          width: group.frame.width * 2,
+          height: group.frame.height * 3,
+        });
+      });
+
+      const before = grouped.nodes[arrowId]!;
+      const after = resized.nodes[arrowId]!;
+      if (before.type !== 'arrow' || after.type !== 'arrow') throw new Error('expected an arrow');
+      const sx = after.frame.width / before.frame.width;
+      const sy = after.frame.height / before.frame.height;
+      for (const [i, p] of before.points.entries()) {
+        expect(after.points[i]!.x).toBeCloseTo(p.x * sx, 6);
+        expect(after.points[i]!.y).toBeCloseTo(p.y * sy, 6);
+      }
+    });
+
+    it('scales a nested group correctly through two levels', () => {
+      const { doc, newId } = imageDocument();
+      let outerId = '';
+      let shapeId = '';
+      const grouped = editDocument(doc, (draft) => {
+        const shape = addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } });
+        const other = addShape(draft, newId, {
+          shape: 'ellipse',
+          frame: { x: 20, y: 0, width: 10, height: 10 },
+        });
+        shapeId = shape.id;
+        const innerId = addGroup(draft, newId, [shape.id, other.id])!.id;
+        const third = addShape(draft, newId, { shape: 'rect', frame: { x: 60, y: 0, width: 10, height: 10 } });
+        outerId = addGroup(draft, newId, [innerId, third.id])!.id;
+      });
+
+      const outer = grouped.nodes[outerId]!;
+      const origin = { x: outer.frame.x, y: outer.frame.y };
+      const before = absoluteFrame(grouped.nodes, shapeId)!;
+
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, outerId, {
+          x: outer.frame.x,
+          y: outer.frame.y,
+          width: outer.frame.width * 3,
+          height: outer.frame.height * 3,
+        });
+      });
+
+      const after = absoluteFrame(resized.nodes, shapeId)!;
+      // Scaled correctly through two nested levels with no accumulator
+      // needed: absoluteFrame sums whatever depth of ancestors exist, both
+      // before and after, so the diff is right regardless of nesting.
+      expect(after.x - origin.x).toBeCloseTo((before.x - origin.x) * 3, 6);
+      expect(after.width).toBeCloseTo(before.width * 3, 6);
+    });
+
+    it("keeps a panel's label beside it after its group resizes", () => {
+      const { doc, newId } = sampleDocument();
+      const panelOne = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'One')!;
+      const labelOne = Object.values(doc.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === panelOne.id,
+      )!;
+      const offset = { x: labelOne.frame.x - panelOne.frame.x, y: labelOne.frame.y - panelOne.frame.y };
+
+      let groupId = '';
+      const grouped = editDocument(doc, (draft) => {
+        const shape = addShape(draft, newId, {
+          shape: 'rect',
+          frame: { x: 200, y: 0, width: 10, height: 10 },
+        });
+        groupId = addGroup(draft, newId, [panelOne.id, shape.id])!.id;
+      });
+
+      const group = grouped.nodes[groupId]!;
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, groupId, {
+          x: group.frame.x + 15,
+          y: group.frame.y + 8,
+          width: group.frame.width * 1.5,
+          height: group.frame.height * 1.5,
+        });
+      });
+
+      const panelAbsAfter = absoluteFrame(resized.nodes, panelOne.id)!;
+      const labelAfter = resized.nodes[labelOne.id]!;
+      // The label keeps the same fixed offset from the panel's new absolute
+      // position that it had before — it followed the panel through the
+      // group's move-and-scale, rather than staying where it was.
+      expect(labelAfter.frame.x).toBeCloseTo(panelAbsAfter.x + offset.x, 6);
+      expect(labelAfter.frame.y).toBeCloseTo(panelAbsAfter.y + offset.y, 6);
+    });
+
+    it('leaves rotation and font size untouched', () => {
+      const { doc, newId } = imageDocument();
+      let groupId = '';
+      let shapeId = '';
+      let textId = '';
+      const grouped = editDocument(doc, (draft) => {
+        const shape = addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } });
+        shape.rotation = 45;
+        shapeId = shape.id;
+        const text = addText(draft, newId, {
+          frame: { x: 30, y: 0, width: 20, height: 6 },
+          text: 'Label',
+          fontSizePt: 9,
+        });
+        textId = text.id;
+        groupId = addGroup(draft, newId, [shape.id, text.id])!.id;
+      });
+
+      const group = grouped.nodes[groupId]!;
+      const resized = editDocument(grouped, (draft) => {
+        resizeGroup(draft, groupId, {
+          x: group.frame.x,
+          y: group.frame.y,
+          width: group.frame.width * 2,
+          height: group.frame.height * 2,
+        });
+      });
+
+      expect(resized.nodes[shapeId]!.rotation).toBe(45);
+      const text = resized.nodes[textId]!;
+      if (text.type !== 'text') throw new Error('expected a text node');
+      expect(text.style.fontSizePt).toBe(9);
+    });
+  });
+
+  describe('panel-label sync on move', () => {
+    /*
+     * A panel-label is a top-level node with no parent of its own — moving a
+     * panel (directly, or as part of a dragged group) does not move it
+     * automatically the way `absoluteFrame` composes a *descendant's*
+     * position for free. `snapshotPanelAbsolutePositions` /
+     * `syncPanelLabelsFromSnapshot` are the two halves of the fix the
+     * Canvas move commit uses; exercised directly here since there is no
+     * Canvas.tsx test file in this codebase.
+     */
+    it('follows a plain panel dragged directly', () => {
+      const { doc } = sampleDocument();
+      const panelOne = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'One')!;
+      const labelOne = Object.values(doc.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === panelOne.id,
+      )!;
+      const offset = { x: labelOne.frame.x - panelOne.frame.x, y: labelOne.frame.y - panelOne.frame.y };
+
+      const moved = editDocument(doc, (draft) => {
+        const before = snapshotPanelAbsolutePositions(draft.nodes, panelOne.id);
+        const panel = draft.nodes[panelOne.id]!;
+        panel.frame = { ...panel.frame, x: panel.frame.x + 12, y: panel.frame.y - 5 };
+        syncPanelLabelsFromSnapshot(draft, before);
+      });
+
+      const panelAbsAfter = absoluteFrame(moved.nodes, panelOne.id)!;
+      const labelAfter = moved.nodes[labelOne.id]!;
+      expect(labelAfter.frame.x).toBeCloseTo(panelAbsAfter.x + offset.x, 6);
+      expect(labelAfter.frame.y).toBeCloseTo(panelAbsAfter.y + offset.y, 6);
+    });
+
+    it('follows a panel dragged as part of a group, leaving an unmoved sibling panel alone', () => {
+      const { doc, newId } = sampleDocument();
+      const panelOne = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'One')!;
+      const panelTwo = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'Two')!;
+      const labelTwo = Object.values(doc.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === panelTwo.id,
+      )!;
+      const labelTwoBefore = { ...labelTwo.frame };
+
+      let groupId = '';
+      const grouped = editDocument(doc, (draft) => {
+        const shape = addShape(draft, newId, {
+          shape: 'rect',
+          frame: { x: 200, y: 0, width: 10, height: 10 },
+        });
+        groupId = addGroup(draft, newId, [panelOne.id, shape.id])!.id;
+      });
+
+      const moved = editDocument(grouped, (draft) => {
+        const before = snapshotPanelAbsolutePositions(draft.nodes, groupId);
+        const group = draft.nodes[groupId]!;
+        group.frame = { ...group.frame, x: group.frame.x + 20, y: group.frame.y + 10 };
+        syncPanelLabelsFromSnapshot(draft, before);
+      });
+
+      const labelOne = Object.values(moved.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === panelOne.id,
+      )!;
+      const panelOneAbsAfter = absoluteFrame(moved.nodes, panelOne.id)!;
+      const offset = {
+        x: Object.values(doc.nodes).find((n) => n.type === 'panel-label' && n.panelId === panelOne.id)!
+          .frame.x - panelOne.frame.x,
+        y: Object.values(doc.nodes).find((n) => n.type === 'panel-label' && n.panelId === panelOne.id)!
+          .frame.y - panelOne.frame.y,
+      };
+      expect(labelOne.frame.x).toBeCloseTo(panelOneAbsAfter.x + offset.x, 6);
+      expect(labelOne.frame.y).toBeCloseTo(panelOneAbsAfter.y + offset.y, 6);
+
+      // Panel Two never moved, so its label must not have been touched.
+      const labelTwoAfter = moved.nodes[labelTwo.id]!;
+      expect(labelTwoAfter.frame).toEqual(labelTwoBefore);
+    });
   });
 });
 
