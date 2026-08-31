@@ -11,7 +11,6 @@ import {
   absoluteFrame,
   ancestorsOf,
   childrenOf,
-  deleteNode,
   duplicateNode,
   fitAspect,
   isDerivedNode,
@@ -54,6 +53,7 @@ import {
   type PlacedPointLabel,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
+import { deleteNodesWithLayout } from '../deleteNodes.js';
 import type { DocumentApi } from '../useDocument.js';
 
 /** CSS reference pixels per millimetre at 100% zoom. */
@@ -733,17 +733,7 @@ export function Canvas({
         const doomed = selectedIds.filter((id) => !isLocked(doc, id));
         if (doomed.length === 0) return;
 
-        api.transaction('Delete', () => {
-          api.commit('Delete nodes', (draft) => {
-            for (const id of doomed) deleteNode(draft, id);
-            // A deleted plot leaves its brackets pointing at nothing, which the
-            // referential-integrity check rejects on save.
-            for (const node of Object.values(draft.nodes)) {
-              if (node.type !== 'bracket') continue;
-              if (node.plotId != null && !draft.nodes[node.plotId]) delete draft.nodes[node.id];
-            }
-          });
-        });
+        deleteNodesWithLayout(api, theme, doomed);
         onSelectionChange([]);
         return;
       }

@@ -256,6 +256,18 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 22 (panel numbering and layout gaps after delete):**
+850 TypeScript tests, 190 Python tests unchanged, `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, and 22 live-browser
+checks across light and dark. **Measured, not assumed**: deleting a panel via
+the Delete key was confirmed live to leave the remaining panels' old letters
+and an unclosed grid gap in place until some later action happened to run a
+layout pass; after the fix the same delete relabels and repacks the grid
+**immediately**, confirmed for all three of the Delete key, the Layers tab's
+`×` button and Inspector's "Delete this panel" button, with a matching
+negative check that deleting a non-panel node moves nothing. See "Round 22"
+below.
+
 **Verified after round 21 (a group's resize handles scaled nothing):** 844
 TypeScript tests, 190 Python tests unchanged, `tsc --build --force` and
 `eslint .` clean, 46-check acceptance run unaffected. **Measured, not
@@ -3725,6 +3737,87 @@ plain functions with real unit tests, the same story as `resizePanel`/
 `ungroup`; the `Canvas.tsx` wiring has none, matching this file's standing
 note that canvas interaction is verified live rather than through a
 component test that doesn't otherwise exist in this codebase.
+
+---
+
+### Round 22 — panel numbering and layout gaps after delete
+
+Reported: after deleting a panel, the remaining panels' letters were not
+contiguous and auto-layout still reserved the deleted panel's space; a newly
+added panel was "added sequentially to the deleted panel" rather than filling
+the gap; deleted panels and labels seemed not to be permanently gone.
+
+- **All four delete pathways called `deleteNode` alone and never
+  `applyAutoLayout`/`relabelPanels`/`reflowBrackets` afterward**: the
+  Delete/Backspace key (`Canvas.tsx`), the Layers tab's `×` button
+  (`SidePanel.tsx`), and Inspector's multi-select and single "Delete this
+  panel" buttons (`Inspector.tsx`). Every panel-*adding* action (import, PCA,
+  UMAP, volcano test, image insert, asset insert) already calls all three
+  after changing panel count — delete was the one panel-count-changing action
+  with no analogous call anywhere.
+- **`deleteNode` was already fully correct** — it cascades to permanently
+  remove a deleted panel's own `panel-label` via a fixed-point sweep, so
+  nothing was actually left behind in the document. The "deleted panels
+  linger" complaint was the *visual* symptom (an unclosed grid gap and stale
+  letters), not leftover data.
+- **`applyAutoLayout` was already immune to staleness** — it always
+  recomputes `readingOrder(draft.nodes)` and `suggestGrid(panels.length)`
+  live, with no cached count or grid shape anywhere, and unconditionally
+  clears every panel's stale `.slot` when called without a template (exactly
+  how every add-panel action already calls it). The bug was entirely that
+  nothing called this pipeline after a delete — not a flaw in the pipeline.
+- **`deleteNodesWithLayout`** (`apps/web/src/deleteNodes.ts`, new) is the one
+  shared fix, called from all four pathways in place of a bare `deleteNode`
+  loop: delete every requested id, sweep away brackets left pointing at a
+  now-missing plot (the existing Canvas-only cleanup, now shared by all
+  four), and — only if the panel *count* dropped — run
+  `applyAutoLayout` + `relabelPanels` + `reflowBrackets` in the same commit.
+  It lives in `apps/web`, not `packages/doc-model`: `doc-model` imports
+  nothing internal, and `reflowBrackets` lives in `packages/render`, so the
+  combined operation cannot live there — the same reason `Toolbar.tsx`'s own
+  `arrange()`/`applyPreset()` already compose these three at the app layer.
+- **Detection is a panel *count* comparison, before vs. after the delete
+  loop, not "is a deleted id itself a panel."** Load-bearing, not defensive:
+  Round 21 established that panels can sit inside a `group`, and `deleteNode`'s
+  cascade walks `parentId` transitively, so deleting a *group* containing
+  panels must still trigger the relayout — only a count comparison catches
+  that. Covered by a dedicated test.
+- **One commit, not several inside a transaction.** `Toolbar.tsx`'s
+  `applyPreset` already composes `applyAutoLayout` + `reflowBrackets` in a
+  single commit, and `DocumentStore.commit`/`.transaction` confirms the split
+  is purely cosmetic inside a transaction — patches merge into one undo entry
+  either way. A single commit is simpler and guarantees exactly one React
+  update and one undo step per delete.
+- **`apps/web/src/deleteNodes.test.ts`** unit-tests `deleteNodesWithLayout`
+  directly against a real `DocumentStore` (no React) — the same "plain
+  function, real test" treatment `resizeGroup`/`ungroup` already get,
+  distinct from the canvas *wiring* (the keydown handler, the three buttons),
+  which stays verified live only, per this file's standing convention. Cases:
+  the repro itself (delete one of four panels, remaining three re-pack and
+  reletter to exactly match a fresh layout pass), a non-panel delete leaving
+  every panel/bracket frame untouched, a group-cascade delete still
+  triggering the relayout, permanence of the deleted panel/label/orphaned
+  bracket, an empty-selection no-op, and deleting the last remaining panel
+  without throwing.
+
+Driven in a real browser, light **and** dark: deleting a panel via the Delete
+key dropped the panel count by exactly one and relettered the remainder
+contiguously **immediately** (not only after a later action); one Ctrl+Z
+restored the panel, its label, and the original lettering together in one
+step; deleting a non-panel node (a text label) left every panel's transform
+and letter unchanged; the Layers tab's `×` button and Inspector's "Delete
+this panel" button both produced the identical contiguous relettering; and
+the originally reported sequence — delete a panel, then import a new dataset
+— produced a fully packed, contiguously lettered grid with no reserved gap,
+in both themes. No console errors throughout.
+
+**Verified:** 850 TypeScript tests (844 + 6 new: the repro, the non-panel
+no-op, the group-cascade case, permanence of the deleted panel/label/bracket,
+the empty-selection no-op, and deleting the last panel), 190 Python tests
+unchanged (nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected (no existing fixture
+deletes a panel or depends on stale numbering), and 22 live-browser checks
+across light and dark.
 
 ---
 

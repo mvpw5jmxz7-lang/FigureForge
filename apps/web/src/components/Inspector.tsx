@@ -16,7 +16,6 @@ import {
   LINE_STYLES,
   POINT_SHAPES,
   childrenOf,
-  deleteNode,
   effectiveDpi,
   findAsset,
   findDataset,
@@ -62,6 +61,7 @@ import {
 import { isRotatable } from './Canvas.js';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
+import { deleteNodesWithLayout } from '../deleteNodes.js';
 import type { DocumentApi } from '../useDocument.js';
 
 /** Every plot type. All ten render distinctly since round 7. */
@@ -576,9 +576,7 @@ export function InspectorTab({
         <button
           className="danger"
           onClick={() => {
-            api.commit('Delete nodes', (draft) => {
-              for (const id of selectedIds) deleteNode(draft, id);
-            });
+            deleteNodesWithLayout(api, theme, selectedIds);
             onSelectionChange([]);
           }}
         >
@@ -784,7 +782,7 @@ export function InspectorTab({
       <button
         className="danger"
         onClick={() => {
-          commit('Delete node', (draft) => deleteNode(draft, node.id));
+          deleteNodesWithLayout(api, theme, [node.id]);
           onSelectionChange([]);
         }}
       >

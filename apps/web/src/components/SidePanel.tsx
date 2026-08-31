@@ -14,7 +14,6 @@ import {
   dataPathFor,
   DEFAULT_VOLCANO_THRESHOLDS,
   defaultAnalysisOptions,
-  deleteNode,
   effectiveDpi,
   findAsset,
   findDataset,
@@ -67,6 +66,7 @@ import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
+import { deleteNodesWithLayout } from '../deleteNodes.js';
 import { ACCEPTED_IMAGE_TYPES, importImage, initialImageSize } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
 
@@ -2380,7 +2380,7 @@ function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePa
 // Layers
 // ---------------------------------------------------------------------------
 
-function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
+function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProps) {
   const { document: doc, commit } = api;
 
   // Highest z first, so the top of the list is the top of the stack — the
@@ -2530,7 +2530,7 @@ function LayersTab({ api, selectedIds, onSelectionChange }: SidePanelProps) {
                     title="Delete"
                     onClick={(e) => {
                       e.stopPropagation();
-                      commit('Delete node', (draft) => deleteNode(draft, node.id));
+                      deleteNodesWithLayout(api, theme, [node.id]);
                       onSelectionChange(selectedIds.filter((id) => id !== node.id));
                     }}
                   >
