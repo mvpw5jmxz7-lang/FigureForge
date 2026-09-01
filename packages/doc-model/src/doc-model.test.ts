@@ -81,6 +81,7 @@ import {
   reparentNode,
   replaceAnalysisForPlot,
   repositionBrackets,
+  rescaleArrowPoints,
   resizeGroup,
   resizePanel,
   scaleBarWidthMm,
@@ -1075,6 +1076,40 @@ describe('layout', () => {
     expect(clamped.width).toBeCloseTo(5, 6);
   });
 
+  it('snaps to the nearest 45° step under angleSnap instead of forcing a square', () => {
+    // Built for a line shape (`renderShape` draws it corner-to-corner of its
+    // own frame), which has no endpoint grips to reach 0°/90° the way an
+    // arrow's Shift-drag already does — this gives it the same three angles.
+    const original = { x: 10, y: 10, width: 40, height: 20 };
+
+    // Near-horizontal.
+    const flat = resizeFrame(original, 'se', 30, 2, { angleSnap: true });
+    expect(flat.height).toBe(0);
+    expect(flat.width).toBeGreaterThan(0);
+
+    // Near-vertical.
+    const upright = resizeFrame(original, 'se', 1, 100, { angleSnap: true });
+    expect(upright.width).toBe(0);
+    expect(upright.height).toBeGreaterThan(0);
+
+    // Exactly 45°: distance-preserving, so both sides land on the same value.
+    const diagonal = resizeFrame(original, 'se', 20, 40, { angleSnap: true });
+    expect(diagonal.width).toBeCloseTo(diagonal.height, 6);
+
+    // A snapped zero is deliberate and skips the floor — the axis it landed
+    // on is still a full line, still easy to grab, so the reason the floor
+    // exists (never lose a grabbable handle in both directions at once)
+    // doesn't apply to it. The *other* axis still honours the floor.
+    const tiny = { x: 0, y: 0, width: 5, height: 2 };
+    const nearVertical = resizeFrame(tiny, 'e', -4.99, 0, { angleSnap: true, minMm: 5 });
+    expect(nearVertical.width).toBe(0);
+    expect(nearVertical.height).toBeCloseTo(5, 6);
+
+    // An ordinary, non-angleSnap resize is unaffected.
+    const plain = resizeFrame(original, 'se', 12, 4, { aspectLock: 1 });
+    expect(plain.width).toBeCloseTo(plain.height, 6);
+  });
+
   it('is byte-identical with rotationDeg 0 or absent', () => {
     // The guarantee every existing caller relies on: adding the option changed
     // nothing for a figure that never rotates anything.
@@ -1988,11 +2023,42 @@ describe('annotations', () => {
     expect(arrow.frame.y).toBeCloseTo(16, 10);
   });
 
+  it('defaults to a horizontal line, not a diagonal, when no points are given', () => {
+    const { doc, newId } = imageDocument();
+    const after = editDocument(doc, (draft) => {
+      addArrow(draft, newId, { frame: { x: 0, y: 0, width: 20, height: 12 } });
+    });
+    const arrow = Object.values(after.nodes).find((n) => n.type === 'arrow')!;
+    const points = arrow.type === 'arrow' ? arrow.points : [];
+    expect(points).toHaveLength(2);
+    expect(points[0]!.y).toBeCloseTo(points[1]!.y, 6);
+
+    // Scaling the frame asymmetrically (the ordinary box-resize path) can
+    // only ever scale that one shared y by a single factor — it cannot
+    // introduce a diagonal on its own.
+    const rescaled = editDocument(after, (draft) => {
+      rescaleArrowPoints(draft, arrow.id, { x: 0, y: 0, width: 40, height: 3 });
+    });
+    const rescaledPoints = rescaled.nodes[arrow.id]!;
+    const p = rescaledPoints.type === 'arrow' ? rescaledPoints.points : [];
+    expect(p[0]!.y).toBeCloseTo(p[1]!.y, 6);
+  });
+
   it('leaves an already-normalised arrow alone', () => {
     const { doc, newId } = imageDocument();
     let arrowId = '';
     const withArrow = editDocument(doc, (draft) => {
-      arrowId = addArrow(draft, newId).id;
+      // Points spanning the frame's full width and height exactly — i.e.
+      // already tight, unlike the default (horizontal) fallback, which
+      // deliberately keeps a taller frame than its points need so the
+      // freshly-inserted resize handles stay well separated.
+      arrowId = addArrow(draft, newId, {
+        frame: { x: 10, y: 10, width: 20, height: 10 },
+        points: [
+          { x: 0, y: 10 },
+          { x: 20, y: 0 },
+        ],
+      }).id;
     });
     const before = withArrow.nodes[arrowId]!.frame;
     const after = editDocument(withArrow, (draft) => normaliseArrowFrame(draft, arrowId));

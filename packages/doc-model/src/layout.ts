@@ -8,7 +8,7 @@
  */
 
 import type { PointMm, RectMm } from './geometry.js';
-import { fitAspect, right, bottom, centerX, centerY, rotatePoint } from './geometry.js';
+import { fitAspect, right, bottom, centerX, centerY, rotatePoint, snapAngle } from './geometry.js';
 import type { FigureNode, NodeId, NodeMap } from './nodes.js';
 
 export interface GridSpec {
@@ -321,6 +321,14 @@ export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export interface ResizeOptions {
   /** Width/height the panel must keep, or null to resize freely. */
   aspectLock?: number | null;
+  /**
+   * Snap the frame's own diagonal angle to the nearest 45° step instead of
+   * enforcing `aspectLock`. Built for `shape: 'line'`, whose rendered angle
+   * *is* its frame's aspect ratio (`renderShape` draws it corner-to-corner)
+   * — mirrors the arrow endpoint drag's own `snapAngle` use (`Canvas.tsx`),
+   * just applied to a frame's width/height instead of a point.
+   */
+  angleSnap?: boolean;
   /** Floor on either dimension, so a panel cannot be dragged to nothing. */
   minMm?: number;
   /**
@@ -396,7 +404,19 @@ export function resizeFrame(
   let height = original.height + local.y * dirY;
 
   const aspect = options.aspectLock ?? null;
-  if (aspect && aspect > 0) {
+  if (options.angleSnap) {
+    // Treated as a point relative to the origin: atan2(height, width) is
+    // always in [0°, 90°] since both are non-negative, so rounding to the
+    // nearest 45° step can only land on 0°, 45° or 90° — the three angles a
+    // corner-to-corner line can express.
+    const snapped = snapAngle({ x: 0, y: 0 }, { x: width, y: height }, 45);
+    // Math.cos(Math.PI / 2) is ~6e-17, not exactly 0 — flatten anything this
+    // close to zero, or the 90° case would never actually reach the literal
+    // zero the floor-skip below depends on.
+    const flatten = (v: number): number => (v < 1e-6 ? 0 : v);
+    width = flatten(snapped.x);
+    height = flatten(snapped.y);
+  } else if (aspect && aspect > 0) {
     // Corner drags follow the dominant axis; edge drags derive the other side.
     if (dirX !== 0 && dirY !== 0) {
       if (Math.abs(local.x) >= Math.abs(local.y)) height = width / aspect;
@@ -408,15 +428,23 @@ export function resizeFrame(
     }
   }
 
-  width = Math.max(minWidth, width);
-  height = Math.max(minHeight, height);
-
-  if (aspect && aspect > 0) {
-    // Re-derive after clamping, or the floor would break the locked ratio.
-    if (width / height > aspect) width = height * aspect;
-    else height = width / aspect;
+  if (options.angleSnap) {
+    // A snapped 0°/90° result is a deliberate zero, not a degenerate one —
+    // only the *other* axis (still a full line, still easy to grab) honours
+    // the floor.
+    width = width === 0 ? 0 : Math.max(minWidth, width);
+    height = height === 0 ? 0 : Math.max(minHeight, height);
+  } else {
     width = Math.max(minWidth, width);
     height = Math.max(minHeight, height);
+
+    if (aspect && aspect > 0) {
+      // Re-derive after clamping, or the floor would break the locked ratio.
+      if (width / height > aspect) width = height * aspect;
+      else height = width / aspect;
+      width = Math.max(minWidth, width);
+      height = Math.max(minHeight, height);
+    }
   }
 
   // Anchor the edge opposite the handle. Handles on an axis' centre leave that

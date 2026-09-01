@@ -524,11 +524,19 @@ export function Canvas({
          *
          * There is no drag-to-draw tool here — shapes and arrows are
          * insert-then-drag — so this same path is what "draw a square" means.
+         *
+         * A line shape is the one exception: it has no endpoint grips (an
+         * arrow's own Shift-drag-an-endpoint already reaches 0°/45°/90° via
+         * `snapAngle`), and its drawn angle *is* its frame's aspect ratio, so
+         * forcing a literal square here would only ever give it 45° with no
+         * way to reach horizontal or vertical. Shift snaps its angle instead.
          */
-        const aspect = event.shiftKey ? 1 : aspectLockFor(primary);
+        const isLineShape = primary.type === 'shape' && primary.shape === 'line';
+        const aspect = event.shiftKey && !isLineShape ? 1 : aspectLockFor(primary);
         const gridMin = panelGridMinimumMm(primary);
         const resized = resizeFrame(primaryOriginal, drag.handle, dxMm, dyMm, {
           aspectLock: aspect,
+          angleSnap: event.shiftKey && isLineShape,
           minMm: 5,
           minWidthMm: gridMin.width,
           minHeightMm: gridMin.height,

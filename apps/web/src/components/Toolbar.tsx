@@ -102,7 +102,11 @@ export function Toolbar({
 
   const insertShape = (shape: 'rect' | 'ellipse' | 'line'): void =>
     commit('Insert shape', (draft) => {
-      const node = addShape(draft, newId, { shape, frame: insertFrame(20, 14) });
+      // A line's angle is its own frame's aspect ratio (renderShape draws it
+      // corner-to-corner) — start it flat rather than at the generic
+      // non-square rect/ellipse default, which drew a diagonal.
+      const frame = shape === 'line' ? insertFrame(20, 0) : insertFrame(20, 14);
+      const node = addShape(draft, newId, { shape, frame });
       onSelectionChange([node.id]);
     });
 

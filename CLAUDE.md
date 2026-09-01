@@ -256,6 +256,22 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 27 (arrows and lines that default to diagonal, and a
+line shape with no way to reach horizontal/vertical):** 906 TypeScript
+tests, 190 Python tests unchanged, `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, and 22 live-browser checks
+across light and dark. **Measured, not assumed**: the reported "difficult
+to draw vertical or horizontal" was traced to two separate defaults before
+anything was changed — a freshly inserted arrow's fallback points and a
+freshly inserted line shape's frame were both diagonal by construction, not
+by drag — and after the fix, a Shift-drag on a line shape's corner handle
+was driven through several headings and read directly off the rendered
+resize-handle coordinates: a near-horizontal drag landed with its `n`/`s`
+handles at the same y, a near-vertical drag landed with `w`/`e` at the same
+x, and a deliberately even push landed on a square, with an ordinary
+rectangle's own Shift-resize confirmed unchanged (still a literal square)
+in the same run. See "Round 27" below.
+
 **Verified after round 26 (an align/distribute function for canvas objects,
 including panel labels):** 904 TypeScript tests, 190 Python tests unchanged,
 `tsc --build --force` and `eslint .` clean, 46-check acceptance run
@@ -4349,6 +4365,118 @@ double-moving, and distribute's three-minimum), 190 Python tests unchanged
 (nothing here touches `services/api`), `tsc --build --force` and
 `eslint .` clean, 46-check acceptance run unaffected (no existing fixture
 selects multiple nodes for alignment).
+
+### Round 27 — arrows and lines that were diagonal by default, not by choice
+
+Reported: inserting an arrow or a line drops it in diagonally inside its
+rectangular resize box, making it hard to end up with a clean horizontal or
+vertical line. Two independent causes, one per entry point — an `arrow`
+and a `shape: 'line'` are different node types with no shared geometry, so
+each needed its own fix.
+
+- **An arrow's diagonal default was a deliberate choice, not a bug** — the
+  comment above `addArrow`'s fallback points said so ("Up and to the right:
+  an arrow's default job is to point at a feature"). Asked directly, the
+  user chose to change it anyway: the fallback (used whenever a caller
+  doesn't pass explicit points, which `Toolbar.tsx`'s `insertArrow()` never
+  does) now runs through the frame's vertical centre —
+  `[{x:0,y:height/2},{x:width,y:height/2}]` — instead of corner to corner.
+  The frame itself stays the real 20×12 mm `insertFrame` box rather than
+  collapsing to match: because both fallback points share one `y`, the
+  ordinary box-resize path (`rescaleArrowPoints`, which scales `points`
+  proportionally with the frame) can only ever scale that shared `y` by one
+  factor for both points, so a freshly-inserted arrow stays perfectly
+  horizontal through an ordinary corner/edge drag, with no Shift needed —
+  and keeping a non-degenerate frame means its 8 resize handles stay well
+  separated and easy to grab immediately, rather than collapsing onto each
+  other. Reaching any other heading is unchanged and was already correct:
+  Shift-drag an endpoint grip calls `snapAngle` (45° steps,
+  distance-preserving, measured from the other endpoint) — that mechanism
+  was never the defect, only the starting point was.
+- **A `shape: 'line'` has no `points` at all — `renderShape` draws it
+  corner-to-corner of its own `frame`, so its angle *is* its frame's aspect
+  ratio**, and it has no endpoint grips to extend the way an arrow does
+  (confirmed against `renderSelection`: nothing special-cases it, it gets
+  only the ordinary 8 rectangular resize handles). Two compounding gaps,
+  both closed:
+  - It defaulted to the same non-square `insertFrame(20, 14)` every shape
+    uses. `Toolbar.tsx`'s `insertShape` now gives `'line'` its own default —
+    `insertFrame(20, 0)` — so it starts flat. `RectMm.height` is already
+    schema-validated as `nonnegative()`, not `positive()`, so `0` needed no
+    schema change.
+  - Resizing it via the box handles went through the fully generic path in
+    `Canvas.tsx`, where Shift has always meant "lock to a square" — correct
+    for a rect/ellipse/panel/image, but for a line this forced exactly 45°
+    with **no way at all** to reach 0°/90° short of dragging a single edge
+    handle to a sub-millimetre sliver by eye, a precision the generic 5 mm
+    (`MIN_TILE_MM`) resize floor every node gets stopped it from reaching
+    anyway. Asked directly, the user confirmed this should close: Shift on
+    a line shape now snaps its angle instead of forcing a square.
+    `ResizeOptions` gained `angleSnap?: boolean` (`layout.ts`); inside
+    `resizeFrame`, it reuses `snapAngle` on `(width, height)` treated as a
+    point relative to the origin — `atan2(height, width)` is always in
+    `[0°, 90°]` since both are non-negative, so rounding to the nearest 45°
+    step can only land on 0°, 45° or 90°, exactly the three angles a
+    corner-to-corner line can express. `geometry.ts` imports nothing
+    itself, so `layout.ts` importing `snapAngle` from it added no cycle.
+    `Canvas.tsx`'s box-resize branch detects `primary.type === 'shape' &&
+    primary.shape === 'line'` and passes `angleSnap` in place of forcing
+    `aspectLock: 1` for that one case only — every other node type's
+    Shift-resize is byte-identical to before this round.
+  - **A snapped 0°/90° result is a deliberate zero, not a degenerate one,
+    and needed its own floor treatment.** The generic 5 mm floor exists so
+    a *filled* shape/panel never loses a grabbable handle in both
+    directions at once; that doesn't apply to a line snapped flat, since
+    the other axis is still a full-length line, still easy to grab by its
+    `w`/`e` (or `n`/`s`) handles. So `resizeFrame`'s floor-clamp step skips
+    the collapsed axis entirely under `angleSnap` rather than pulling it
+    back up to 5 mm, which would have silently defeated the whole point of
+    snapping to exactly flat. One floating-point trap found while writing
+    this: `Math.cos(Math.PI / 2)` is `~6e-17`, not exactly `0` — without
+    flattening anything under `1e-6` to a literal zero first, the 90° case
+    would never actually reach the exact zero the floor-skip depends on,
+    and would instead clamp right back up to 5 mm every time.
+  - Arrows' own box-resize path (`rescaleArrowPoints`) is untouched — an
+    arrow already has a correct, more precise angle-snap mechanism via its
+    endpoint grips, and changing box-resize behaviour for it wasn't asked
+    for or needed.
+- **A test-writing trap, caught before it shipped a false confidence: a
+  chained sequence of Shift-drags on one line shape does not test what it
+  looks like it tests.** The first live-verification script dragged one
+  line shape's `se` handle near-horizontal, then near-vertical, then to
+  45°, reusing the same shape across all three. The second drag's raw
+  angle depends on the *frame the first drag left behind*, not the
+  original flat insert — so a modest "near-vertical" delta applied to an
+  already-widened frame landed on 45° instead of 90°, which read as a
+  snapping bug until the actual cause (compounding state across drags, not
+  the angle-snap math) was traced by hand. Fixed in the test, not the
+  implementation, by deleting and re-inserting a fresh flat line before
+  each directional case — the standing "green tests do not mean the app
+  runs" rule cutting the other way this time: a *live* script can just as
+  easily give a false negative as a unit suite can give a false positive,
+  and both need the same "verify the premise before trusting the result"
+  discipline.
+
+Driven in a real browser, light **and** dark, 22 checks each: a freshly
+inserted arrow's two endpoint handles read the same y (flat, not diagonal);
+Shift-dragging one endpoint through a large, deliberately unambiguous
+vertical screen delta landed both handles on the same x; a freshly inserted
+line shape's `n`/`s` resize handles coincided (flat); Shift-dragging its
+`se` handle near-horizontal, near-vertical and evenly in both axes read
+back as flat, upright and square respectively off the resize handles'
+own rendered coordinates; a non-Shift drag on the same line shape stayed
+unsnapped at a deliberately odd angle; and Shift-resizing an ordinary
+rectangle still locked to a literal square, confirming the line-shape
+branch didn't leak into any other node type. No console errors in either
+theme.
+
+**Verified:** 906 TypeScript tests (904 + 2 new: `resizeFrame`'s
+`angleSnap` branch — flat/upright/square/floor-skip/regression cases in one
+test — and `addArrow`'s horizontal fallback, plus a fix to an existing test
+that had unknowingly relied on the old diagonal default being frame-tight),
+190 Python tests unchanged (nothing here touches `services/api`), `tsc
+--build --force` and `eslint .` clean, 46-check acceptance run unaffected
+(no existing fixture inserts or resizes an arrow or a line shape).
 
 ## What's next
 

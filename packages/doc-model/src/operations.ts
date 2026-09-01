@@ -1580,10 +1580,12 @@ export function addArrow(
   options: AddArrowOptions = {},
 ): ArrowNode {
   const frame = options.frame ?? { x: 10, y: 10, width: 20, height: 10 };
-  // Up and to the right: an arrow's default job is to point at a feature.
+  // Horizontal: a clean starting line an author can re-aim from either end
+  // (Shift-drag an endpoint snaps it to 45° steps, so any orientation is
+  // one drag away) rather than a diagonal they have to fight first.
   const fallback: PointMm[] = [
-    { x: 0, y: frame.height },
-    { x: frame.width, y: 0 },
+    { x: 0, y: frame.height / 2 },
+    { x: frame.width, y: frame.height / 2 },
   ];
   // The schema requires at least two points; a shorter list would validate on
   // screen and make the saved project unloadable.
