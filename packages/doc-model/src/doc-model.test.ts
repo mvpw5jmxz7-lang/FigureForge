@@ -57,7 +57,9 @@ import {
   addScaleBar,
   addShape,
   addText,
+  alignSelection,
   applyAutoLayout,
+  distributeSelection,
   defaultPlotTypeFor,
   deleteNode,
   duplicateNode,
@@ -91,6 +93,7 @@ import {
   type PlotMeasurements,
 } from './operations.js';
 import { absoluteFrame } from './nodes.js';
+import type { BracketNode } from './nodes.js';
 import {
   alignFrames,
   autoLayout,
@@ -2370,6 +2373,203 @@ describe('grouping', () => {
       // Panel Two never moved, so its label must not have been touched.
       const labelTwoAfter = moved.nodes[labelTwo.id]!;
       expect(labelTwoAfter.frame).toEqual(labelTwoBefore);
+    });
+  });
+
+  describe('align/distribute selection', () => {
+    function threeShapes() {
+      const { doc, newId } = imageDocument();
+      const ids: string[] = [];
+      const after = editDocument(doc, (draft) => {
+        ids.push(addShape(draft, newId, { shape: 'rect', frame: { x: 10, y: 10, width: 20, height: 10 } }).id);
+        ids.push(addShape(draft, newId, { shape: 'ellipse', frame: { x: 50, y: 30, width: 20, height: 10 } }).id);
+        ids.push(addShape(draft, newId, { shape: 'rect', frame: { x: 90, y: 60, width: 20, height: 10 } }).id);
+      });
+      return { doc: after, ids, newId };
+    }
+
+    it('aligns nodes with different parents by their absolute position', () => {
+      const { doc, ids, newId } = twoShapes();
+      let groupId = '';
+      let outsideId = '';
+      const withGroup = editDocument(doc, (draft) => {
+        groupId = addGroup(draft, newId, ids)!.id;
+        outsideId = addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } }).id;
+      });
+
+      const memberId = ids[0]!; // now parented under the group
+      const groupOriginX = withGroup.nodes[groupId]!.frame.x;
+
+      const aligned = editDocument(withGroup, (draft) => {
+        alignSelection(draft, [memberId, outsideId], 'left');
+      });
+
+      // Both land at the selection's shared minimum x, in page-absolute
+      // terms, even though one is nested inside a group and the other is
+      // top-level.
+      const expectedX = Math.min(absoluteFrame(withGroup.nodes, memberId)!.x, absoluteFrame(withGroup.nodes, outsideId)!.x);
+      expect(absoluteFrame(aligned.nodes, memberId)!.x).toBeCloseTo(expectedX, 6);
+      expect(absoluteFrame(aligned.nodes, outsideId)!.x).toBeCloseTo(expectedX, 6);
+      // The group itself was not in the selection, so its own origin — and
+      // therefore the member's local, parent-relative frame — moved by
+      // exactly the same amount its absolute position did.
+      expect(aligned.nodes[groupId]!.frame.x).toBeCloseTo(groupOriginX, 6);
+    });
+
+    it("carries a panel's label along when the panel itself is in the selection", () => {
+      const { doc } = sampleDocument();
+      const panelOne = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'One')!;
+      const panelTwo = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'Two')!;
+      // The two sample panels already share a top y — 'top' would be a
+      // correct no-op and could pass even with a stale pre-move snapshot.
+      // 'left' actually moves whichever panel isn't already the leftmost
+      // (they differ in x), which is what exercises the label-sync path —
+      // panelTwo starts to the right of panelOne, so panelTwo is the one
+      // that moves.
+      expect(panelTwo.frame.x).toBeGreaterThan(panelOne.frame.x);
+      const labelTwo = Object.values(doc.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === panelTwo.id,
+      )!;
+      const offset = { x: labelTwo.frame.x - panelTwo.frame.x, y: labelTwo.frame.y - panelTwo.frame.y };
+
+      const aligned = editDocument(doc, (draft) => {
+        alignSelection(draft, [panelOne.id, panelTwo.id], 'left');
+      });
+
+      const panelTwoAbsAfter = absoluteFrame(aligned.nodes, panelTwo.id)!;
+      const labelAfter = aligned.nodes[labelTwo.id]!;
+      // The panel actually moved — otherwise this assertion would pass
+      // trivially even if the label were never synced at all.
+      expect(panelTwoAbsAfter.x).not.toBeCloseTo(panelTwo.frame.x, 3);
+      expect(labelAfter.frame.x).toBeCloseTo(panelTwoAbsAfter.x + offset.x, 6);
+      expect(labelAfter.frame.y).toBeCloseTo(panelTwoAbsAfter.y + offset.y, 6);
+    });
+
+    it('skips a locked node — excluded from both the bounding box and the move', () => {
+      const { doc, ids } = threeShapes();
+      const [lockedId, freeOneId, freeTwoId] = ids as [string, string, string];
+      const lockedBefore = { ...doc.nodes[lockedId]!.frame };
+
+      const locked = editDocument(doc, (draft) => {
+        draft.nodes[lockedId]!.locked = true;
+      });
+
+      const aligned = editDocument(locked, (draft) => {
+        alignSelection(draft, [lockedId, freeOneId, freeTwoId], 'left');
+      });
+
+      expect(aligned.nodes[lockedId]!.frame).toEqual(lockedBefore);
+      // The bounding box the two free shapes aligned to came from just the
+      // two of them — the locked shape's far-left x never entered it.
+      const expectedX = Math.min(locked.nodes[freeOneId]!.frame.x, locked.nodes[freeTwoId]!.frame.x);
+      expect(aligned.nodes[freeOneId]!.frame.x).toBeCloseTo(expectedX, 6);
+      expect(aligned.nodes[freeTwoId]!.frame.x).toBeCloseTo(expectedX, 6);
+    });
+
+    it('skips brackets and scale bars — their positions are owned elsewhere', () => {
+      const { doc, ids, newId, image } = (() => {
+        const base = imageDocument();
+        const shapeIds: string[] = [];
+        const withShapes = editDocument(base.doc, (draft) => {
+          shapeIds.push(
+            addShape(draft, base.newId, { shape: 'rect', frame: { x: 10, y: 10, width: 20, height: 10 } }).id,
+          );
+          shapeIds.push(
+            addShape(draft, base.newId, { shape: 'ellipse', frame: { x: 50, y: 30, width: 20, height: 10 } }).id,
+          );
+        });
+        return { doc: withShapes, ids: shapeIds, newId: base.newId, image: base.image };
+      })();
+
+      let barId = '';
+      const withBar = editDocument(doc, (draft) => {
+        const bar = addScaleBar(draft, newId, {
+          imageId: image.id,
+          length: 10,
+          pixelsPerUnit: 10,
+          unitLabel: 'µm',
+          calibrationSource: 'manual',
+        });
+        barId = bar!.id;
+
+        const bracket: BracketNode = {
+          id: 'test-bracket',
+          name: 'Test bracket',
+          parentId: null,
+          layerId: 'Statistics',
+          frame: { x: 5, y: 5, width: 15, height: 4 },
+          rotation: 0,
+          opacity: 1,
+          locked: false,
+          hidden: false,
+          z: 0,
+          type: 'bracket',
+          analysisId: null,
+          label: 'ns',
+          style: {},
+          stroke: { color: '#000000', widthMm: 0.18 },
+          tickMm: 1.2,
+        };
+        draft.nodes[bracket.id] = bracket;
+      });
+
+      const barBefore = { ...withBar.nodes[barId]!.frame };
+      const bracketBefore = { ...withBar.nodes['test-bracket']!.frame };
+
+      const aligned = editDocument(withBar, (draft) => {
+        alignSelection(draft, [ids[0]!, ids[1]!, barId, 'test-bracket'], 'left');
+      });
+
+      // The two shapes moved (their shared min-x is 10, not both already there).
+      expect(aligned.nodes[ids[0]!]!.frame.x).toBeCloseTo(10, 6);
+      expect(aligned.nodes[ids[1]!]!.frame.x).toBeCloseTo(10, 6);
+      // Neither the scale bar nor the bracket did.
+      expect(aligned.nodes[barId]!.frame).toEqual(barBefore);
+      expect(aligned.nodes['test-bracket']!.frame).toEqual(bracketBefore);
+    });
+
+    it('does not double-move a member when its own group is also selected', () => {
+      const { doc, ids, newId } = twoShapes();
+      let groupId = '';
+      const withGroup = editDocument(doc, (draft) => {
+        groupId = addGroup(draft, newId, ids)!.id;
+      });
+      const memberId = ids[0]!;
+
+      const groupAbsBefore = absoluteFrame(withGroup.nodes, groupId)!;
+      const memberAbsBefore = absoluteFrame(withGroup.nodes, memberId)!;
+      const expectedX = Math.min(groupAbsBefore.x, memberAbsBefore.x);
+
+      const aligned = editDocument(withGroup, (draft) => {
+        alignSelection(draft, [groupId, memberId], 'left');
+      });
+
+      // Each was aligned from its own pre-mutation absolute position, not
+      // re-read after the other had already moved — otherwise the member,
+      // riding along with its already-shifted group, would land past
+      // `expectedX` a second time.
+      expect(absoluteFrame(aligned.nodes, groupId)!.x).toBeCloseTo(expectedX, 6);
+      expect(absoluteFrame(aligned.nodes, memberId)!.x).toBeCloseTo(expectedX, 6);
+    });
+
+    it('distributes three or more objects with equal gaps, and leaves fewer than three untouched', () => {
+      const { doc, ids } = threeShapes();
+
+      const distributed = editDocument(doc, (draft) => {
+        distributeSelection(draft, ids, 'x');
+      });
+
+      const xs = ids.map((id) => distributed.nodes[id]!.frame.x).sort((a, b) => a - b);
+      const widths = ids.map((id) => distributed.nodes[id]!.frame.width);
+      const gap1 = xs[1]! - (xs[0]! + widths[0]!);
+      const gap2 = xs[2]! - (xs[1]! + widths[1]!);
+      expect(gap1).toBeCloseTo(gap2, 6);
+
+      const twoOnly = editDocument(doc, (draft) => {
+        distributeSelection(draft, [ids[0]!, ids[1]!], 'x');
+      });
+      expect(twoOnly.nodes[ids[0]!]!.frame).toEqual(doc.nodes[ids[0]!]!.frame);
+      expect(twoOnly.nodes[ids[1]!]!.frame).toEqual(doc.nodes[ids[1]!]!.frame);
     });
   });
 });

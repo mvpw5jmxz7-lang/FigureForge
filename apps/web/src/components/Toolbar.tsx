@@ -5,16 +5,22 @@ import {
   addScaleBar,
   addShape,
   addText,
+  ALIGNABLE_NODE_TYPES,
+  alignSelection,
   applyAutoLayout,
+  distributeSelection,
   formatMm,
+  isLocked,
   relabelPanels,
   reorderNode,
   suggestGrid,
   templatesForPanelCount,
   findLayoutTemplate,
   ungroup,
+  type AlignMode,
   type DisplayUnit,
   type FigureDocument,
+  type GuideAxis,
   type NodeId,
   type RectMm,
 } from '@figureforge/doc-model';
@@ -147,6 +153,37 @@ export function Toolbar({
       const members = ungroup(draft, selectedGroup);
       if (members.length > 0) onSelectionChange(members);
     });
+  };
+
+  // Same predicate `alignSelection`/`distributeSelection` themselves filter
+  // by, read here only to gate and label the dropdown — not a second,
+  // independently-typed-out copy of which types are alignable.
+  const alignableCount = selectedIds.filter((id) => {
+    const node = doc.nodes[id];
+    return node !== undefined && ALIGNABLE_NODE_TYPES.has(node.type) && !isLocked(doc, id);
+  }).length;
+
+  // Brackets sit in absolute page space (see `alignSelection`'s own doc
+  // comment), so aligning a panel that carries one needs the same
+  // reflow-after-reposition step `applyPreset`/`arrange` already take.
+  const runAlign = (mode: AlignMode): void => {
+    api.transaction(`Align ${mode}`, () => {
+      commit('Align', (draft) => alignSelection(draft, selectedIds, mode));
+      commit('Reposition brackets', (draft) => reflowBrackets(draft, theme));
+    });
+  };
+
+  const runDistribute = (axis: GuideAxis): void => {
+    api.transaction(`Distribute ${axis}`, () => {
+      commit('Distribute', (draft) => distributeSelection(draft, selectedIds, axis));
+      commit('Reposition brackets', (draft) => reflowBrackets(draft, theme));
+    });
+  };
+
+  const runAlignCommand = (value: string): void => {
+    if (value === 'distribute-x') runDistribute('x');
+    else if (value === 'distribute-y') runDistribute('y');
+    else if (value) runAlign(value as AlignMode);
   };
 
   const panelCount = Object.values(doc.nodes).filter((n) => n.type === 'panel').length;
@@ -378,6 +415,42 @@ export function Toolbar({
         >
           Ungroup
         </button>
+      </div>
+
+      {/* Align/distribute whatever is selected — panels, images, shapes,
+          arrows, text, groups and panel labels alike. A one-shot command
+          dropdown, not bound to a persistent document field, so it resets
+          to its placeholder after firing rather than showing a "stuck"
+          option. */}
+      <div className="toolbar-group">
+        <select
+          value=""
+          disabled={alignableCount < 2}
+          title={
+            alignableCount < 2
+              ? 'Select at least two objects to align'
+              : 'Align or distribute the selection'
+          }
+          onChange={(e) => {
+            const value = e.target.value;
+            e.target.value = '';
+            runAlignCommand(value);
+          }}
+        >
+          <option value="">Align…</option>
+          <option value="left">Left edges</option>
+          <option value="center-h">Center horizontally</option>
+          <option value="right">Right edges</option>
+          <option value="top">Top edges</option>
+          <option value="center-v">Center vertically</option>
+          <option value="bottom">Bottom edges</option>
+          <option value="distribute-x" disabled={alignableCount < 3}>
+            Distribute horizontally
+          </option>
+          <option value="distribute-y" disabled={alignableCount < 3}>
+            Distribute vertically
+          </option>
+        </select>
       </div>
 
       {/* Draw order for whatever is selected. Layers has the same two steps per

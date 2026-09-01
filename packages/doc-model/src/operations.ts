@@ -19,11 +19,15 @@ import { layerByName, nextZ } from './document.js';
 import type { PointMm, RectMm } from './geometry.js';
 import { union } from './geometry.js';
 import {
+  alignFrames,
   autoLayout,
+  distributeFrames,
   gridCells,
   readingOrder,
   suggestGrid,
+  type AlignMode,
   type GridSpec,
+  type GuideAxis,
   type LayoutOptions,
 } from './layout.js';
 import type { LayoutTemplate } from './templates.js';
@@ -33,6 +37,7 @@ import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
   descendantsOf,
+  isEffectivelyLocked,
 } from './nodes.js';
 import type {
   ArrowNode,
@@ -1776,6 +1781,126 @@ export function syncPanelLabelsFromSnapshot(draft: FigureDocument, before: Reado
       }
     }
   }
+}
+
+/**
+ * Node types a plain frame align/distribute may reposition.
+ *
+ * Deliberately excludes `bracket` (sits in absolute page space, positioned
+ * by `layoutBracketsForPlot`/`userOffsetMm`, and reflowed at the app layer
+ * after any panel move — see `alignSelection`'s own doc comment) and
+ * `scale-bar` (its `frame.width` is derived by `scaleBarWidthMm` and owned
+ * by `resyncScaleBars`). A plain align would fight both.
+ */
+export const ALIGNABLE_NODE_TYPES = new Set<FigureNode['type']>([
+  'panel',
+  'image',
+  'shape',
+  'arrow',
+  'text',
+  'panel-label',
+  'group',
+]);
+
+/**
+ * Every alignable, unlocked target's absolute frame and its ancestor
+ * origin, captured before any mutation.
+ *
+ * Reading the origin now — rather than re-deriving it after some targets
+ * have already moved — is what keeps a selection that happens to include
+ * both a container and one of its own descendants from compounding a
+ * double move: every target's starting point is fixed before the first
+ * write happens.
+ */
+function alignableSnapshot(
+  nodes: NodeMap,
+  ids: readonly NodeId[],
+): Map<NodeId, { abs: RectMm; originX: number; originY: number }> {
+  const out = new Map<NodeId, { abs: RectMm; originX: number; originY: number }>();
+  for (const id of ids) {
+    const node = nodes[id];
+    if (!node || !ALIGNABLE_NODE_TYPES.has(node.type) || isEffectivelyLocked(nodes, id)) continue;
+    const abs = absoluteFrame(nodes, id);
+    if (!abs) continue;
+    out.set(id, { abs, originX: abs.x - node.frame.x, originY: abs.y - node.frame.y });
+  }
+  return out;
+}
+
+/**
+ * Every panel among `targets`' absolute position, for reconciling their
+ * labels once alignment/distribution has moved them.
+ *
+ * Must be read before any frame is mutated — `syncPanelLabelsFromSnapshot`
+ * computes each label's shift as the *difference* between this snapshot and
+ * the panel's position afterward, so a snapshot taken even one write late
+ * would already equal the new position and compute a zero delta.
+ */
+function panelLabelSnapshotFor(nodes: NodeMap, targets: ReadonlySet<NodeId>): Map<NodeId, PointMm> {
+  const before = new Map<NodeId, PointMm>();
+  for (const id of targets) {
+    if (nodes[id]?.type !== 'panel') continue;
+    for (const [panelId, pt] of snapshotPanelAbsolutePositions(nodes, id)) before.set(panelId, pt);
+  }
+  return before;
+}
+
+/**
+ * Align a selection to its own bounding box — left/right/top/bottom edges
+ * or horizontal/vertical centring.
+ *
+ * `alignFrames` (`layout.ts`) is pure geometry over `Map<NodeId, RectMm>`
+ * with no notion of parent; this is the document-aware wrapper that
+ * converts each target to page-absolute space (frames can come from
+ * different parents — a shape inside one panel, a top-level text, a
+ * parentless panel-label), aligns, and converts back. Brackets are never
+ * targets (see `ALIGNABLE_NODE_TYPES`) because they sit in absolute page
+ * space and do not move with the panel they annotate — callers that may
+ * have aligned a panel should follow this with `reflowBrackets` (in
+ * `packages/render`, so it cannot be called from here) the same way
+ * `applyPreset`/`arrange` already do after any other panel reposition.
+ */
+export function alignSelection(draft: FigureDocument, ids: readonly NodeId[], mode: AlignMode): void {
+  const snapshot = alignableSnapshot(draft.nodes, ids);
+  if (snapshot.size < 2) return;
+
+  const labelsBefore = panelLabelSnapshotFor(draft.nodes, new Set(snapshot.keys()));
+
+  const absFrames = new Map<NodeId, RectMm>();
+  for (const [id, o] of snapshot) absFrames.set(id, o.abs);
+  const aligned = alignFrames(absFrames, mode);
+
+  for (const [id, o] of snapshot) {
+    const newAbs = aligned.get(id);
+    if (!newAbs) continue;
+    draft.nodes[id]!.frame = { ...draft.nodes[id]!.frame, x: newAbs.x - o.originX, y: newAbs.y - o.originY };
+  }
+
+  syncPanelLabelsFromSnapshot(draft, labelsBefore);
+}
+
+/**
+ * Equalise the gaps between three or more selected objects along one axis.
+ *
+ * Same document-aware wrapper as `alignSelection`, over `distributeFrames`.
+ */
+export function distributeSelection(draft: FigureDocument, ids: readonly NodeId[], axis: GuideAxis): void {
+  const snapshot = alignableSnapshot(draft.nodes, ids);
+  if (snapshot.size < 3) return;
+
+  const labelsBefore = panelLabelSnapshotFor(draft.nodes, new Set(snapshot.keys()));
+
+  const absFrames = new Map<NodeId, RectMm>();
+  for (const [id, o] of snapshot) absFrames.set(id, o.abs);
+  const distributed = distributeFrames(absFrames, axis);
+
+  for (const [id, o] of snapshot) {
+    const newAbs = distributed.get(id);
+    if (!newAbs) continue;
+    draft.nodes[id]!.frame = { ...draft.nodes[id]!.frame, x: newAbs.x - o.originX, y: newAbs.y - o.originY };
+  }
+
+  syncPanelLabelsFromSnapshot(draft, labelsBefore);
 }
 
 /**

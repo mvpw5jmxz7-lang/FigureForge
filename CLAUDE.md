@@ -256,6 +256,20 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 26 (an align/distribute function for canvas objects,
+including panel labels):** 904 TypeScript tests, 190 Python tests unchanged,
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected, and live-browser checks in both light and dark. **Measured, not
+assumed**: a bug in the first draft — the panel-label sync snapshot was
+taken *after* frames were already mutated, so every computed delta was
+zero — was caught live (the label visibly did not follow its panel) even
+though the unit test for the same behaviour had passed, because that test
+happened to use an align mode that was a geometric no-op on the sample
+document; both the implementation and the test were fixed together, and the
+live check re-run afterward read the label's own rendered `<text>`
+transform shifting by the exact same delta as its panel's. See "Round 26"
+below.
+
 **Verified after round 25 (a second axis-title line overlapping the tick
 labels):** 898 TypeScript tests, 190 Python tests unchanged, `tsc --build
 --force` and `eslint .` clean, 46-check acceptance run unaffected, and a
@@ -4244,6 +4258,98 @@ check), 190 Python tests unchanged (nothing here touches `services/api`),
 `tsc --build --force` and `eslint .` clean, 46-check acceptance run
 unaffected (no existing fixture uses a multi-line rotated title).
 
+### Round 26 — an align/distribute function for canvas objects, including panel labels
+
+Requested: a way to align multiple selected objects — panels, shapes, text,
+arrows, images, groups — explicitly including panel labels, which could
+previously only be nudged by hand one at a time.
+
+- **The geometry already existed, fully tested, and was wired to nothing.**
+  `alignFrames`/`distributeFrames` in `layout.ts` — six align modes plus
+  gap-equalising distribution, pure functions over `Map<NodeId, RectMm>` —
+  had a geometry-only unit test and zero call sites anywhere in `apps/web`.
+  This round's whole job was the document-aware wrapper and the UI, not new
+  geometry, which is exactly what "Already scaffolded but unused" already
+  named it as.
+- **`alignSelection`/`distributeSelection` (`operations.ts`) convert to and
+  from page-absolute space, once, before any frame is written.**
+  `NodeBase.frame` is parent-relative and a selection can span different
+  parents — a shape inside one panel, a top-level text, a parentless
+  panel-label — so every target's `absoluteFrame` and its ancestor origin
+  are snapshotted *before* the pure align/distribute call, and each result
+  is converted back by subtracting that same pre-mutation origin. Reading
+  the snapshot before any write, rather than re-deriving it after some
+  targets have already moved, is what keeps a selection that happens to
+  include both a container and one of its own descendants from compounding
+  a double move — pinned by a dedicated test rather than left as an
+  assumption about an edge case nobody would normally hit.
+- **`ALIGNABLE_NODE_TYPES` deliberately excludes `bracket` and
+  `scale-bar`.** A bracket sits in **absolute page space** and does not
+  move with the panel it annotates — `Toolbar.tsx`'s own existing comment
+  on `applyPreset` already says so, which is why every panel-repositioning
+  command already follows its layout commit with `reflowBrackets`. A scale
+  bar's `frame.width` is derived by `scaleBarWidthMm` and owned by
+  `resyncScaleBars`. A plain frame align would fight both, so neither is
+  ever a target — silently skipped if selected, the same treatment a
+  locked node already gets.
+- **Panel labels needed no special-casing to become alignable.** They are
+  ordinary top-level nodes with `parentId: null`, so `frame ===
+  absoluteFrame` for them already, and a user could already drag one
+  independently by hand with nothing snapping it back except the next
+  structural pass — aligning them plainly, the same way every other node
+  aligns, is consistent with that existing precedent, not a new risk.
+- **A panel *itself* in the aligned/distributed selection still needs its
+  label carried along**, reusing Round 21's
+  `snapshotPanelAbsolutePositions`/`syncPanelLabelsFromSnapshot` exactly as
+  `resizeGroup` already does. **The first implementation had this
+  backwards** — it captured the "before" panel-position snapshot *after*
+  the frames had already been mutated, so `syncPanelLabelsFromSnapshot`'s
+  own delta computed to zero on every call. The unit test for this
+  behaviour passed anyway, because it happened to align two sample panels
+  on an axis where they already shared a position — a geometric no-op that
+  proved nothing. **Live-browser testing caught what the test missed**: a
+  panel's letter visibly stayed behind while its panel moved. Both the
+  operation (snapshot moved to before the mutation loop) and the test
+  (switched to a mode that actually moves the panel, with an explicit
+  assertion that it did) were fixed together — the standing "green tests
+  do not mean the app runs" rule earning its keep once more, and a reminder
+  that a passing test on a no-op input is not evidence of anything.
+- **Toolbar wiring is one `<select>`**, following the existing
+  command-style dropdown pattern (reset to its placeholder after firing,
+  rather than bound to a persistent document field) rather than a row of
+  buttons — this app has no icon system, and a `<select>` matches how the
+  layout-template picker already presents a many-option choice as text.
+  `runAlign`/`runDistribute` each follow `applyPreset`/`arrange`'s own
+  two-commit-in-one-transaction shape: align or distribute the frames, then
+  `reflowBrackets`, in one undo step — so a bracket on an aligned panel's
+  plot is never left stranded. The dropdown (and, independently, each
+  Distribute option) is disabled with a `title` explaining why, matching
+  the Group/Ungroup buttons' own existing convention. Rotated leaf nodes
+  align by their plain, unrotated frame, the same way `snapFrame`/
+  `resizePanel` already ignore rotation, rather than inventing new rotated
+  bounding-box math with no precedent anywhere else in this codebase.
+
+Driven in a real browser, light **and** dark: selecting two sample panels
+and choosing "Left edges" moved the right-hand panel's x to exactly match
+the left one's, with its own panel letter shifting by the identical delta
+its panel did; one Ctrl+Z reverted both in a single step; Distribute was
+disabled with only two selected and enabled once a duplicated third panel
+brought the count to three, after which "Distribute horizontally" spread
+all three with equal gaps; and a bracket added by running a statistical
+test on a panel was still present, correctly positioned, after that
+panel's neighbours were distributed around it — confirming the
+`reflowBrackets` wiring rather than assuming it. No console errors in
+either theme.
+
+**Verified:** 904 TypeScript tests (898 + 6 new: cross-parent alignment,
+panel-label sync — the case that caught the ordering bug above — a locked
+node skipped from both the bounding box and the move, brackets/scale-bars
+skipped, a container-plus-its-own-descendant selected together not
+double-moving, and distribute's three-minimum), 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected (no existing fixture
+selects multiple nodes for alignment).
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -4277,6 +4383,9 @@ Phases 5–9, with the actual entry points:
   `absoluteFrame` ignores rotation, so a rotated container would misplace every
   descendant's chrome and every layout measurement. Widening it means fixing
   `absoluteFrame`, `snapFrame`, `alignFrames` and `measureGutters` first.
+- **`alignFrames`/`distributeFrames`** belonged in this list since the smart-guide
+  snapping machinery was built alongside them: pure, tested geometry with zero
+  call sites in `apps/web`. Round 26 wired them up — see "Round 26".
 
 ### Declared-but-missing things — check before trusting the types
 
