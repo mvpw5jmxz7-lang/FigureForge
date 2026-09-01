@@ -170,14 +170,15 @@ const checkTextSize: Rule = ({ scene, theme, document }) => {
     // Panel labels are legitimately larger than body text.
     const isPanelLabel = node.role === 'panel-label';
     /*
-     * A tick label's superscript exponent is not body text — it is set at
+     * A superscript/subscript run — a tick label's computed exponent, or a
+     * user-authored run in a text box — is not body text: it is set at
      * `superscriptSizePt`, deliberately below the journal's reading-text
      * floor, the same way a footnote mark is smaller than the sentence it
      * marks. Flagging it here would report a defect the renderer creates on
-     * purpose every time an axis uses scientific or power-of-ten notation, so
-     * it is held to `SUPERSCRIPT_MIN_PT` instead of `theme.type.minimumPt`.
+     * purpose, so it is held to `SUPERSCRIPT_MIN_PT` instead of
+     * `theme.type.minimumPt`.
      */
-    const isSuperscript = node.role === 'tick-label-sup';
+    const isSuperscript = node.role === 'tick-label-sup' || node.role === 'text-sup' || node.role === 'text-sub';
     if (isSuperscript ? pt < SUPERSCRIPT_MIN_PT - 0.01 : pt < theme.type.minimumPt - 0.01) {
       small.push(entry);
     } else if (!isPanelLabel && !isSuperscript && pt > theme.type.maximumPt + 0.01) {

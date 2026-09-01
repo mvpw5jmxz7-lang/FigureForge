@@ -360,6 +360,16 @@ export interface AxisSpec {
    * neither goes through `xyMarks`.
    */
   clipToRange?: boolean;
+  /**
+   * Per-character bold/italic/superscript/subscript runs over `title`, the
+   * same shape and the same "kept in sync with the plain string by exactly
+   * one function" (`plainTextOfRuns`) discipline as `TextNode.richText`.
+   * Absent or empty means `title` renders as plain (still possibly
+   * multi-line) text. An axis title has no whole-title `TextStyle` the way
+   * a `TextNode` does, so an unformatted run here always inherits `false`
+   * for both bold and italic — never tri-state.
+   */
+  richText?: readonly TextRun[];
 }
 
 export interface PlotNode extends NodeBase {
@@ -693,6 +703,15 @@ export interface PlotNode extends NodeBase {
    */
   cascadeAxisTitle?: string;
   /**
+   * Per-character bold/italic/superscript/subscript runs over
+   * `cascadeAxisTitle`, the same shape and discipline as `AxisSpec.richText`
+   * — `cascadeAxisTitle` has no wrapping object of its own to attach this
+   * to, so it is a sibling field rather than a nested one. Meaningless (and
+   * ignored by the renderer) whenever `cascadeAxisTitle` itself is ignored,
+   * i.e. once any series carries a `category`.
+   */
+  cascadeAxisTitleRichText?: readonly TextRun[];
+  /**
    * Close the axis into a full rectangle: draw the top and right lines the
    * default L-shaped axis omits, in the same stroke as the existing
    * left/bottom lines. Absent/false draws exactly as today.
@@ -753,9 +772,38 @@ export interface ImageNode extends NodeBase {
   preserveAspect: boolean;
 }
 
+/**
+ * One run of a `TextNode`'s rich-formatted content. `text` may itself
+ * contain `\n` — a formatted span can straddle a line break, so line
+ * structure is derived at render/edit time by scanning the flat run list
+ * rather than nested as a second array level.
+ */
+export interface TextRun {
+  text: string;
+  /**
+   * Overrides `TextStyle.fontWeight`/`fontStyle` for this run only.
+   * `undefined` inherits the node's own `style`; an explicit `false` is
+   * needed to turn a range off on a node whose own `style` is already
+   * bold/italic, which a plain boolean can't distinguish from "inherit".
+   */
+  bold?: boolean;
+  italic?: boolean;
+  /** Mutually exclusive by construction — a run is never both. */
+  script?: 'sup' | 'sub';
+}
+
 export interface TextNode extends NodeBase {
   type: 'text';
+  /**
+   * Kept in sync with `richText` (when present) by exactly one function,
+   * `plainTextOfRuns` — never a second, independently-edited source of
+   * truth. Read directly by anything that just wants "the text" (the
+   * canvas double-click overlay's initial value, dataset/list displays).
+   */
   text: string;
+  /** Per-character-range formatting over `text`. Absent = uniformly styled
+   *  by `style`, exactly the node's pre-round-23 behaviour. */
+  richText?: readonly TextRun[];
   style: TextStyle;
 }
 

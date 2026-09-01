@@ -8,7 +8,7 @@
  * just plots.
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
@@ -21,13 +21,17 @@ import {
   findDataset,
   formatMm,
   hasReplicatesAtX,
+  isRangeFormatted,
   isTwoFactor,
   normaliseArrowFrame,
+  plainTextOfRuns,
+  reconcileTextEdit,
   resizePanel,
   resyncScaleBars,
   scaleBarWidthMm,
   setImageCrop,
   setScaleBarCalibration,
+  toggleRunFormat,
   toSeries,
   ungroup,
   updateNode,
@@ -44,6 +48,7 @@ import {
   type PlotNode,
   type PlotType,
   type PointShape,
+  type TextRun,
   type TextStyle,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
@@ -59,9 +64,11 @@ import {
   reflowBrackets,
 } from '@figureforge/render';
 import { isRotatable } from './Canvas.js';
+import { SymbolPicker } from './SymbolPicker.js';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
 import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
 import { deleteNodesWithLayout } from '../deleteNodes.js';
+import { insertAtCaret } from '../textEditing.js';
 import type { DocumentApi } from '../useDocument.js';
 
 /** Every plot type. All ten render distinctly since round 7. */
@@ -1582,6 +1589,24 @@ function CascadeControls({
   series: ReturnType<typeof toSeries>;
   setPlot: (label: string, patch: Partial<PlotNode>) => void;
 }) {
+  // Called unconditionally, before the isCascadable early return below, so
+  // this component's hook count never varies between renders of the same
+  // mounted instance (isCascadable can flip as offsetStepMm/offsetStepXMm
+  // change while CascadeControls stays mounted at the same tree position).
+  const cascadeRuns: readonly TextRun[] = node.cascadeAxisTitleRichText ?? [{ text: node.cascadeAxisTitle ?? '' }];
+  const commitCascadeRuns = (nextRuns: readonly TextRun[]): void => {
+    setPlot('Format depth axis title', {
+      cascadeAxisTitle: plainTextOfRuns(nextRuns) || undefined,
+      cascadeAxisTitleRichText: nextRuns.length > 0 ? nextRuns : undefined,
+    });
+  };
+  const {
+    textareaRef: depthTitleRef,
+    onSelect: onDepthTitleSelect,
+    toggle: toggleDepthTitle,
+    isActive: depthTitleActive,
+  } = useRichTextToggle(cascadeRuns, false, false, commitCascadeRuns);
+
   if (!isCascadable(node, series.length)) return null;
 
   const geometry = computePlotGeometry(node, doc, theme);
@@ -1661,18 +1686,29 @@ function CascadeControls({
                 data — no title needed here.
               </p>
             ) : (
-              <label className="field block">
-                Depth axis title
-                <input
-                  value={node.cascadeAxisTitle ?? ''}
-                  placeholder="e.g. Concentration (mg/mL)"
-                  onChange={(e) =>
-                    setPlot('Change depth axis title', {
-                      cascadeAxisTitle: e.target.value || undefined,
-                    })
-                  }
+              <>
+                <label className="field block">
+                  Depth axis title
+                  <textarea
+                    ref={depthTitleRef}
+                    value={node.cascadeAxisTitle ?? ''}
+                    placeholder="e.g. Concentration (mg/mL)"
+                    onChange={(e) => commitCascadeRuns(reconcileTextEdit(cascadeRuns, e.target.value))}
+                    onSelect={onDepthTitleSelect}
+                  />
+                </label>
+                <FormatToggleRow
+                  isActive={depthTitleActive}
+                  onToggle={toggleDepthTitle}
+                  onInsertSymbol={(char) => {
+                    const el = depthTitleRef.current;
+                    if (!el) return;
+                    insertAtCaret(el, char, node.cascadeAxisTitle ?? '', (next) =>
+                      commitCascadeRuns(reconcileTextEdit(cascadeRuns, next)),
+                    );
+                  }}
                 />
-              </label>
+              </>
             ))}
         </>
       )}
@@ -1709,6 +1745,18 @@ function AxisFields({
 }) {
   const nonPositive = seriesValues.filter((v) => Number.isFinite(v) && v <= 0).length;
 
+  const runs: readonly TextRun[] = axis.richText ?? [{ text: axis.title }];
+  const commitRuns = (nextRuns: readonly TextRun[]): void => {
+    onChange(
+      { title: plainTextOfRuns(nextRuns), richText: nextRuns.length > 0 ? nextRuns : undefined },
+      `Format ${label} title`,
+    );
+  };
+  // An axis title has no whole-title TextStyle, so an unformatted run always
+  // inherits `false` for both bold and italic — never the tri-state a
+  // TextNode allows.
+  const { textareaRef: titleRef, onSelect, toggle, isActive } = useRichTextToggle(runs, false, false, commitRuns);
+
   const numberField = (
     key: 'min' | 'max' | 'tickStep',
     text: string,
@@ -1736,11 +1784,22 @@ function AxisFields({
     <div className="axis-fields">
       <label className="field block">
         {label} title
-        <input
+        <textarea
+          ref={titleRef}
           value={axis.title}
-          onChange={(e) => onChange({ title: e.target.value }, `Change ${label} title`)}
+          onChange={(e) => commitRuns(reconcileTextEdit(runs, e.target.value))}
+          onSelect={onSelect}
         />
       </label>
+      <FormatToggleRow
+        isActive={isActive}
+        onToggle={toggle}
+        onInsertSymbol={(char) => {
+          const el = titleRef.current;
+          if (!el) return;
+          insertAtCaret(el, char, axis.title, (next) => commitRuns(reconcileTextEdit(runs, next)));
+        }}
+      />
 
       {numeric && (
         <>
@@ -2017,6 +2076,82 @@ function AxisBreakFields({
   );
 }
 
+/**
+ * Bundles a rich-text toolbar's textarea ref, selection tracking and the
+ * toggle/pressed-state logic (`toggleRunFormat`/`isRangeFormatted`) — shared
+ * by every field that carries `TextRun`s so a free-standing text box and an
+ * axis title read the same selection and toggle the same way. `baseBold`/
+ * `baseItalic` are what an unformatted run inherits: a `TextNode`'s own
+ * whole-node style, or always `false` for an axis title, which has none.
+ */
+function useRichTextToggle(
+  runs: readonly TextRun[],
+  baseBold: boolean,
+  baseItalic: boolean,
+  commit: (nextRuns: readonly TextRun[]) => void,
+) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [selection, setSelection] = useState({ start: 0, end: 0 });
+
+  const onSelect = (): void => {
+    const el = textareaRef.current;
+    if (el) setSelection({ start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 });
+  };
+
+  const toggle = (flag: 'bold' | 'italic' | 'sup' | 'sub'): void => {
+    const baseActive = flag === 'bold' ? baseBold : flag === 'italic' ? baseItalic : false;
+    commit(toggleRunFormat(runs, selection.start, selection.end, flag, baseActive));
+    // React clears a controlled textarea's selection across the value swap
+    // the commit above triggers; put it back so the just-formatted range
+    // still reads as selected.
+    const el = textareaRef.current;
+    const { start, end } = selection;
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(start, end);
+    });
+  };
+
+  const isActive = (flag: 'bold' | 'italic' | 'sup' | 'sub'): boolean => {
+    const baseActive = flag === 'bold' ? baseBold : flag === 'italic' ? baseItalic : false;
+    return isRangeFormatted(runs, selection.start, selection.end, flag, baseActive);
+  };
+
+  return { textareaRef, onSelect, toggle, isActive };
+}
+
+/** The Bold/Italic/Superscript/Subscript toggle buttons plus a symbol picker
+ *  — the toolbar every rich-text field shares, factored out of `TextFields`'s
+ *  original inline JSX so `AxisFields` and the cascade depth-axis title can
+ *  render the identical row rather than a second copy of it. */
+function FormatToggleRow({
+  isActive,
+  onToggle,
+  onInsertSymbol,
+}: {
+  isActive: (flag: 'bold' | 'italic' | 'sup' | 'sub') => boolean;
+  onToggle: (flag: 'bold' | 'italic' | 'sup' | 'sub') => void;
+  onInsertSymbol: (char: string) => void;
+}) {
+  return (
+    <div className="format-toggle">
+      <button type="button" className={isActive('bold') ? 'active' : ''} onClick={() => onToggle('bold')}>
+        <strong>B</strong>
+      </button>
+      <button type="button" className={isActive('italic') ? 'active' : ''} onClick={() => onToggle('italic')}>
+        <em>I</em>
+      </button>
+      <button type="button" className={isActive('sup') ? 'active' : ''} onClick={() => onToggle('sup')}>
+        x²
+      </button>
+      <button type="button" className={isActive('sub') ? 'active' : ''} onClick={() => onToggle('sub')}>
+        x₂
+      </button>
+      <SymbolPicker onInsert={onInsertSymbol} />
+    </div>
+  );
+}
+
 function TextFields({
   api,
   node,
@@ -2034,22 +2169,61 @@ function TextFields({
     });
   };
 
+  // Only a free-standing text box gets rich formatting (round 23's confirmed
+  // scope) — a panel label stays the plain single-line field it always was.
+  const runs: readonly TextRun[] = node.type === 'text' ? (node.richText ?? [{ text: node.text }]) : [];
+
+  const commitRuns = (nextRuns: readonly TextRun[]): void => {
+    commit('Format text', (draft) => {
+      const target = draft.nodes[node.id];
+      if (!target || target.type !== 'text') return;
+      target.richText = nextRuns.length > 0 ? nextRuns : undefined;
+      target.text = plainTextOfRuns(nextRuns);
+    });
+  };
+
+  const { textareaRef, onSelect, toggle, isActive } = useRichTextToggle(
+    runs,
+    node.style.fontWeight === 'bold',
+    node.style.fontStyle === 'italic',
+    commitRuns,
+  );
+
   return (
     <>
       <label className="field block">
         Text
-        <input
-          value={node.text}
-          onChange={(e) =>
-            commit('Edit text', (draft) => {
-              const target = draft.nodes[node.id];
-              if (target && (target.type === 'text' || target.type === 'panel-label')) {
-                target.text = e.target.value;
-              }
-            })
-          }
-        />
+        {node.type === 'text' ? (
+          <textarea
+            ref={textareaRef}
+            value={node.text}
+            onChange={(e) => commitRuns(reconcileTextEdit(runs, e.target.value))}
+            onSelect={onSelect}
+          />
+        ) : (
+          <input
+            value={node.text}
+            onChange={(e) =>
+              commit('Edit text', (draft) => {
+                const target = draft.nodes[node.id];
+                if (target && target.type === 'panel-label') target.text = e.target.value;
+              })
+            }
+          />
+        )}
       </label>
+
+      {node.type === 'text' && (
+        <FormatToggleRow
+          isActive={isActive}
+          onToggle={toggle}
+          onInsertSymbol={(char) => {
+            const el = textareaRef.current;
+            if (!el) return;
+            insertAtCaret(el, char, node.text, (next) => commitRuns(reconcileTextEdit(runs, next)));
+          }}
+        />
+      )}
 
       <div className="field-row">
         <label className="field">
@@ -2080,6 +2254,14 @@ function TextFields({
           onChange={(e) => setStyle({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
         />
         Bold
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={node.style.fontStyle === 'italic'}
+          onChange={(e) => setStyle({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
+        />
+        Italic
       </label>
     </>
   );

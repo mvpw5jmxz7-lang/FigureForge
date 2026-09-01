@@ -47,6 +47,7 @@ import {
   type Stroke,
   type SurvivalGroup,
   type TextNode,
+  type TextRun,
   type TextStyle,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
@@ -86,6 +87,7 @@ import {
   estimateTextHeightMm,
   estimateTextWidthMm,
   leadingSignWidthMm,
+  scriptOffsetMm,
   superscriptRiseMm,
   superscriptSizePt,
   truncateToWidth,
@@ -335,6 +337,8 @@ function renderPanel(node: PanelNode, doc: FigureDocument, options: RenderOption
 }
 
 function renderText(node: TextNode, theme: Theme): SceneNode {
+  if (node.richText && node.richText.length > 0) return richTextNode(node, theme);
+
   const style = node.style;
   const lines = node.text.split('\n');
   const sizeMm = ptToMm(style.fontSizePt ?? theme.type.annotationPt);
@@ -356,6 +360,161 @@ function renderText(node: TextNode, theme: Theme): SceneNode {
     ),
     { role: 'text' },
   );
+}
+
+/**
+ * A `TextNode` with per-character `richText` — one `<text>` with a flat
+ * sequence of `<tspan>` children, generalizing both `renderText`'s own
+ * `\n`-splitting above and `tickLabelNode`'s superscript `dy` technique at
+ * once rather than nesting one inside the other. A run's own `.text` can
+ * itself contain `\n` (a formatted span may straddle a line break), so line
+ * structure is derived here by splitting each run in turn, not by a second
+ * array level in the schema.
+ *
+ * `dy` is cumulative and relative to the previous tspan's baseline, exactly
+ * `tickLabelNode`'s `currentRise` bookkeeping — a line-start tspan folds the
+ * line-height step into the same `dy` that also returns any pending
+ * superscript/subscript offset to the new line's own baseline, so no
+ * separate "reset" step is needed.
+ */
+/**
+ * Builds the `<tspan>` children for a run list — the `dy`-cumulative line/
+ * script-offset technique `richTextNode` and `multilineTitleNode` both need.
+ * Extracted once so a `TextNode`'s free-standing rich text and an axis
+ * title's rich text can never draw a run list two different ways.
+ *
+ * `baseBold`/`baseItalic` are what an unformatted run (`bold`/`italic`
+ * `undefined`) inherits — a `TextNode`'s own whole-node `style`, or always
+ * `false` for an axis title, which has no such style to inherit from.
+ */
+function richRunTspans(
+  runs: readonly TextRun[],
+  basePt: number,
+  anchorX: number,
+  baseBold: boolean,
+  baseItalic: boolean,
+  lineHeightMult = 1.2,
+): SceneNode[] {
+  const sizeMm = ptToMm(basePt);
+  const lineHeight = sizeMm * lineHeightMult;
+  const scriptSizeMm = ptToMm(superscriptSizePt(basePt));
+  const offsetMm = scriptOffsetMm(basePt);
+
+  let currentRise = 0;
+  const children: SceneNode[] = [];
+
+  const emit = (part: string, run: TextRun, isLineStart: boolean): void => {
+    const target = run.script === 'sup' ? -offsetMm : run.script === 'sub' ? offsetMm : 0;
+    const dy = (isLineStart ? lineHeight : 0) + target - currentRise;
+    currentRise = target;
+    const effectiveBold = run.bold ?? baseBold;
+    const effectiveItalic = run.italic ?? baseItalic;
+    const scriptRole: SceneRole | undefined =
+      run.script === 'sup' ? 'text-sup' : run.script === 'sub' ? 'text-sub' : undefined;
+    children.push(
+      el(
+        'tspan',
+        {
+          ...(isLineStart ? { x: anchorX } : {}),
+          ...(dy !== 0 ? { dy } : {}),
+          // Explicit on every tspan, never omitted when off — a tspan
+          // otherwise inherits the outer <text>'s own font-weight/style
+          // (set from the node's whole-node `style`), so a run overriding
+          // *off* what the node sets on must say 'normal' rather than rely
+          // on an absent attribute to mean it.
+          'font-weight': effectiveBold ? 'bold' : 'normal',
+          'font-style': effectiveItalic ? 'italic' : 'normal',
+          ...(run.script ? { 'font-size': scriptSizeMm } : {}),
+        },
+        undefined,
+        { text: part, ...(scriptRole ? { role: scriptRole } : {}) },
+      ),
+    );
+  };
+
+  for (const run of runs) {
+    run.text.split('\n').forEach((part, i) => emit(part, run, i > 0));
+  }
+
+  return children;
+}
+
+function richTextNode(node: TextNode, theme: Theme): SceneNode {
+  const style = node.style;
+  const basePt = style.fontSizePt ?? theme.type.annotationPt;
+  const sizeMm = ptToMm(basePt);
+  const anchorX = style.align === 'middle' ? node.frame.width / 2 : style.align === 'end' ? node.frame.width : 0;
+
+  const children = richRunTspans(
+    node.richText ?? [],
+    basePt,
+    anchorX,
+    style.fontWeight === 'bold',
+    style.fontStyle === 'italic',
+    style.lineHeight ?? 1.2,
+  );
+
+  if (children.length === 0) {
+    return text('', { x: anchorX, y: sizeMm, ...textAttrs(style, theme) }, { role: 'text' });
+  }
+
+  return el('text', { x: anchorX, y: sizeMm, ...textAttrs(style, theme) }, children, { role: 'text' });
+}
+
+/**
+ * An axis title (or a cascade depth-axis caption) as one `<text>`,
+ * splitting on `\n` into `<tspan>` children — the same line-break technique
+ * `renderText`'s own multi-line branch already uses for a free-standing
+ * `TextNode`, reused here rather than reinvented. Falls back to a bare
+ * `text(...)` call for a single-line, unformatted title, byte-identical to
+ * every axis title before line breaks (and now rich text) existed. Every
+ * axis title is already `text-anchor: middle`, so each tspan resets `x` to
+ * the same anchor `attrs.x` already carries — line 2 does not inherit line
+ * 1's horizontal position the way SVG text otherwise flows.
+ *
+ * `richText`, when present and non-empty, takes over entirely via the same
+ * `richRunTspans` a `TextNode`'s own rich text draws through — proving the
+ * extraction didn't fork the logic. An axis title has no whole-title
+ * `TextStyle`, so an unformatted run here always inherits `false` for both
+ * bold and italic, never the tri-state a `TextNode` allows.
+ */
+function multilineTitleNode(
+  title: string,
+  richText: readonly TextRun[] | undefined,
+  attrs: SceneAttrs,
+  fontSizePt: number,
+  extra: { role: SceneRole; editTarget?: string },
+): SceneNode {
+  if (richText && richText.length > 0) {
+    const anchorX = typeof attrs.x === 'number' ? attrs.x : 0;
+    const children = richRunTspans(richText, fontSizePt, anchorX, false, false);
+    return el('text', attrs, children, extra);
+  }
+
+  const lines = title.split('\n');
+  if (lines.length === 1) return text(title, attrs, extra);
+
+  const lineHeight = ptToMm(fontSizePt) * 1.2;
+  return el(
+    'text',
+    attrs,
+    lines.map((line, i) => el('tspan', { x: attrs.x, dy: i === 0 ? 0 : lineHeight }, undefined, { text: line })),
+    extra,
+  );
+}
+
+/**
+ * How much farther a multi-line title's extra lines reach beyond a single
+ * line's own depth — one line returns 0. `requiredMargin`'s `titleHeightFor`
+ * and `y2WidthMm`'s own copy of this arithmetic already reserve this much
+ * room; a rotated title's own anchor position must add it too; otherwise
+ * the reserve goes unused while a `dy`-stepped second line walks back
+ * toward the tick labels instead of into the margin already set aside for
+ * it. Composed once and read by all three, so the reserve and the anchor
+ * can no longer silently disagree about how much room a second line needs.
+ */
+function titleExtraLinesDepthMm(title: string, fontSizePt: number): number {
+  return (title.split('\n').length - 1) * ptToMm(fontSizePt) * 1.2;
 }
 
 function renderPanelLabel(node: PanelLabelNode, theme: Theme): SceneNode {
@@ -1061,8 +1220,9 @@ export function renderCascadeAxis(node: PlotNode, theme: Theme, geometry: Contin
       y: (p0.y + p1.y) / 2 + perp.y * CASCADE_AXIS_BRACKET_MM,
     };
     out.push(
-      text(
+      multilineTitleNode(
         caption,
+        group.category === undefined ? node.cascadeAxisTitleRichText : undefined,
         {
           x: 0,
           y: 0,
@@ -1073,6 +1233,7 @@ export function renderCascadeAxis(node: PlotNode, theme: Theme, geometry: Contin
           'text-anchor': 'middle',
           'dominant-baseline': 'alphabetic',
         },
+        theme.type.axisTitlePt,
         // Editable only when the caption really is `cascadeAxisTitle`. Where it
         // came from a series' own `category`, the renderer ignores that field
         // entirely, so offering to edit it would be a control that silently
@@ -1941,8 +2102,18 @@ function requiredMargin(
   geometry: CategoricalPlotGeometry | ContinuousPlotGeometry,
   reserveTopMm = 0,
 ): { left: number; bottom: number; right: number; top: number } {
-  const titleHeight = estimateTextHeightMm(theme.type.axisTitlePt);
   const oneLine = estimateTextHeightMm(theme.type.tickLabelPt);
+  /*
+   * A title's reserved height as a function of its own string, not its
+   * eventual rendered width — an author-inserted `\n` count is knowable
+   * before any geometry exists, which is what keeps this function's
+   * "exactly two passes, never a loop" termination argument intact.
+   * Auto-wrap-to-width is deliberately not built: it would need the very
+   * width this function is computing, a real circular dependency the
+   * explicit-break-only design avoids.
+   */
+  const titleHeightFor = (title: string): number =>
+    estimateTextHeightMm(theme.type.axisTitlePt) + titleExtraLinesDepthMm(title, theme.type.axisTitlePt);
 
   // An inward tick takes no gutter at all, so it must not reserve any.
   const yTickGutter =
@@ -1980,10 +2151,10 @@ function requiredMargin(
     horizontal
       ? xTickGutter +
         (node.x.showLabels ? theme.spacing.tickLabelGapMm + xCategoryLabels : 0) +
-        (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0)
+        (node.x.title ? theme.spacing.axisTitleGapMm + titleHeightFor(node.x.title) : 0)
       : yTickGutter +
         (node.y.showLabels ? theme.spacing.tickLabelGapMm + yLabels : 0) +
-        (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0),
+        (node.y.title ? theme.spacing.axisTitleGapMm + titleHeightFor(node.y.title) : 0),
     edgeOverhang.left,
   );
 
@@ -2014,12 +2185,12 @@ function requiredMargin(
     ? yTickGutter +
       theme.spacing.tickLabelGapMm +
       (node.y.showLabels ? oneLine : 0) +
-      (node.y.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
+      (node.y.title ? theme.spacing.axisTitleGapMm + titleHeightFor(node.y.title) : 0) +
       legendRows * legendRow
     : xTickGutter +
       theme.spacing.tickLabelGapMm +
       xLabelLayout(node, theme, geometry).depth +
-      (node.x.title ? theme.spacing.axisTitleGapMm + titleHeight : 0) +
+      (node.x.title ? theme.spacing.axisTitleGapMm + titleHeightFor(node.x.title) : 0) +
     // A legend below sits under the x title; without the reserve it would be
     // drawn past the panel edge onto whatever is beneath.
     legendRows * legendRow;
@@ -2610,13 +2781,13 @@ function y2WidthMm(node: PlotNode, theme: Theme, geometry: PlotGeometry): number
 
   const labelsEnd = spec.showLabels ? tickLen + gap + widest : 0;
   const ticksEnd = spec.showTicks ? Math.max(0, tickOffset(spec, tickLen)) : 0;
-  const titleEnd = spec.title
-    ? tickLen +
-      gap +
-      widest +
-      theme.spacing.axisTitleGapMm +
-      estimateTextHeightMm(theme.type.axisTitlePt)
+  // Line count grows this the same way it grows `requiredMargin`'s
+  // `titleHeightFor` — a rotated title's extra lines reach further out
+  // along this (horizontal) axis rather than downward.
+  const titleHeight = spec.title
+    ? estimateTextHeightMm(theme.type.axisTitlePt) + titleExtraLinesDepthMm(spec.title, theme.type.axisTitlePt)
     : 0;
+  const titleEnd = spec.title ? tickLen + gap + widest + theme.spacing.axisTitleGapMm + titleHeight : 0;
 
   return Math.max(ticksEnd, labelsEnd, titleEnd);
 }
@@ -3988,9 +4159,20 @@ function renderSecondaryAxis(
   }
 
   if (spec.title) {
-    const x = plotWidth + tickLen + theme.spacing.tickLabelGapMm + widest + theme.spacing.axisTitleGapMm;
+    // Extended further right (away from the plot) by a multi-line title's
+    // extra lines — `rotate(90)` turns each line's `dy` step into a
+    // *negative* global x shift, so without this the second line would
+    // walk back toward the tick labels instead of into the margin
+    // `y2WidthMm` already reserves for it.
+    const x =
+      plotWidth +
+      tickLen +
+      theme.spacing.tickLabelGapMm +
+      widest +
+      theme.spacing.axisTitleGapMm +
+      titleExtraLinesDepthMm(spec.title, theme.type.axisTitlePt);
     out.push(
-      text(spec.title, {
+      multilineTitleNode(spec.title, spec.richText, {
         x: 0,
         y: 0,
         // Rotated the other way from the left title, so it reads from the
@@ -4001,7 +4183,7 @@ function renderSecondaryAxis(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title', editTarget: 'y2.title' }),
+      }, theme.type.axisTitlePt, { role: 'axis-title', editTarget: 'y2.title' }),
     );
   }
 
@@ -4736,15 +4918,21 @@ function renderAxes(
 
   if (node.y.title) {
     // Cleared past the widest tick label rather than a constant, which long
-    // values (say 12500) would otherwise run straight into.
-    const x = -(
-      tickLen +
-      theme.spacing.tickLabelGapMm +
-      maxTickLabelWidth +
-      theme.spacing.axisTitleGapMm
-    );
+    // values (say 12500) would otherwise run straight into. Extended
+    // further left (away from the plot) by a multi-line title's extra
+    // lines — `rotate(-90)` turns each line's `dy` step into a *positive*
+    // global x shift, so without this the second line would walk back
+    // toward the tick labels instead of into the margin `requiredMargin`
+    // already reserves for it.
+    const x =
+      -(
+        tickLen +
+        theme.spacing.tickLabelGapMm +
+        maxTickLabelWidth +
+        theme.spacing.axisTitleGapMm
+      ) - titleExtraLinesDepthMm(node.y.title, theme.type.axisTitlePt);
     out.push(
-      text(node.y.title, {
+      multilineTitleNode(node.y.title, node.y.richText, {
         x: 0,
         y: 0,
         // Rotated about the axis midpoint so the title stays centred.
@@ -4754,7 +4942,7 @@ function renderAxes(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title', editTarget: 'y.title' }),
+      }, theme.type.axisTitlePt, { role: 'axis-title', editTarget: 'y.title' }),
     );
   }
 
@@ -4828,14 +5016,14 @@ function renderAxes(
     const limit = plotHeight + geometry.margin.bottom;
 
     out.push(
-      text(node.x.title, {
+      multilineTitleNode(node.x.title, node.x.richText, {
         x: plotWidth / 2,
         y: Math.min(Math.max(defaultY, belowLabels), limit),
         'font-family': theme.fontFamily,
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,
         'text-anchor': 'middle',
-      }, { role: 'axis-title', editTarget: 'x.title' }),
+      }, theme.type.axisTitlePt, { role: 'axis-title', editTarget: 'x.title' }),
     );
   }
 
@@ -4893,14 +5081,18 @@ function renderAxesHorizontal(
 
   if (node.x.title) {
     const { maxLabelWidth } = categoryLabelLayout(node, theme, geometry);
-    const x = -(
-      tickLen +
-      theme.spacing.tickLabelGapMm +
-      maxLabelWidth +
-      theme.spacing.axisTitleGapMm
-    );
+    // Extended further left (away from the plot) by a multi-line title's
+    // extra lines — the same `rotate(-90)` correction `renderAxes` applies
+    // to `node.y.title`, needed here for the identical reason.
+    const x =
+      -(
+        tickLen +
+        theme.spacing.tickLabelGapMm +
+        maxLabelWidth +
+        theme.spacing.axisTitleGapMm
+      ) - titleExtraLinesDepthMm(node.x.title, theme.type.axisTitlePt);
     out.push(
-      text(node.x.title, {
+      multilineTitleNode(node.x.title, node.x.richText, {
         x: 0,
         y: 0,
         // Rotated about the axis midpoint so the title stays centred — the
@@ -4911,7 +5103,7 @@ function renderAxesHorizontal(
         fill: theme.foreground,
         'text-anchor': 'middle',
         'dominant-baseline': 'alphabetic',
-      }, { role: 'axis-title', editTarget: 'x.title' }),
+      }, theme.type.axisTitlePt, { role: 'axis-title', editTarget: 'x.title' }),
     );
   }
 
@@ -4927,7 +5119,7 @@ function renderAxesHorizontal(
 
   if (node.y.title) {
     out.push(
-      text(node.y.title, {
+      multilineTitleNode(node.y.title, node.y.richText, {
         x: plotWidth / 2,
         // The plot's own bottom margin, which grows to hold the numeric
         // labels — the same construction `renderAxes` uses for `node.x.title`.
@@ -4936,7 +5128,7 @@ function renderAxesHorizontal(
         'font-size': ptToMm(theme.type.axisTitlePt),
         fill: theme.foreground,
         'text-anchor': 'middle',
-      }, { role: 'axis-title', editTarget: 'y.title' }),
+      }, theme.type.axisTitlePt, { role: 'axis-title', editTarget: 'y.title' }),
     );
   }
 

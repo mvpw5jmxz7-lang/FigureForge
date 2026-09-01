@@ -162,3 +162,16 @@ export function superscriptRiseMm(
 ): number {
   return runs.some((run) => run.sup) ? fontSizePt * PT_TO_MM * SUPERSCRIPT_RISE : 0;
 }
+
+/**
+ * The same magnitude `superscriptRiseMm` uses, exposed per-call rather than
+ * over a whole run list — `richTextNode` (render-document.ts) mixes
+ * superscript and subscript runs within one sequence, so it needs each
+ * run's own offset rather than one flag for the list. Sub and sup are
+ * offset symmetrically about the baseline at this reduced size: the same
+ * fraction of the base font, applied in whichever direction the caller
+ * asks for.
+ */
+export function scriptOffsetMm(basePt: number): number {
+  return basePt * PT_TO_MM * SUPERSCRIPT_RISE;
+}

@@ -46,6 +46,13 @@ const textStyleSchema = z.object({
   letterSpacingPt: finite.optional(),
 });
 
+const textRunSchema = z.object({
+  text: z.string(),
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
+  script: z.enum(['sup', 'sub']).optional(),
+});
+
 const nodeBaseShape = {
   id: z.string().min(1),
   name: z.string(),
@@ -77,6 +84,7 @@ const axisSchema = z.object({
   labelDecimals: z.number().int().min(0).max(6).optional(),
   linthresh: finite.positive().optional(),
   clipToRange: z.boolean().optional(),
+  richText: z.array(textRunSchema).optional(),
 });
 
 const panelSchema = z.object({
@@ -222,6 +230,7 @@ const plotSchema = z.object({
   offsetFill: z.enum(['none', 'tint', 'solid']).optional(),
   showCascadeAxis: z.boolean().optional(),
   cascadeAxisTitle: z.string().optional(),
+  cascadeAxisTitleRichText: z.array(textRunSchema).optional(),
   boxed: z.boolean().optional(),
   showGridlines: z.boolean().optional(),
   gridlineColor: z.enum(['grey', 'black']).optional(),
@@ -257,6 +266,8 @@ const textSchema = z.object({
   ...nodeBaseShape,
   type: z.literal('text'),
   text: z.string(),
+  // Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note.
+  richText: z.array(textRunSchema).optional(),
   style: textStyleSchema,
 });
 

@@ -17,6 +17,8 @@ import {
   isLocked,
   MIN_TILE_MM,
   normaliseCrop,
+  plainTextOfRuns,
+  reconcileTextEdit,
   recordBracketOffset,
   rescaleArrowPoints,
   resizeFrame,
@@ -237,6 +239,14 @@ interface TextEdit {
    * means the node's own `text`/`label`, exactly as before this existed.
    */
   target?: EditTarget;
+  /**
+   * A `<textarea>` (Enter inserts a newline, Ctrl/Cmd+Enter commits) rather
+   * than the single-line `<input>` (Enter commits) every kind of edit used
+   * before this existed. True for every axis title and for a `TextNode`'s
+   * own text; panel labels and bracket labels stay single-line — neither
+   * was asked for and both still commit on a bare Enter, unchanged.
+   */
+  multiline: boolean;
 }
 
 /**
@@ -806,6 +816,7 @@ export function Canvas({
             nodeId,
             value: current,
             target: rawTarget,
+            multiline: true,
             rect: {
               left: box.left - page.left,
               top: box.top - page.top,
@@ -850,6 +861,7 @@ export function Canvas({
       setTextEdit({
         nodeId,
         value: current,
+        multiline: node.type === 'text',
         rect: {
           left: frame.x * pxPerMm,
           top: frame.y * pxPerMm,
@@ -882,8 +894,26 @@ export function Canvas({
         return;
       }
 
-      if (node.type === 'text' || node.type === 'panel-label') node.text = edit.value;
-      else if (node.type === 'bracket') node.label = edit.value;
+      // A TextNode that already carries richText reconciles through it
+      // rather than overwriting `text` directly, so a canvas-side edit can
+      // never silently discard formatting the Inspector's own textarea
+      // would have preserved — one algorithm, two call sites. Absent
+      // richText, a plain overwrite (only when the value actually changed)
+      // stays exactly today's behaviour rather than bootstrapping a
+      // richText array for an edit with nothing to format.
+      if (node.type === 'text') {
+        if (node.richText && node.richText.length > 0) {
+          const nextRuns = reconcileTextEdit(node.richText, edit.value);
+          node.richText = nextRuns.length > 0 ? nextRuns : undefined;
+          node.text = plainTextOfRuns(nextRuns);
+        } else if (edit.value !== node.text) {
+          node.text = edit.value;
+        }
+      } else if (node.type === 'panel-label') {
+        node.text = edit.value;
+      } else if (node.type === 'bracket') {
+        node.label = edit.value;
+      }
     });
   }, [api, textEdit]);
 
@@ -948,8 +978,39 @@ export function Canvas({
           />
         )}
 
-        {/* Editing overlay: an HTML input above the SVG, never in the scene. */}
-        {textEdit && (
+        {/* Editing overlay: HTML chrome above the SVG, never in the scene.
+            A textarea for an axis title or a TextNode's own text (Enter
+            inserts a newline, Ctrl/Cmd+Enter commits); a plain single-line
+            input for everything else (Enter commits), unchanged from
+            before richText/multi-line titles existed. */}
+        {textEdit && textEdit.multiline && (
+          <textarea
+            className="text-edit-overlay"
+            autoFocus
+            value={textEdit.value}
+            style={{
+              left: textEdit.rect.left,
+              top: textEdit.rect.top,
+              width: textEdit.rect.width,
+              height: textEdit.rect.height,
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onChange={(e) => setTextEdit({ ...textEdit, value: e.target.value })}
+            onBlur={commitTextEdit}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setTextEdit(null);
+              } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                commitTextEdit();
+              }
+              // A bare Enter is left alone — the textarea's own default is
+              // to insert a newline, which is the whole point here.
+            }}
+          />
+        )}
+        {textEdit && !textEdit.multiline && (
           <input
             className="text-edit-overlay"
             autoFocus

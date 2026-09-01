@@ -16,6 +16,7 @@ import {
   addPanelWithPlot,
   addScaleBar,
   addShape,
+  addText,
   applyAutoLayout,
   createDocument,
   createIdFactory,
@@ -26,6 +27,7 @@ import {
   setImageCrop,
   type Dataset,
   type FigureDocument,
+  type TextRun,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
 import { MAX_VECTOR_POINTS, planPointClouds, renderDocument } from './render-document.js';
@@ -402,6 +404,79 @@ describe('adapter parity', () => {
       .replace(/ data-node-id="[^"]*"/g, '');
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
+
+  it('renders a TextNode with richText absent byte-identically to before richText existed', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const withPlain = editDocument(base, (draft) => {
+      addText(draft, newId, { frame: { x: 5, y: 5, width: 40, height: 10 }, text: 'plain text', fontSizePt: 9 });
+    });
+    const withEmptyRuns = editDocument(withPlain, (draft) => {
+      const node = Object.values(draft.nodes).find((n) => n.type === 'text');
+      if (node?.type === 'text') node.richText = [];
+    });
+
+    const plainScene = renderDocument(withPlain, { theme: NATURE_THEME });
+    const emptyRunsScene = renderDocument(withEmptyRuns, { theme: NATURE_THEME });
+    expect(normalise(toSvgString(emptyRunsScene))).toBe(normalise(toSvgString(plainScene)));
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(plainScene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(plainScene)));
+  });
+
+  it('draws a rich-text run list mixing bold, a superscript and a line break with the exact tspan/dy sequence', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const node = addText(draft, newId, { frame: { x: 5, y: 5, width: 60, height: 20 }, text: 'plain', fontSizePt: 10 });
+      // A superscript run ends, then a plain run carries the line break —
+      // the trickiest arithmetic in the round: the baseline must return
+      // from the pending rise *before* the line-height step, not conflate
+      // the two into one dy.
+      const runs: TextRun[] = [
+        { text: 'bold ' },
+        { text: 'x', bold: true },
+        { text: '2', script: 'sup' },
+        { text: '\nnext line' },
+      ];
+      const target = draft.nodes[node.id];
+      if (target?.type === 'text') target.richText = runs;
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    const textEl = collectByRole(scene, 'text')[0];
+    expect(textEl?.tag).toBe('text');
+    const tspans = textEl?.children ?? [];
+    expect(tspans.map((t) => t.text)).toEqual(['bold ', 'x', '2', '', 'next line']);
+    expect(tspans.map((t) => t.attrs?.['font-weight'])).toEqual(['normal', 'bold', 'normal', 'normal', 'normal']);
+    expect(tspans[2]?.role).toBe('text-sup');
+
+    // "bold "/"x": no rise pending yet, no dy.
+    expect(tspans[0]?.attrs?.dy).toBeUndefined();
+    expect(tspans[1]?.attrs?.dy).toBeUndefined();
+    // "2": rises by the script offset.
+    const riseMm = tspans[2]?.attrs?.dy as number;
+    expect(typeof riseMm).toBe('number');
+    expect(riseMm).toBeLessThan(0);
+    // The empty tspan ending the sup run returns exactly that rise, before
+    // any line-height step — it is still on the same line.
+    expect(tspans[3]?.attrs?.dy).toBeCloseTo(-riseMm, 6);
+    expect(tspans[3]?.attrs?.x).toBeUndefined();
+    // "next line" starts the new line at a clean line-height step, with no
+    // leftover rise carried into it.
+    const lineHeightMm = 10 * (25.4 / 72) * 1.2;
+    expect(tspans[4]?.attrs?.dy).toBeCloseTo(lineHeightMm, 6);
+    expect(tspans[4]?.attrs?.x).toBeDefined();
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
 
   it('draws a range-clipped line plot identically through both adapters, with the out-of-range point dropped', () => {
@@ -1648,9 +1723,10 @@ describe('typography', () => {
        * rather than `minimumPt`. `checkTextSize` in quality.ts makes the
        * identical exemption for the identical reason.
        */
-      const floor = role === 'tick-label-sup' ? SUPERSCRIPT_MIN_PT : NATURE_THEME.type.minimumPt;
+      const isSuperscript = role === 'tick-label-sup' || role === 'text-sup' || role === 'text-sub';
+      const floor = isSuperscript ? SUPERSCRIPT_MIN_PT : NATURE_THEME.type.minimumPt;
       expect(pt).toBeGreaterThanOrEqual(floor - 0.01);
-      if (role !== 'tick-label-sup') {
+      if (!isSuperscript) {
         expect(pt).toBeLessThanOrEqual(NATURE_THEME.type.panelLabelPt + 0.01);
       }
     }

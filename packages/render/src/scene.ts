@@ -185,7 +185,18 @@ export type SceneRole =
    * silently widened by this feature, and the two are never drawn together
    * (see `renderVolcanoThresholds`).
    */
-  | 'volcano-sam-curve';
+  | 'volcano-sam-curve'
+  /**
+   * A `TextNode` rich-text run's superscript/subscript `<tspan>` — the run
+   * as formatted, not the block as a whole (which stays 'text' on its
+   * containing `<text>`). Its own roles, kept distinct from 'tick-label-sup'
+   * for the standing reason: this is user-authored text, not a computed
+   * tick exponent, and a role-count assertion for one must not be silently
+   * widened by the other. Both get the same `checkTextSize`/parity size-floor
+   * exemption `'tick-label-sup'` already has, down to `SUPERSCRIPT_MIN_PT`.
+   */
+  | 'text-sup'
+  | 'text-sub';
 
 export const el = (
   tag: string,

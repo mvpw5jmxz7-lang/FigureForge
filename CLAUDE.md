@@ -256,6 +256,50 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 25 (a second axis-title line overlapping the tick
+labels):** 898 TypeScript tests, 190 Python tests unchanged, `tsc --build
+--force` and `eslint .` clean, 46-check acceptance run unaffected, and a
+live-browser check in both light and dark. **Measured, not assumed**: the
+root cause was confirmed against the theme's own real numbers before
+anything was changed — one line step (`2.96 mm` at the Nature theme's
+`axisTitlePt = 7`) genuinely exceeds the single-line clearance gap
+(`axisTitleGapMm = 2.2 mm`), so the second line was never merely close, it
+overlapped by about `0.76 mm`; and after the fix, a live two-line y-title's
+own rendered bounding box was read directly off the DOM and found to sit a
+clear 11 px short of where the tick labels' own leftmost box begins, with
+no console errors. See "Round 25" below.
+
+**Verified after round 24 (rich text formatting on axis titles):** 894
+TypeScript tests, 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected, and live-browser checks across light and dark
+covering the x/y title toolbars, the cascade depth-axis title, and Round
+23's own `TextNode` toolbar re-run to confirm the shared-hook extraction
+left it unchanged (42 checks). **Measured, not assumed**: bolding part of a
+y title and superscripting part of an x title were each confirmed to draw
+the exact `font-weight`/`text-sup`-role tspan the toolbar's pressed state
+claimed, not merely a UI state with no corresponding scene change; and
+italicizing the cascade depth-axis caption was confirmed to reach the
+renderer past a component-structure change (moving `useRichTextToggle`'s
+hook call ahead of `CascadeControls`' own `isCascadable` early return, to
+keep its hook count constant across renders) — read directly off the drawn
+`<tspan>`'s `font-style`, not assumed safe from the refactor alone. See
+"Round 24" below.
+
+**Verified after round 23 (rich text runs, multi-line axis titles, a Greek/
+math symbol picker):** 890 TypeScript tests, 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, and 45 live-browser checks across
+light and dark. **Measured, not assumed**: bolding a range of text, then
+toggling it off over the same still-selected range, was confirmed to
+re-merge back into a single plain `<tspan>` rather than leaving a
+zero-effect split; a superscript run was confirmed drawn at a genuinely
+smaller `font-size` than its own node's base size; a rotated two-line y-axis
+title was confirmed — by screenshot, not by reading the transform matrix on
+paper — to read top-to-bottom in the correct order; and exporting to PDF
+with bold text and a two-line axis title present produced a real,
+non-trivial download with no console errors. See "Round 23" below.
+
 **Verified after round 22 (panel numbering and layout gaps after delete):**
 850 TypeScript tests, 190 Python tests unchanged, `tsc --build --force` and
 `eslint .` clean, 46-check acceptance run unaffected, and 22 live-browser
@@ -3821,6 +3865,385 @@ across light and dark.
 
 ---
 
+### Round 23 — rich text runs, multi-line axis titles, a Greek/math symbol picker
+
+Requested: superscript, subscript, italics and symbols in text boxes; line
+breaks in axis text; a menu for inserting Greek/math characters. Scoped down
+with the user before building anything: all three land together (they share
+the same tspan/`dy` rendering technique); line breaks cover **axis titles
+only**, not tick/category labels; rich formatting covers **free-standing
+text boxes only** (`TextNode`), not panel labels, bracket labels, or axis
+titles. Centre-alignment was part of the ask but needed no work — axis
+titles are already always `text-anchor: middle`.
+
+- **`renderText` already split `\n` into `<tspan>`s, and whole-node italic
+  already rendered through a real font face — the actual gaps were per-run
+  formatting and, above everything else, the editor.** `Canvas.tsx`'s
+  `text-edit-overlay` was a single-line `<input>` where `Enter` committed
+  rather than inserting a newline; multi-line free text had been legal in
+  the schema and renderer with no UI path to type one. Round 7's
+  `TickLabelRun`/`tickLabelNode` `dy`-cumulative-offset technique was the
+  direct precedent generalized here — its rendering approach, not its
+  tick-specific production pipeline (`NumericScale.formatRuns`), which has
+  no analogue for hand-typed text.
+- **`TextRun { text, bold?, italic?, script? }`, flat, not lines-of-runs.**
+  `\n` lives inline inside whichever run's own `.text` contains it — the
+  same way the plain `text` string already carries `\n` — so there is one
+  offset space (matching a `<textarea>`'s own flat-string model exactly),
+  one scan in the renderer, and one edit taxonomy instead of two. `bold`/
+  `italic` are tri-state (`undefined` inherits the node's own `style`; an
+  explicit `false` is needed to turn a range off on a whole-node-bold
+  `TextNode`, which a plain boolean can't distinguish from "inherit").
+  `TextNode.richText?: readonly TextRun[]` is additive; `TextNode.text`
+  stays required and is kept in sync by exactly one function,
+  `plainTextOfRuns`, the same "composed in exactly one place" discipline
+  `analysisInputHash`/`scaleBarWidthMm` are held to — never a second,
+  independently-edited source of truth.
+- **`packages/doc-model/src/richtext.ts`** is the one place a run list is
+  ever cut, merged, reconciled or toggled, shared by both editing surfaces
+  so they cannot disagree:
+  - `splitRunsAt`/`mergeAdjacentRuns` — the only place a run is ever split
+    in two, and the only place adjacent same-formatting runs are reunited
+    (merge treats matching `undefined` and explicit `false` as *different*
+    states, per the tri-state note above, and drops zero-length runs).
+  - `reconcileTextEdit(prevRuns, nextText)` — a bounded, not general, diff:
+    a single `<textarea>` `onChange` can only ever report "unchanged
+    prefix, unchanged suffix, changed middle" (true of typing, deleting,
+    and pasting alike), so finding the longest common prefix/suffix and
+    treating the differing middle as one replaced span is sufficient. The
+    inserted text inherits the formatting of the run to its left (typing
+    continues the format it's next to), or the run at the insertion point
+    when inserting at the very start.
+  - `isRangeFormatted`/`toggleRunFormat` — a range's format toggles off if
+    every overlapping run already has it (reading `baseActive` — the
+    node's own `style` — for what an `undefined` bold/italic run
+    inherits; sup/sub have no whole-node equivalent, so they never inherit
+    `baseActive`), otherwise on. `isRangeFormatted` is read-only, used by a
+    toolbar button to show its pressed state, and `toggleRunFormat` is
+    written to call it for its own on/off decision rather than
+    duplicating the same rule — a pressed state and what clicking it does
+    can never disagree.
+- **`richTextNode` (`render-document.ts`) generalizes both existing `dy`
+  techniques into one**: line stepping (`renderText`'s own pitch) and
+  script rise/drop (`tickLabelNode`'s cumulative-offset bookkeeping,
+  extended to a `scriptOffsetMm` reusable in either direction — `text-width.ts`
+  gained this one new export, reusing the same 65%/`SUPERSCRIPT_MIN_PT`
+  sizing for both). A line-start tspan's `dy` folds the line-height step and
+  any pending script return into one number, so no separate "reset" step is
+  needed — verified by a parity test asserting the literal `dy` sequence
+  for a run list mixing bold, a superscript, and a line break. Bold/italic
+  are written **explicitly** (`'normal'` as well as `'bold'`/`'italic'`) on
+  every tspan, never omitted when off — a tspan otherwise inherits the
+  outer `<text>`'s own whole-node style, so a run overriding *off* what the
+  node sets has to say so. New `SceneRole`s `'text-sup'`/`'text-sub'`, kept
+  distinct from `'tick-label-sup'` (computed tick exponent vs. user-authored
+  run) so a role-count assertion for one is never silently widened by the
+  other; both get the identical `checkTextSize`/parity size-floor exemption
+  `'tick-label-sup'` already has, down to `SUPERSCRIPT_MIN_PT`. A `richText`-absent
+  `TextNode` renders byte-identical to before this round — pinned by a
+  parity regression test, the same guarantee every prior structural
+  addition here has been held to.
+- **Axis titles needed no schema change at all** — a string can already
+  legally contain `\n`. `multilineTitleNode`, structurally identical to
+  `tickLabelNode`, replaces the bare `text(...)` call at all five axis-title
+  sites (`renderAxes`'s x/y, `renderAxesHorizontal`'s x/y, `renderSecondaryAxis`'s
+  y2) plus the cascade depth-axis caption, folded in since it's the same
+  shape. `editTarget` stays on the outer `<text>`, never a `<tspan>` —
+  required by `parity.test.tsx`'s existing assertion that every
+  `editTarget`-carrying node is a `'text'` tag.
+- **`requiredMargin`/`y2WidthMm`'s single-line `titleHeight` scalar became
+  `titleHeightFor(title)`**, a function of the title *string*'s own `\n`
+  count — not of any measured width. That is what keeps `requiredMargin`'s
+  documented "exactly two passes, never a loop" termination argument
+  intact: a line count from splitting a string is knowable before any
+  geometry is computed, the same argument `offsetReserveMm` already rests
+  on. **Deliberately not built: auto-wrap-to-width** — it would need the
+  available width, which is the very quantity `requiredMargin` is
+  computing, a real circular dependency the explicit-`\n`-only design
+  avoids entirely. Measured directly rather than assumed correct: growth
+  is exactly one `titleLineHeightMm` per extra line only once the reserved
+  margin has cleared the theme's own default-margin floor — a genuine
+  effect of `Math.max(themeMargin, needed)`, not a bug, and comparing a
+  1-line title against a 2-line one understated the per-line quantity by
+  exactly the amount the 1-line reserve sat under that floor; the pinned
+  test compares two counts both already well past it.
+- **The canvas overlay grows a second, `<textarea>`-based mode** for
+  `TextNode` text and every axis-title `EditTarget` — panel labels and
+  bracket labels keep the exact single-line `<input>` they always had,
+  Enter still committing immediately, confirmed live unaffected. New
+  keybinding for the `<textarea>` case: a bare `Enter` inserts a newline
+  (the textarea's own default, not intercepted), `Escape` still cancels,
+  blur still commits, and `Ctrl`/`Cmd`+`Enter` commits explicitly without
+  needing to blur first — confirmed live that a bare Enter leaves the
+  overlay open and `Ctrl+Enter` closes it. `commitTextEdit` routes a
+  `TextNode` edit through `reconcileTextEdit` whenever `richText` already
+  exists, rather than overwriting `text` directly, so a canvas-side edit
+  can never silently discard formatting the Inspector's own textarea would
+  have preserved — one algorithm, two call sites. A `richText`-absent
+  `TextNode` edited on the canvas is left as a plain string overwrite
+  (only when the value actually changed) rather than bootstrapping a
+  `richText` array for an edit with nothing to format.
+- **`TextFields` (Inspector) gained the toolbar this feature is mostly
+  about**: the `Text` field becomes a `<textarea>`; a new Italic `.check`
+  checkbox beside the long-existing Bold one closes a second latent gap
+  (`TextStyle.fontStyle` was already schema'd and rendered, just never
+  exposed in the UI); a new four-button `.format-toggle` row
+  (Bold/Italic/Superscript/Subscript), shown only for `node.type === 'text'`,
+  reads its selection from the textarea's native `selectionStart`/`selectionEnd`
+  (captured on `onSelect`) and calls `toggleRunFormat`/reads `isRangeFormatted`
+  for its pressed state. `.format-toggle` is a small, deliberately new CSS
+  class rather than a fifth `.check` checkbox: these reflect the formatting
+  of the current *selection*, which is transient and can be mixed, not a
+  persistent per-node boolean the way Bold/Italic-the-checkboxes already
+  are — but its `.active` state reuses the app's existing "control is
+  currently on" visual idiom (`.tabs button.active`'s inset-underline
+  `box-shadow`) rather than inventing new visual language.
+- **A Greek/math symbol picker is a native `<select>`**, not a floating
+  popover — no popover/modal infrastructure exists anywhere in this app,
+  and the marginal gain over a `<select>` (which also gets free type-ahead)
+  didn't justify building one from nothing. Raw Unicode already rendered
+  correctly before this round — Liberation Sans covers these blocks, and
+  `text-width.ts`'s advance-width table already tolerated any character it
+  had no exact metric for — so this is purely a discoverability affordance,
+  not a rendering-capability gap. `apps/web/src/textEditing.ts`'s
+  `insertAtCaret` is the one small piece of DOM-touching glue (reads
+  `selectionStart`/`selectionEnd`, splices the character in, restores
+  focus and caret) — an inserted symbol becomes an ordinary edit through
+  the same `onChange` → `reconcileTextEdit` path everything else uses, so
+  it composes with existing formatting for free. Wired into exactly two
+  places: `TextFields`'s textarea and `AxisFields`'s title textarea.
+  Deliberately not wired into the floating canvas overlay (stays minimal
+  chrome; raw typing/paste there is unaffected) or panel-label/bracket-label
+  fields (outside confirmed scope).
+
+Driven in a real browser, light **and** dark, **45 checks total**: bolding
+"Hello" of "Hello world" showed the button active and split the scene into
+a bold `<tspan>` and a normal one; toggling the same still-selected range
+off showed the button inactive and the two tspans re-merged into one plain
+run; italic **and** superscript applied to "world" produced a single tspan
+carrying both `font-style="italic"` and a measurably smaller `font-size`
+than the node's own base size, with role `text-sup`; a Greek letter
+inserted at the caret landed exactly there; a two-line `TextNode` drew two
+tspans; the canvas overlay for a `TextNode` was confirmed a `<textarea>`
+where a bare Enter left it open and `Ctrl+Enter` committed and closed it,
+while a panel label's overlay stayed a plain `<input>` where Enter still
+committed immediately; double-clicking a panel stepped in and selected its
+plot (not the panel), whose Inspector then showed a `<textarea>` for the y
+title; typing a second line into it drew two tspans matching what was
+typed **and** — confirmed by screenshot, not by reading the rotation
+transform on paper — read top-to-bottom in the correct order once rotated
+-90°; a symbol inserted into the axis title landed in its value; and
+exporting to PDF with a bolded `TextNode` and a two-line axis title present
+produced a real, non-trivial download with no console errors throughout.
+
+**Not done, deliberately:** panel labels and bracket labels get no rich
+formatting and no symbol picker; tick/category label line-wrapping
+(existing tilt/truncate machinery is untouched); axis-title
+auto-wrap-to-width; a symbol picker on the canvas double-click overlay;
+underline/strikethrough/per-run colour/per-run font/per-run align — `TextRun`
+is additive-friendly if these are wanted later, no version bump then
+either; nested `<tspan>`-in-`<tspan>` — a flat tspan sequence throughout,
+matching every existing pattern in this codebase.
+
+### Round 24 — rich text formatting on axis titles
+
+Requested: the same Bold/Italic/Superscript/Subscript toggle row Round 23
+gave free-standing text boxes, on axis titles too — the user tried it on a
+y title, found nothing there, and the gap was real: Round 23 deliberately
+scoped rich formatting to `TextNode` only, and axis titles got line breaks
+and a symbol picker but not the toggle row itself. This is a direct
+extension of Round 23's own machinery, not a new mechanism — the same
+`TextRun` shape, the same `reconcileTextEdit`/`toggleRunFormat`/
+`isRangeFormatted` algorithm, the same `dy`-based tspan technique, applied
+to one more field shape (`AxisSpec.title`, `PlotNode.cascadeAxisTitle`) via
+one more editing surface (`AxisFields`, the cascade depth-axis title field).
+
+- **`AxisSpec.richText?: readonly TextRun[]` and `PlotNode.cascadeAxisTitleRichText?: readonly TextRun[]`**,
+  both additive; `SCHEMA_VERSION` stays 1. An axis title has no whole-title
+  `TextStyle` the way a `TextNode` does, so an unformatted run here always
+  inherits `false` for both bold and italic — never the tri-state
+  `TextNode`'s own `style.fontWeight`/`fontStyle` allows. `cascadeAxisTitle`
+  has no wrapping object of its own to attach `richText` to, so its rich-text
+  field is a sibling, not a nested one — the same flat-optional-string
+  precedent `cascadeAxisTitle` itself already set beside the rest of
+  `PlotNode`.
+- **`richRunTspans`, extracted once from `richTextNode`'s own inner loop.**
+  `richTextNode` (a `TextNode`'s renderer) and `multilineTitleNode` (an axis
+  title's) drew two independent copies of the identical `dy`-cumulative
+  line/script-offset arithmetic — Round 23 built the first, Round 24 needed
+  the second, and duplicating it a second time is exactly how the two come
+  to silently disagree. `richTextNode` is now a thin wrapper passing
+  `style.fontWeight === 'bold'`/`style.fontStyle === 'italic'` as the
+  inherited base; `multilineTitleNode` gained a `richText` parameter and
+  calls the same function with the base always `false`, falling through to
+  its existing plain `\n`-split path — byte-identical to before this round —
+  whenever `richText` is absent or empty. A parity-style test in
+  `axis-title.test.ts` asserts the two callers produce the identical
+  `dy`/`font-weight`/`font-style`/role sequence for an equivalent run list,
+  which is what proves the extraction didn't fork the logic rather than
+  merely appearing to. One regression the extraction had to guard against
+  explicitly: `richTextNode`'s original line-height came from
+  `style.lineHeight ?? 1.2`, a per-node override `multilineTitleNode` has no
+  analogue for (axis titles never set one) — `richRunTspans` takes the
+  multiplier as a parameter, defaulting to `1.2`, so a `TextNode` with a
+  custom `lineHeight` keeps it rather than silently falling back to the
+  axis-title default once the two callers share one function.
+- **All six axis-title render call sites** (`renderAxes`'s x/y,
+  `renderAxesHorizontal`'s x/y, `renderSecondaryAxis`'s y2, the cascade
+  caption) now pass their own `richText` field alongside the title string
+  they already passed. The cascade caption passes
+  `node.cascadeAxisTitleRichText` only when `group.category === undefined` —
+  the same condition that already gates whether the caption is
+  `node.cascadeAxisTitle` at all (a categorised group's caption comes from
+  the data instead, and the renderer ignores the freeform field for exactly
+  the same reason Round 23 kept it un-editable there).
+- **`useRichTextToggle`, a shared hook, and `FormatToggleRow`, the shared
+  four-button-plus-symbol-picker JSX**, both factored out of `TextFields`'s
+  original inline implementation so a second and third field (`AxisFields`,
+  the cascade depth-axis title) can render the identical toolbar rather than
+  a second hand-copied one. The hook bundles the textarea ref, selection
+  tracking, and the toggle/pressed-state calls into
+  `toggleRunFormat`/`isRangeFormatted` — parameterised by `baseBold`/
+  `baseItalic` (a `TextNode`'s own style for `TextFields`, always `false`
+  for the two axis-title callers) and a `commit` callback each caller
+  supplies its own write path through. `TextFields` itself was refactored
+  to call the shared pieces — behaviour unchanged, confirmed by re-running
+  Round 23's own live checks against it rather than assumed safe from the
+  refactor alone.
+- **`AxisFields` gained the toolbar under its existing title `<textarea>`**,
+  absorbing the standalone `SymbolPicker` Round 23 already placed there into
+  the shared `FormatToggleRow`. Its `commit` writes both `title` (via
+  `plainTextOfRuns`) and `richText` in the same `onChange` patch — one undo
+  entry, matching every other multi-field Inspector commit in this codebase.
+  Because `AxisFields` is the one component already shared by the x/y/y2
+  title fields, all three gained the toolbar in one change with no
+  per-axis branching.
+- **`CascadeControls`' depth-axis title field got the identical treatment**,
+  with one structural fix the other two call sites didn't need: the
+  component's own `if (!isCascadable(...)) return null;` sat *before* where
+  a hook would first be called, and `isCascadable` can flip between renders
+  of the same mounted instance (toggling `offsetStepMm`/`offsetStepXMm`
+  while `CascadeControls` stays mounted at the same tree position) — calling
+  a hook only on the branch that survives the early return would vary this
+  component's hook count across renders of one instance, a real rules-of-
+  hooks violation this codebase's lint config has no plugin to catch (no
+  `eslint-plugin-react-hooks` here, unlike many React projects). Fixed by
+  calling `useRichTextToggle` unconditionally before the early return, not
+  by removing the early return — the same "hooks first, branch after"
+  restructuring the pattern always calls for. Verified live rather than
+  trusted from the fix alone: importing a three-series own-x-per-series
+  table (which defaults to a line plot), enabling a cascade offset and the
+  depth axis, then italicising part of the caption produced the correct
+  `font-style="italic"` tspan in the rendered scene.
+- **No change to the canvas double-click overlay.** Axis titles keep the
+  plain `<textarea>` there for quick line-break edits; formatting stays
+  Inspector-only, matching `TextNode`'s own Round 23 precedent exactly.
+- **No margin-math changes anywhere.** An axis title is always
+  `text-anchor: middle`, so its horizontal extent never feeds
+  `requiredMargin` — only line *count* does, which rich formatting cannot
+  change (bolding a word doesn't add a `\n`).
+
+Driven in a real browser, light **and** dark: bolding part of a y title and
+superscripting part of an x title each showed the corresponding toggle
+button active and drew the matching `font-weight`/`text-sup`-role tspan in
+the scene; a symbol inserted through the axis title's now-shared toolbar
+landed at the caret; exporting to PDF with both formatted titles present
+produced a real, non-trivial download with no console errors; and — on a
+freshly imported three-series line plot with a cascade offset and depth
+axis enabled — italicising part of the depth-axis caption produced a
+correctly split, correctly styled two-tspan caption
+(`Concentration` italic, ` (mg/mL)` normal). Round 23's own 42-check
+`TextNode`-toolbar script was re-run afterward and passed unchanged in both
+themes, confirming the `useRichTextToggle`/`FormatToggleRow` extraction
+left that surface's behaviour exactly as it was.
+
+**Not done, deliberately:** the y2 title toolbar was not separately driven
+live — `AxisFields` is the identical component already verified for x and
+y, wired to `y2` through the same `onChange` contract, and its render path
+(`multilineTitleNode(spec.title, spec.richText, ...)`) is covered by
+`axis-title.test.ts`'s existing y2-margin test plus the new round-trip and
+richRunTspans-equivalence tests — a second live pass would exercise no code
+the first two didn't already reach. Tick/category labels, panel labels and
+bracket labels still get no rich formatting, unchanged from Round 23's
+scope.
+
+### Round 25 — a second axis-title line overlapped the tick labels
+
+Reported: a line break in a y-axis title made the second line overlap the
+tick labels. The bug predates Round 24 — it was already latent in Round
+23's plain `\n`-only multi-line titles, just not yet reported. `requiredMargin`
+already grows `margin.left`/`margin.right` to hold every extra line
+(`titleHeightFor`, `y2WidthMm`'s own copy of the same arithmetic), but the
+*render* call site positioning a rotated title never used that reserved
+room — so the second line walked in the wrong direction: toward the axis
+instead of into the margin already set aside for it.
+
+- **Root cause, derived from the actual SVG rotation, not assumed.** A
+  rotated title's lines stack via `dy` on `<tspan>` children — the same
+  idiom used everywhere in this renderer — and `rotate(-90)`/`rotate(90)`
+  each turn that *local* `dy` step into a *horizontal global* shift. For an
+  unrotated title (the bottom x-title in both orientations, already correct
+  since Round 23), stepping down is genuinely "further from the plot." But
+  `renderAxes`'s y-title and `renderAxesHorizontal`'s x-title
+  (`rotate(-90)`, anchored at *negative* x) get a *positive* global shift
+  per line — walking back toward x = 0, the axis. `renderSecondaryAxis`'s
+  y2 title (`rotate(90)`, anchored at *positive* x) gets the mirror-image
+  *negative* shift — walking back toward the plot from the other side.
+  **Measured, not just derived**: at the Nature theme's `axisTitlePt = 7`,
+  one line step is `2.96 mm` while the single-line clearance gap
+  (`axisTitleGapMm`) is only `2.2 mm` — so the second line didn't just get
+  close, it overlapped by about `0.76 mm`.
+- **The cascade depth-axis caption needed no fix**, despite also using
+  `rotate(-90)`: its anchor sits at a large *positive* x (in the right-hand
+  margin, past the plot), so the same per-line shift that hurts the y-title
+  moves the caption's extra lines *further* from the plot — already the
+  correct direction. Confirmed by an explicit negative-space test
+  (`continuous-axis.test.ts`) asserting a one-line and two-line caption's
+  `transform` are identical, not merely left untouched on the strength of
+  the math alone.
+- **The fix is a pure translation of the whole multi-line block, not a
+  change to the `dy` stepping itself.** Round 23 already verified (by
+  screenshot, not by re-deriving the matrix) that the existing stacking
+  direction produces correct top-to-bottom reading order for both
+  `TextNode` and the one already-correct axis-title case; touching that
+  shared logic would risk that guarantee for no reason. Instead, each
+  rotated title's own anchor position now reaches the same extra distance
+  `requiredMargin`/`y2WidthMm` already reserve, via one new shared
+  `titleExtraLinesDepthMm(title, fontSizePt)` in `render-document.ts` — not
+  exported, since every consumer already lives in that one file. This also
+  closes a pre-existing "two derivations of one fact" gap in this
+  codebase's own terms: `requiredMargin`'s `titleHeightFor` and
+  `y2WidthMm`'s inline copy of the identical `(lines - 1) * lineHeight`
+  arithmetic now both read the one shared function instead of two
+  independently-typed-out copies that could already have drifted.
+- **The y2 title's own fix looks like a no-op when read in isolation, and
+  that is correct — verified, not assumed.** `renderAxes`'s y-title anchor
+  is measured from the fixed y-axis line (local x = 0), so adding the extra
+  reach shifts it directly and observably. `renderSecondaryAxis`'s y2-title
+  anchor is instead measured from `plotWidth`, and `plotWidth + margin.right`
+  is itself invariant — both equal `frame.width - margin.left`, untouched by
+  how the two individually split. So when a second line grows `margin.right`,
+  `plotWidth` *shrinks* by the same amount, already pulling the old,
+  unfixed anchor inward; adding this fix's extra term back out exactly
+  cancels that pull, landing the anchor at the *same* position a single-line
+  title already used. A dedicated test confirms both halves of this: that
+  `plotWidth` really did shrink by one line height (proving the cancellation
+  is real, not vacuous), and that the rendered anchor is unchanged.
+
+Driven in a real browser, light **and** dark: a two-line y-axis title's own
+rendered bounding box (read via `getBoundingClientRect()`, not eyeballed)
+sat with its rightmost edge at `112.08 px` against the tick labels'
+leftmost edge at `123.36 px` — a clear gap, where before the fix the
+theme's own numbers already proved a `0.76 mm` overlap was mathematically
+certain. No console errors.
+
+**Verified:** 898 TypeScript tests (894 + 4 new: anchor-shift tests for the
+y-title and `renderAxesHorizontal`'s x-title, the y2-title's
+plotWidth-cancellation test, and the cascade caption's negative-space
+check), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected (no existing fixture uses a multi-line rotated title).
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -3880,7 +4303,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

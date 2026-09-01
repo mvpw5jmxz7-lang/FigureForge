@@ -105,6 +105,7 @@ import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './
 import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
 import type { FigureDocument } from './document.js';
+import type { TextRun } from './nodes.js';
 
 // ---------------------------------------------------------------------------
 // Units
@@ -3099,6 +3100,68 @@ describe('.figureforge archive', () => {
     expect(untouchedPlot?.type === 'plot' && 'showCascadeAxis' in untouchedPlot).toBe(false);
     expect(untouchedPlot?.type === 'plot' && 'cascadeAxisTitle' in untouchedPlot).toBe(false);
     expect(untouchedPlot?.type === 'plot' && untouchedPlot.offsetStepMm).toBe(5);
+  });
+
+  it("round-trips an axis's richText and a plot's cascadeAxisTitleRichText, absent when never set", () => {
+    // Round 24's extension of round 23's TextNode.richText onto axis titles.
+    // The same schema trap every optional-field test in this file guards
+    // against: zod strips an undeclared key on save, so a field present only
+    // on the TS type is silently dropped.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const yTitleRuns: TextRun[] = [{ text: 'Fold change (log' }, { text: '2', script: 'sub' }, { text: ')' }];
+    const captionRuns: TextRun[] = [{ text: 'Concentration ' }, { text: '(mg/mL)', italic: true }];
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2\n2\t4\t2\t4', newId()) };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Cascade',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.y.title = 'Fold change (log2)';
+        plotNode.y.richText = yTitleRuns;
+        plotNode.offsetStepMm = 10;
+        plotNode.showCascadeAxis = true;
+        plotNode.cascadeAxisTitle = 'Concentration (mg/mL)';
+        plotNode.cascadeAxisTitleRichText = captionRuns;
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.y.richText).toEqual(yTitleRuns);
+    expect(plot?.type === 'plot' && plot.cascadeAxisTitleRichText).toEqual(captionRuns);
+
+    // An older figure that never touched either field loads with both
+    // absent, not defaulted to an empty array.
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2', newId()) };
+      draft.datasets = [ds];
+      const { plot: p } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Cascade',
+      });
+      const plotNode = draft.nodes[p.id];
+      if (plotNode?.type === 'plot') plotNode.plotType = 'line';
+    });
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'richText' in untouchedPlot.y).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'cascadeAxisTitleRichText' in untouchedPlot).toBe(false);
   });
 
   it('round-trips boxed/showGridlines/gridlineColor/gridlineStyle, absent when never set', () => {

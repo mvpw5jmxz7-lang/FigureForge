@@ -56,13 +56,21 @@ body {
    `color-scheme: light dark`, so a text input the app does not colour picks its
    text colour from the OS scheme. In dark mode that is near-white — invisible
    against any surface the app paints white. */
-button, select, input, input[type='number'], input[type='file'] {
+button, select, input, textarea, input[type='number'], input[type='file'] {
   font: inherit;
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 4px 8px;
+}
+
+/* An Inspector text field's own textarea (not the canvas overlay, which
+   sets its own fixed size inline) — a small, resizable box rather than a
+   single input-height line, since it may now hold more than one. */
+.field textarea, .axis-fields textarea {
+  min-height: 44px;
+  resize: vertical;
 }
 
 button { cursor: pointer; }
@@ -77,6 +85,16 @@ button.icon.danger:hover { color: var(--danger); }
 .field.block { display: flex; flex-direction: column; align-items: stretch; gap: 3px; margin-bottom: 10px; }
 .field input[type='number'] { width: 62px; }
 .check { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+
+/* Bold/Italic/Superscript/Subscript act on the current text selection, not
+   a persistent per-node setting, so — unlike .check — a pressed state is
+   read live from that selection rather than stored. Reuses .tabs button's
+   own "control is currently on" idiom (the inset underline) rather than
+   inventing new visual language for it. */
+.format-toggle { display: flex; gap: 4px; margin-bottom: 10px; }
+.format-toggle button { flex: 1; padding: 4px 0; color: var(--muted); }
+.format-toggle button.active { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.format-toggle select { flex: 1.6; }
 
 .readout {
   font-variant-numeric: tabular-nums;
@@ -136,6 +154,14 @@ button.icon.danger:hover { color: var(--danger); }
   border-radius: 2px;
   background: var(--surface);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+}
+
+/* Only a <textarea> matches this — no drag handle over fixed-size chrome,
+   and it must wrap rather than scroll sideways since its own width is what
+   the axis title/text box measurement is keyed to. */
+textarea.text-edit-overlay {
+  resize: none;
+  white-space: pre-wrap;
 }
 
 /* Crop chrome. HTML above the SVG, so none of it can reach an export. */

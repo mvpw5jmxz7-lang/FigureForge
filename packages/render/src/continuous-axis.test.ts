@@ -1088,6 +1088,33 @@ describe('cascade / offset line plots', () => {
       expect(titles[0]!.text).toBe('Concentration (mg/mL)');
     });
 
+    it('needs no anchor correction for a two-line caption — negative-space check for the y/x/y2-title overlap fix', () => {
+      // The caption is drawn `rotate(-90)` too, the same as renderAxes's own
+      // y-title, but its anchor (`mid`) sits well to the *right* of the
+      // plot — the direction a rotate(-90) title's per-line `dy` step
+      // already shifts *toward* — so, unlike the y/x/y2-title anchors, this
+      // one needed no fix. Asserted directly rather than left as an
+      // assumption: a one-line and a two-line caption must anchor at the
+      // exact same `transform`.
+      const oneLine = scene(
+        makeDocument(IDENTICAL, 'line', 80, {
+          offsetStepMm: 10,
+          showCascadeAxis: true,
+          cascadeAxisTitle: 'Concentration',
+        }),
+      );
+      const twoLine = scene(
+        makeDocument(IDENTICAL, 'line', 80, {
+          offsetStepMm: 10,
+          showCascadeAxis: true,
+          cascadeAxisTitle: 'Concentration\n(mg/mL)',
+        }),
+      );
+      const transformOf = (s: ReturnType<typeof scene>) =>
+        collectByRole(s, 'cascade-axis-title')[0]?.attrs?.['transform'];
+      expect(transformOf(twoLine)).toBe(transformOf(oneLine));
+    });
+
     it('composes additively with a right-hand legend, reserving room for both', () => {
       const doc = makeDocument(IDENTICAL, 'line', 80, {
         offsetStepMm: 10,
