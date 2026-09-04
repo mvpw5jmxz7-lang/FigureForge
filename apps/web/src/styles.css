@@ -448,6 +448,17 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .finding p { margin: 3px 0 6px; font-size: 12px; color: var(--muted); }
 .finding-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 
+/* A sample block of a colour a finding names, shown right after its hex code. */
+.color-chip {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin: 0 1px 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  vertical-align: -0.12em;
+}
+
 .layer { margin-bottom: 12px; }
 .layer-head { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
 

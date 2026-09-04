@@ -525,7 +525,6 @@ const checkColorAccessibility: Rule = ({ scene, document }) => {
   const conflicts = findColorConflicts(colors);
   if (conflicts.length === 0) return [];
 
-  const worst = conflicts[0]!;
   const cvdConflicts = conflicts.filter((c) => c.condition !== 'grayscale' && c.condition !== 'normal');
 
   const findings: Finding[] = [];
@@ -556,14 +555,23 @@ const checkColorAccessibility: Rule = ({ scene, document }) => {
 
   const grayConflicts = conflicts.filter((c) => c.condition === 'grayscale');
   if (grayConflicts.length > 0) {
+    // The worst *greyscale* pair, not `conflicts[0]` — that is the closest pair
+    // under any simulation, which need not be the one that merges in print, and
+    // the finding names a specific ΔE "in greyscale".
+    const gray = grayConflicts[0]!;
     findings.push({
       id: 'grayscale-conflict',
       severity: 'info',
-      title: 'Series colours merge when printed in greyscale',
+      title: `${gray.colorA} and ${gray.colorB} merge when printed in greyscale`,
       detail:
-        `ΔE ${worst.deltaE.toFixed(1)} in greyscale. Consider differing marker shapes or fill ` +
+        `ΔE ${gray.deltaE.toFixed(1)} in greyscale. Consider differing marker shapes or fill ` +
         `patterns as a redundant channel.`,
-      nodeIds: [],
+      nodeIds: [
+        ...new Set([
+          ...(plotsByColor.get(gray.colorA) ?? []),
+          ...(plotsByColor.get(gray.colorB) ?? []),
+        ]),
+      ],
     });
   }
 
@@ -991,14 +999,17 @@ const checkHeatmapColorContrast: Rule = ({ scene }) => {
   const conditions: CvdType[] = ['deuteranopia', 'protanopia', 'tritanopia'];
 
   for (const [nodeId, strips] of stripsByOwner) {
-    const low = strips[0];
-    const high = strips[strips.length - 1];
-    if (!low || !high || low === high) continue;
+    // The two ends of the ramp. Which strip is the minimum depends on the
+    // colourbar's placement (a right-hand bar is drawn low-at-the-bottom, so
+    // reversed), so these are named as "the two ends", not low/high.
+    const endA = strips[0];
+    const endB = strips[strips.length - 1];
+    if (!endA || !endB || endA === endB) continue;
 
     const worst = conditions
       .map((condition) => ({
         condition,
-        deltaE: deltaE2000(simulateCvd(low, condition), simulateCvd(high, condition)),
+        deltaE: deltaE2000(simulateCvd(endA, condition), simulateCvd(endB, condition)),
       }))
       .sort((a, b) => a.deltaE - b.deltaE)[0]!;
     if (worst.deltaE >= MIN_SERIES_DELTA_E) continue;
@@ -1008,9 +1019,9 @@ const checkHeatmapColorContrast: Rule = ({ scene }) => {
       severity: 'info',
       title: `Colour scale is hard to read under ${worst.condition}`,
       detail:
-        `The scale's low and high ends are close together for a reader with ${worst.condition} ` +
-        `(ΔE ${worst.deltaE.toFixed(1)} once simulated). A perceptually distinct sequential or ` +
-        `diverging ramp would keep the extremes tellable apart.`,
+        `The scale's two ends (${endA} and ${endB}) are close together for a reader with ` +
+        `${worst.condition} (ΔE ${worst.deltaE.toFixed(1)} once simulated). A perceptually distinct ` +
+        `sequential or diverging ramp would keep the extremes tellable apart.`,
       nodeIds: [nodeId],
     });
   }

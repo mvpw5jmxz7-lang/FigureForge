@@ -256,6 +256,22 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 28 (a colour swatch beside every hex code a Quality
+finding names):** 909 TypeScript tests (906 + 3 new colour-accessibility
+cases), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected (no fixture triggers a colour finding), and a live-browser check
+in light **and** dark. **Measured, not assumed**: the two swatches drawn
+after "`#d62728` and `#d73027` are hard to tell apart under deuteranopia"
+were read back off the DOM as `background-color` `rgb(214,39,40)` and
+`rgb(215,48,39)` — exactly the two hex codes the finding text quotes — at a
+9.3 px square, identical in both themes, with no console errors. The
+verification itself needed a host toolchain the machine did not have:
+Node was installed via `winget` (user scope, portable), `npm ci` run
+natively, and Playwright's headless Chromium driven against a native `vite`
+dev server — recorded here because "runs in containers only" is otherwise
+the standing rule. See "Round 28" below.
+
 **Verified after round 27 (arrows and lines that default to diagonal, and a
 line shape with no way to reach horizontal/vertical):** 906 TypeScript
 tests, 190 Python tests unchanged, `tsc --build --force` and `eslint .`
@@ -4477,6 +4493,64 @@ that had unknowingly relied on the old diagonal default being frame-tight),
 190 Python tests unchanged (nothing here touches `services/api`), `tsc
 --build --force` and `eslint .` clean, 46-check acceptance run unaffected
 (no existing fixture inserts or resizes an arrow or a line shape).
+
+---
+
+### Round 28 — a colour swatch beside every hex code a Quality finding names
+
+Reported: under Quality, an alert like "`#4575b4` and `#0072b2` are hard to
+tell apart under protanopia" gives the hex codes but not the colours — add a
+small block of the actual colour next to each code.
+
+- **The swatch is drawn in the UI from the string the finding already
+  quotes, not from a new structured field.** `withColorSwatches(text)` in
+  `apps/web/src/components/SidePanel.tsx` splits a finding's `title`/`detail`
+  on a captured `#rrggbb`/`#rgb` regex and, after each code, emits a
+  `<span class="color-chip" style={{ background: hex }}>`. `checkFigure`
+  read that hex off the rendered scene (`node.attrs.fill`), so the swatch
+  cannot disagree with the figure, and every present *and future* finding
+  that names a colour gets swatches for free — no `quality.ts` coupling to
+  the UI, no model change, no `Finding` field. `.color-chip` (a 0.85 em
+  bordered inline block, `var(--border)` so it reads in both themes) is a
+  new class, not the Inspector's flex `.swatch` label control.
+- **`checkColorAccessibility`'s `grayscale-conflict` and
+  `checkHeatmapColorContrast`'s `heatmap-cvd-*` were reworded to name their
+  colours**, since neither did — the swatch helper needs a code in the text
+  to attach to. Greyscale now reads "`#…` and `#…` merge when printed in
+  greyscale" and **also gained `nodeIds`** (populated from `plotsByColor`
+  exactly as the CVD finding already did), so its "Select N affected" button
+  now appears. Two latent inconsistencies fell out in the same edit: the
+  greyscale detail had quoted `conflicts[0]!.deltaE` — the closest pair
+  under *any* simulation — while saying "in greyscale"; it now uses the
+  worst *greyscale* pair. And the heatmap finding's `strips[0]`/`strips[-1]`
+  are the ramp's two ends in *DOM* order, which a right-placed colourbar
+  draws low-at-the-bottom (reversed) — so the text says "the scale's two
+  ends (`#…` and `#…`)" rather than mislabelling which is low and which is
+  high.
+- **The dead `const worst = conflicts[0]!` in `checkColorAccessibility`**
+  (its only remaining use was the greyscale detail) was removed.
+
+Driven in a real browser, light **and** dark: the Expression panel's series
+were recoloured through the Inspector into a CVD-colliding pair, and the
+Quality tab's resulting finding drew two `.color-chip` spans whose
+`background-color`, read back off the DOM, was exactly the two hex codes in
+the finding text (`rgb(214,39,40)` / `rgb(215,48,39)`), 9.3 px square,
+identical between themes, no console errors.
+
+**Verified:** 909 TypeScript tests (906 + 3 new in `quality.test.ts`: a CVD
+conflict names both colours and the condition, a greyscale conflict names
+both colours and carries `nodeIds`, and a colour-safe palette stays silent;
+plus two assertions added to the existing heatmap-contrast test that the
+ramp ends are now named), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected (no fixture triggers a colour finding).
+
+**Not done, deliberately:** the two identical `conflicts[0]` warning lines
+in `Inspector.tsx` (the volcano-colours block and the palette block) print
+the same hex codes and would benefit from the same treatment, but the
+request named the Quality tab specifically and `withColorSwatches` operates
+on a string where those render `{colorA}` / `{colorB}` as separate JSX — a
+shared `<ColorChip>` component would be the clean way in if that is wanted.
 
 ## What's next
 

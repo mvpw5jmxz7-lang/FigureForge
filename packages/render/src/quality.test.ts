@@ -344,6 +344,51 @@ describe('point label duplicates', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Colour accessibility
+// ---------------------------------------------------------------------------
+
+/** The two-group bar chart from `SMALL`, repainted with a chosen palette. */
+function paletteFindings(palette: readonly string[]) {
+  const document = editDocument(makeDocument(SMALL, 'bar-dot'), (draft) => {
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') node.palette = [...palette];
+    }
+  });
+  return reportFor(document).findings;
+}
+
+describe('colour accessibility', () => {
+  it('names both offending colours and the condition when two series collide under CVD', () => {
+    // A red/green pair that `findColorConflicts` collapses under deuteranopia.
+    const finding = paletteFindings(['#d62728', '#2ca02c']).find(
+      (f) => f.id === 'colour-blind-conflict',
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.title).toContain('#d62728');
+    expect(finding?.title).toContain('#2ca02c');
+    expect(finding?.title).toMatch(/deuteranopia|protanopia|tritanopia/);
+  });
+
+  it('names both colours when two series merge in greyscale, and points at the plots', () => {
+    const finding = paletteFindings(['#4575b4', '#4a78b6']).find(
+      (f) => f.id === 'grayscale-conflict',
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.title).toContain('#4575b4');
+    expect(finding?.title).toContain('#4a78b6');
+    expect(finding?.title).toContain('greyscale');
+    // Unlike before, the greyscale finding can select the plots it is about.
+    expect(finding?.nodeIds.length).toBeGreaterThan(0);
+  });
+
+  it('says nothing for a colour-safe palette', () => {
+    const findings = paletteFindings(['#0072b2', '#e69f00']);
+    expect(findings.filter((f) => f.id === 'colour-blind-conflict')).toEqual([]);
+    expect(findings.filter((f) => f.id === 'grayscale-conflict')).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Heatmap colour contrast
 // ---------------------------------------------------------------------------
 
@@ -399,6 +444,9 @@ describe('heatmap colour contrast', () => {
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe('info');
     expect(finding?.detail).toMatch(/ΔE/);
+    // The two ramp ends are named, so the Quality tab can draw their swatches.
+    expect(finding?.detail).toContain('#4575b4');
+    expect(finding?.detail).toContain('#4a78b6');
   });
 
   it('never costs the readiness score', () => {

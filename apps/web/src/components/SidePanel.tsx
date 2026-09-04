@@ -1,6 +1,6 @@
 /** Right-hand inspector: data, statistics, quality and layers. */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   addAsset,
@@ -2298,6 +2298,45 @@ export function scoreTone(score: number): 'good' | 'fair' | 'poor' {
   return score >= 90 ? 'good' : score >= 70 ? 'fair' : 'poor';
 }
 
+/**
+ * A 3- or 6-digit `#` hex, captured and `\b`-bounded so it doesn't swallow a
+ * trailing word. Deliberately not global: `split` divides on every match
+ * anyway, and a shared `lastIndex` between calls is a state bug waiting to
+ * happen.
+ */
+const HEX_IN_TEXT = /(#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b)/;
+
+/**
+ * Render a finding's text, drawing a small block of any hex colour it names
+ * right after the code — so "#4575b4 and #0072b2 are hard to tell apart" shows
+ * the two colours, not just their identifiers. Purely presentational: the
+ * swatch fill is the same string the finding quotes, and the checker read that
+ * string off the rendered scene, so it cannot disagree with the figure.
+ */
+function withColorSwatches(text: string): ReactNode {
+  // A capturing split alternates [text, hex, text, hex, …], so the odd indices
+  // are exactly the colour codes.
+  const parts = text.split(HEX_IN_TEXT);
+  if (parts.length === 1) return text;
+
+  const out: ReactNode[] = [];
+  parts.forEach((part, i) => {
+    out.push(part);
+    if (i % 2 === 1) {
+      out.push(
+        <span
+          key={i}
+          className="color-chip"
+          style={{ background: part }}
+          title={part}
+          aria-hidden
+        />,
+      );
+    }
+  });
+  return out;
+}
+
 function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePanelProps) {
   const tone = scoreTone(report.score);
 
@@ -2356,8 +2395,8 @@ function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePa
 
       {report.findings.map((finding: Finding) => (
         <div key={finding.id} className={`finding ${finding.severity}`}>
-          <strong>{finding.title}</strong>
-          <p>{finding.detail}</p>
+          <strong>{withColorSwatches(finding.title)}</strong>
+          <p>{withColorSwatches(finding.detail)}</p>
           <div className="finding-actions">
             {finding.fix && (
               <button className="primary" onClick={() => applyFix(finding)}>
