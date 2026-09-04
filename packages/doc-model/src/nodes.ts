@@ -479,6 +479,19 @@ export interface PlotNode extends NodeBase {
    */
   legend?: 'auto' | 'right' | 'bottom' | 'none';
   /**
+   * Reverse the order of the series key.
+   *
+   * Absent means "reversed on a cascade, plain otherwise" — the same
+   * cascade-aware default `gridlineStyle` already uses (see `hasCascadeOffset`
+   * in `packages/render`). A cascade paints back-to-front, so for a positive
+   * `offsetStepMm` the last series sits visually at the top of the stack and
+   * the depth axis runs the same way; a legend in plain series order then
+   * reads bottom-to-top against everything else on the plot. An explicit
+   * value wins in either direction. Continuous (line/scatter) plots only —
+   * a categorical legend keys on the second factor, not series order.
+   */
+  reverseLegend?: boolean;
+  /**
    * Which physical edge the categorical axis draws against.
    *
    * `'vertical'` (absent, today's only behaviour) runs categories along the
@@ -715,6 +728,10 @@ export interface PlotNode extends NodeBase {
    * Close the axis into a full rectangle: draw the top and right lines the
    * default L-shaped axis omits, in the same stroke as the existing
    * left/bottom lines. Absent/false draws exactly as today.
+   *
+   * On a cascading line plot (see `hasCascadeOffset`) the front axes are
+   * trimmed to the front-most series' plane, and this box instead closes the
+   * *rear* plane's rectangle — the complete far face of the oblique box.
    *
    * Meaningless on a heatmap, which draws no axis lines at all
    * (`GridPlotGeometry` has no numeric axis) — the Inspector hides the

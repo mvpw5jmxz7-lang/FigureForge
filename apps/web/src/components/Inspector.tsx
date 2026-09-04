@@ -1016,6 +1016,23 @@ function PlotFields({
         key repeating them is furniture.
       </p>
 
+      {node.plotType === 'line' && series.length > 1 && (node.legend ?? 'auto') !== 'none' && (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.reverseLegend ?? hasCascadeOffset(node, series.length)}
+              onChange={(e) => setPlot('Reverse legend', { reverseLegend: e.target.checked })}
+            />
+            Reverse legend order
+          </label>
+          <p className="hint">
+            A cascade stacks its last series at the top, so its key reads reversed by default to
+            match. Turn this off — or on for a plain line plot — to override.
+          </p>
+        </>
+      )}
+
       {!CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'heatmap' && (
         <>
           <label className="field block">

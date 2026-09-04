@@ -256,6 +256,25 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 29 (a reversible legend order, and cascade front axes
+trimmed to the projected rear axes):** 918 TypeScript tests (909 + 9 new:
+legend-reversal cases in `continuous-axis.test.ts` — the cascade default, a
+`reverseLegend:false` override, a plain-line `reverseLegend:true`, and a
+reversed swatch still keyed by its own series' line style — a
+`doc-model.test.ts` round-trip, a `parity.test.tsx` reversed-legend cascade
+fixture, and a `gridlines.test.ts` suite pinning the front axes trimmed to
+the front plane, equal in length to the rear axes, and `boxed` closing the
+*rear* plane's rectangle), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected, and a live-browser check in light **and** dark.
+**Measured, not assumed**: on a real three-series cascade the legend text
+was read off the DOM as `Y3, Y2, Y1` (reversed to match the stack) with the
+"Reverse legend order" checkbox default-checked; unchecking it re-read
+`Y1, Y2, Y3` and re-checking flipped it back; the front y-axis line's own
+`d` started at `y = 24 mm` (not `0`) with a segment length of `35 mm`
+exactly matching the projected rear axis's `35 mm`; and `Boxed` drew the
+rear plane's top and right edges. See "Round 29" below.
+
 **Verified after round 28 (a colour swatch beside every hex code a Quality
 finding names):** 909 TypeScript tests (906 + 3 new colour-accessibility
 cases), 190 Python tests unchanged (nothing here touches `services/api`),
@@ -4552,6 +4571,88 @@ request named the Quality tab specifically and `withColorSwatches` operates
 on a string where those render `{colorA}` / `{colorB}` as separate JSX — a
 shared `<ColorChip>` component would be the clean way in if that is wanted.
 
+### Round 29 — a reversible legend order, and trimmed cascade front axes
+
+Two things reported from real use of multi-series line / cascade (offset)
+line plots. Neither bumps `SCHEMA_VERSION` — one new optional field, absent ⇒
+prior behaviour for every non-cascade figure.
+
+- **The legend read opposite to the cascade.** A cascade paints
+  back-to-front, so for a positive `offsetStepMm` the last series sits
+  visually at the top of the stack and the depth axis runs the same way —
+  but `legendEntries` always listed `geometry.series` in plain order, so the
+  legend's top entry was the *bottom* trace.
+  - **`PlotNode.reverseLegend?: boolean`** — absent means "reversed on a
+    cascade, plain otherwise", the exact cascade-aware default
+    `gridlineStyle ?? (cascading ? 'dashed' : 'solid')` already uses. An
+    explicit value wins either way. Continuous (line/scatter) plots only — a
+    categorical legend keys on the second factor, not series order.
+  - **`orderedLegendEntries(node, geometry)`** in `render-document.ts` is the
+    one place the order is decided, read by `renderLegend` *and* by
+    `requiredMargin`'s bottom-legend row reservation (line wrapping is
+    order-sensitive, so a second ordering there would reserve a different row
+    count than it drew). It returns each entry tagged with its **series
+    index**, because `renderLegend` looks the swatch's shape / line style up
+    by series order, not row position — reverse the array without carrying
+    that index and the top row draws series 0's symbol beside series N's
+    name. A real-browser check confirmed a reversed key's dash patterns stay
+    attached to their own series.
+  - **Inspector:** a "Reverse legend order" checkbox beside the Legend
+    `<select>`, shown for a multi-series line plot,
+    `checked={node.reverseLegend ?? hasCascadeOffset(node, series.length)}`,
+    always storing an explicit boolean. Scatter is deliberately out of scope
+    (trivial to widen).
+
+- **The cascade front axes overshot the front-most trace.** `renderAxes`
+  drew the front L-axis across the whole canvas while `renderCascadeBackAxes`
+  spanned only the back plane's window, so the two were different lengths and
+  did not read as the parallel edges of the oblique box.
+  - **`renderAxes` computes `cascadeFront`** (`= cascadeBackOffsetMm(series)`
+    when `hasCascadeOffset`, else `null`) — the front→back vector. The back
+    plane is the front plane translated by it, so the front plane window is
+    `{left: 0, top: -cascadeFront.y, right: plotWidth - cascadeFront.x,
+    bottom: plotHeight}`. The front y-axis line's non-`trimToData` top
+    becomes `-cascadeFront.y`; the front x-axis line's right end becomes
+    `plotWidth - cascadeFront.x`. Front ticks/labels need no change — they
+    already sit at scale positions inside the (offset-shrunk) ranges.
+    Trimmed **on every cascade offset**, not gated on `showGridlines`.
+  - **`renderBoxedBorder`** now takes an explicit `box: {left, top, right,
+    bottom}` rectangle (default `{0, 0, plotWidth, plotHeight}` — today's
+    formula exactly, so non-cascade `boxed` figures are byte-identical). On a
+    cascade `renderAxes` passes the **rear-plane** rect, so `boxed` completes
+    the far face of the oblique box (the same top/right edges it drew before
+    round 29) while the trimmed front axes draw the near face's L. A first
+    pass moved the box to the front plane; the user preferred it on the rear
+    frame, which also keeps `boxed`'s output on an existing cascade figure
+    unchanged.
+  - `renderAxesHorizontal` passes no `box` argument (categorical plots never
+    cascade), so that path is untouched.
+
+Driven in a real browser, light **and** dark: a three-series own-x table
+imported as a line plot; before any offset the legend read `Y1, Y2, Y3`;
+setting `Offset per trace` to 12 mm auto-reversed it to `Y3, Y2, Y1` and the
+"Reverse legend order" checkbox showed checked; unchecking read `Y1, Y2, Y3`
+and re-checking flipped back. The front y-axis line's `d` started at
+`y = 24 mm` (the reserve, `= -cascadeFront.y`) rather than `0`, with a
+segment length of `35 mm` exactly matching the projected rear y-axis's
+`35 mm`; turning on `Boxed` drew the rear plane's top and right edges. No
+console errors in either theme.
+
+**Verified:** 918 TypeScript tests (909 + 9 new across
+`continuous-axis.test.ts`, `gridlines.test.ts`, `doc-model.test.ts` and
+`parity.test.tsx` — see the list in the verification note near the top),
+190 Python tests unchanged (nothing here touches `services/api`), `tsc
+--build --force` and `eslint .` clean, 46-check acceptance run unaffected
+(no existing fixture cascades a plot or sets a legend order).
+
+**Not done, deliberately:** the y-axis title stays centred on the full plot
+height rather than the trimmed front-axis midpoint (the rear axes carry no
+title to disagree with, and the offset is small); scatter plots are not
+offered the reverse-legend toggle; a cascade with `showGridlines` off still
+gets its front axes trimmed even though no rear axes are drawn to visually
+match — the user chose "on every cascade offset" so the front axes always
+bound the front-most trace's plane.
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -4614,7 +4715,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

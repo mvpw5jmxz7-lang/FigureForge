@@ -2177,7 +2177,11 @@ function requiredMargin(
   );
   const legendRows =
     placement === 'bottom'
-      ? legendRowLayout(legendEntries(geometry), theme, Math.max(0, node.frame.width - leftUsed))
+      ? legendRowLayout(
+          orderedLegendEntries(node, geometry),
+          theme,
+          Math.max(0, node.frame.width - leftUsed),
+        )
           .rows
       : 0;
 
@@ -2719,6 +2723,28 @@ function legendEntries(geometry: PlotGeometry): { label: string; color: string }
 }
 
 /**
+ * The legend entries in the order they are drawn, each still carrying the
+ * *series* index its swatch shape/style must be looked up by.
+ *
+ * Continuous plots reverse when `node.reverseLegend` says so, or — absent that
+ * field — when the plot is a cascade: a cascade paints back-to-front, so its
+ * visual top is the last series, and a legend left in plain series order then
+ * runs opposite to the stack and the depth axis. The same cascade-aware
+ * default `gridlineStyle` already uses. A categorical legend keys on the
+ * second factor rather than series order, so it is never reversed here.
+ */
+function orderedLegendEntries(
+  node: PlotNode,
+  geometry: PlotGeometry,
+): { label: string; color: string; seriesIndex: number }[] {
+  const tagged = legendEntries(geometry).map((entry, seriesIndex) => ({ ...entry, seriesIndex }));
+  const reversed =
+    geometry.kind === 'continuous' &&
+    (node.reverseLegend ?? hasCascadeOffset(node, geometry.series.length));
+  return reversed ? tagged.reverse() : tagged;
+}
+
+/**
  * Whether a legend is drawn, and where.
  *
  * `'auto'` shows one exactly when there is something it alone can say. A
@@ -2842,7 +2868,7 @@ function renderLegend(
   geometry: PlotGeometry,
   placement: 'right' | 'bottom',
 ): SceneNode[] {
-  const entries = legendEntries(geometry);
+  const entries = orderedLegendEntries(node, geometry);
   if (entries.length === 0) return [];
 
   const { margin, plotWidth, plotHeight } = geometry;
@@ -2859,6 +2885,10 @@ function renderLegend(
 
   const children: SceneNode[] = [];
   entries.forEach((entry, index) => {
+    // `index` is the drawn row position; `entry.seriesIndex` is the series the
+    // swatch's shape/line-style must be read from — the two differ once the
+    // legend is reversed.
+    const series = entry.seriesIndex;
     const y = placement === 'right' ? index * pitch : (below?.at[index]?.row ?? 0) * pitch;
     const x = placement === 'right' ? 0 : (below?.at[index]?.x ?? 0);
 
@@ -2879,7 +2909,7 @@ function renderLegend(
      */
     const shape =
       geometry.kind === 'continuous' && (node.pointShapes?.some((s) => s != null) ?? false)
-        ? (shapeForSeries(node, index) ?? node.pointShape ?? 'circle')
+        ? (shapeForSeries(node, series) ?? node.pointShape ?? 'circle')
         : undefined;
     /*
      * The same "any series carries one" rule as the shape swatch above, for
@@ -2890,7 +2920,7 @@ function renderLegend(
      */
     const lineDash =
       node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false)
-        ? dashArrayFor(lineStyleForSeries(node, index) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
+        ? dashArrayFor(lineStyleForSeries(node, series) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
         : undefined;
     const drawsLine = node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false);
     const swatchMarks: SceneNode[] = [];
@@ -4598,26 +4628,32 @@ function cascadeBackOffsetMm(
  * either axis specifically — so `renderAxes` and `renderAxesHorizontal`
  * share this rather than each drawing their own copy that could drift apart.
  *
- * `backOffset` shifts the box to the back plane of a cascading line plot —
- * see `cascadeBackOffsetMm` — so the box encloses the *back-most* series'
- * own window rather than the whole canvas. Defaults to `{0,0}`, which
- * reduces both lines to exactly today's formula, so every non-cascading
- * `boxed` figure is untouched.
+ * `box` names the rectangle to close. It defaults to the whole plot area
+ * (`{0, 0, plotWidth, plotHeight}`), which reduces both lines to exactly
+ * today's formula, so every non-cascading `boxed` figure is untouched. On a
+ * cascading line plot `renderAxes` passes the *rear* plane's window instead
+ * — see `cascadeBackOffsetMm` — so the box completes the far face of the
+ * oblique box, the trimmed front axes drawing the near face's L.
  */
 function renderBoxedBorder(
   node: PlotNode,
   plotWidth: number,
   plotHeight: number,
   axisStroke: SceneAttrs,
-  backOffset: { x: number; y: number } = { x: 0, y: 0 },
+  box: { left: number; top: number; right: number; bottom: number } = {
+    left: 0,
+    top: 0,
+    right: plotWidth,
+    bottom: plotHeight,
+  },
 ): SceneNode[] {
   if (!node.boxed) return [];
   return [
-    el('path', { d: `M${round(backOffset.x)} 0 L${round(plotWidth)} 0`, ...axisStroke }, undefined, { role: 'axis' }),
+    el('path', { d: `M${round(box.left)} ${round(box.top)} L${round(box.right)} ${round(box.top)}`, ...axisStroke }, undefined, { role: 'axis' }),
     el(
       'path',
       {
-        d: `M${round(plotWidth)} 0 L${round(plotWidth)} ${round(plotHeight + backOffset.y)}`,
+        d: `M${round(box.right)} ${round(box.top)} L${round(box.right)} ${round(box.bottom)}`,
         ...axisStroke,
       },
       undefined,
@@ -4761,8 +4797,8 @@ function renderGridlines(
 
   // The back wall, and then the second axes standing on it. Automatic
   // whenever cascading, independent of `node.boxed`: that field draws its own
-  // (optionally back-offset) rectangle on request, which simply overdraws the
-  // frame below in the firmer axis stroke.
+  // rectangle on request, which on a cascade closes this same rear plane's
+  // top and right edges in the firmer axis stroke (see `renderBoxedBorder`).
   if (backOffset) {
     const left = round(backOffset.x);
     const right = round(plotWidth);
@@ -4799,13 +4835,14 @@ function renderGridlines(
  * for: a minor tick has no diagonal, so one here would put a mark on the back
  * axis with no counterpart in the grid.
  *
- * The spans are the back *plane*'s own window, not the translated front axis
- * *lines*: those deliberately run the full canvas (`[0, plotHeight]`,
- * `[0, plotWidth]`), which shifted by the cascade offset would hang off the
- * panel. `left = backOffset.x`, `bottom = plotHeight + backOffset.y`,
- * `top = 0` and `right = plotWidth` are the back-most series' real bounds —
- * see `cascadeBackOffsetMm` — so nothing here needs a margin reservation
- * beyond the outward tick overhang the front axes already reserve for.
+ * The spans are the back *plane*'s own window: `left = backOffset.x`,
+ * `bottom = plotHeight + backOffset.y`, `top = 0` and `right = plotWidth` are
+ * the back-most series' real bounds — see `cascadeBackOffsetMm`. `renderAxes`
+ * trims the *front* L-axis to the mirror-image front-plane window (`renderAxes`'
+ * `cascadeFront`), so the near and far L's are the same length and sit on
+ * parallel planes, and `node.boxed` completes the far face's rectangle;
+ * nothing here needs a margin reservation beyond the outward tick overhang
+ * the front axes already reserve for.
  */
 function renderCascadeBackAxes(
   node: PlotNode,
@@ -4860,11 +4897,28 @@ function renderAxes(
   const tickLen = theme.spacing.tickLengthMm;
   const axisStroke = { stroke: theme.foreground, 'stroke-width': theme.stroke.axisMm, fill: 'none' };
 
+  // On a cascading line plot the front axes are trimmed to the front-most
+  // series' own plane — the mirror image of `renderCascadeBackAxes` standing
+  // on the back plane — so the two L-axes are equal length and become the
+  // parallel edges of the oblique box. `cascadeBackOffsetMm` is the front→back
+  // vector; the front plane is `{left: 0, top: -offset.y, right: plotWidth -
+  // offset.x, bottom: plotHeight}` (the back plane less that vector). `null`
+  // when not cascading, which leaves every coordinate below at today's value.
+  const cascadeFront =
+    geometry.kind === 'continuous' && hasCascadeOffset(node, geometry.series.length)
+      ? cascadeBackOffsetMm(geometry.series)
+      : null;
+
   // --- y axis -------------------------------------------------------------
   if (node.y.showLine) {
     const first = yScale.ticks[0];
     const last = yScale.ticks[yScale.ticks.length - 1];
-    const yTop = node.y.trimToData && last !== undefined ? yScale.scale(last) : 0;
+    const yTop =
+      node.y.trimToData && last !== undefined
+        ? yScale.scale(last)
+        : cascadeFront
+          ? -cascadeFront.y
+          : 0;
     const yBottom = node.y.trimToData && first !== undefined ? yScale.scale(first) : plotHeight;
     out.push(
       el('path', { d: `M0 ${round(yTop)} L0 ${round(yBottom)}`, ...axisStroke }, undefined, { role: 'axis' }),
@@ -4953,15 +5007,22 @@ function renderAxes(
 
   // --- x axis --------------------------------------------------------------
   if (node.x.showLine) {
+    const xRight = cascadeFront ? plotWidth - cascadeFront.x : plotWidth;
     out.push(
-      el('path', { d: `M0 ${round(plotHeight)} L${round(plotWidth)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
+      el('path', { d: `M0 ${round(plotHeight)} L${round(xRight)} ${round(plotHeight)}`, ...axisStroke }, undefined, { role: 'axis' }),
     );
   }
-  const cascadeBoxOffset =
-    geometry.kind === 'continuous' && hasCascadeOffset(node, geometry.series.length)
-      ? cascadeBackOffsetMm(geometry.series)
-      : { x: 0, y: 0 };
-  out.push(...renderBoxedBorder(node, plotWidth, plotHeight, axisStroke, cascadeBoxOffset));
+  // `boxed` closes the *rear* frame on a cascade — the complete far face of the
+  // oblique box — while the trimmed front axes above draw the near face's L.
+  const boxRect = cascadeFront
+    ? {
+        left: cascadeFront.x,
+        top: 0,
+        right: plotWidth,
+        bottom: plotHeight + cascadeFront.y,
+      }
+    : { left: 0, top: 0, right: plotWidth, bottom: plotHeight };
+  out.push(...renderBoxedBorder(node, plotWidth, plotHeight, axisStroke, boxRect));
 
   // How far below the axis the labels reach, so the title clears them.
   const { angle, budget, depth: xLabelDepth } = xLabelLayout(node, theme, geometry);

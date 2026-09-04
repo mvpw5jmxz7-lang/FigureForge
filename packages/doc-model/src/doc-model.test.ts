@@ -3310,6 +3310,49 @@ describe('.figureforge archive', () => {
     expect(loaded.document).toEqual(doc);
   });
 
+  it('round-trips reverseLegend, absent when never set', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2\n2\t4\t2\t4', newId()) };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Lines',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.reverseLegend = false;
+      }
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.reverseLegend).toBe(false);
+
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X1\tY1\tX2\tY2\n1\t2\t1\t2', newId()) };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Plain',
+      });
+    });
+    const reloaded = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(reloaded.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'reverseLegend' in untouchedPlot).toBe(false);
+  });
+
   it('round-trips showCascadeAxis/cascadeAxisTitle, absent when never set', () => {
     const newId = createIdFactory();
     const base = createDocument({

@@ -1361,6 +1361,58 @@ describe('adapter parity', () => {
     expect(fromReact).toBe(normalise(toSvgString(scene)));
     expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
   });
+
+  it('draws a reversed-legend cascade identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      ['X1\tY1\tX2\tY2\tX3\tY3', '1\t2\t1\t3\t1\t4', '2\t4\t2\t5\t2\t6', '3\t6\t3\t7\t3\t8'].join('\n'),
+    );
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-reverse-legend',
+        name: 'Reversed legend cascade',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/reverse-legend.csv',
+        sourceFilename: 'reverse-legend.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 90, height: 60 },
+        name: 'Reversed legend cascade',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.offsetStepMm = 10;
+        node.boxed = true;
+        node.reverseLegend = true;
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    const labels = collectByRole(scene, 'legend')
+      .filter((n) => n.tag === 'text')
+      .map((n) => n.text);
+    expect(labels).toEqual(['Y3', 'Y2', 'Y1']);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------

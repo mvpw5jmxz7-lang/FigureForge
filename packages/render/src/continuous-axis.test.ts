@@ -711,11 +711,45 @@ describe('independent xy pairs', () => {
 
   it('names the three runs in a legend', () => {
     // Nothing else on a continuous plot says which line is which — the band
-    // labels a categorical plot leans on do not exist here.
+    // labels a categorical plot leans on do not exist here. A plain line plot
+    // with no cascade offset keys in plain series order (see the reversal
+    // tests below for the cascade default).
     const labels = collectByRole(scene(makeDocument(XY_PAIRS, 'line')), 'legend')
       .filter((n) => n.tag === 'text')
       .map((n) => n.text);
     expect(labels).toEqual(['Y1', 'Y2', 'Y3']);
+  });
+
+  it('reverses the legend on a plain line plot when reverseLegend is set', () => {
+    const labels = collectByRole(
+      scene(makeDocument(XY_PAIRS, 'line', 80, { reverseLegend: true })),
+      'legend',
+    )
+      .filter((n) => n.tag === 'text')
+      .map((n) => n.text);
+    expect(labels).toEqual(['Y3', 'Y2', 'Y1']);
+  });
+
+  it('keeps a reversed legend swatch pointing at its own series line style', () => {
+    // The swatch's dash pattern is read by *series* index, not row position —
+    // so after a reversal the top row (series 3) must still carry series 3's
+    // own style, not series 1's.
+    const forward = collectByRole(
+      scene(makeDocument(XY_PAIRS, 'line', 80, { lineStyles: ['solid', 'dashed', 'dotted'] })),
+      'legend',
+    ).filter((n) => n.tag !== 'text');
+    const reversed = collectByRole(
+      scene(
+        makeDocument(XY_PAIRS, 'line', 80, {
+          lineStyles: ['solid', 'dashed', 'dotted'],
+          reverseLegend: true,
+        }),
+      ),
+      'legend',
+    ).filter((n) => n.tag !== 'text');
+    expect(reversed.map((n) => n.attrs?.['stroke-dasharray'])).toEqual(
+      [...forward.map((n) => n.attrs?.['stroke-dasharray'])].reverse(),
+    );
   });
 });
 
@@ -899,6 +933,30 @@ describe('cascade / offset line plots', () => {
       'line',
     ).map((n) => String(n.attrs?.['stroke']));
     expect(cascadedOrder).toEqual([...plainOrder].reverse());
+  });
+
+  it('reverses the legend by default so it matches the cascade stack', () => {
+    // The cascade paints back-to-front and stacks its last series on top, so a
+    // legend left in plain series order runs opposite to everything else on
+    // the plot. Absent `reverseLegend`, a cascade flips it — the same
+    // cascade-aware default `gridlineStyle` uses.
+    const labels = collectByRole(
+      scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10 })),
+      'legend',
+    )
+      .filter((n) => n.tag === 'text')
+      .map((n) => n.text);
+    expect(labels).toEqual(['Y3', 'Y2', 'Y1']);
+  });
+
+  it('honours reverseLegend:false on a cascade, overriding the default', () => {
+    const labels = collectByRole(
+      scene(makeDocument(IDENTICAL, 'line', 80, { offsetStepMm: 10, reverseLegend: false })),
+      'legend',
+    )
+      .filter((n) => n.tag === 'text')
+      .map((n) => n.text);
+    expect(labels).toEqual(['Y1', 'Y2', 'Y3']);
   });
 
   it('draws an opaque fill closing at the baseline, in front-to-back paint order', () => {

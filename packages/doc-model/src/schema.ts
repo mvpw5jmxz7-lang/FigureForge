@@ -235,6 +235,7 @@ const plotSchema = z.object({
   showGridlines: z.boolean().optional(),
   gridlineColor: z.enum(['grey', 'black']).optional(),
   gridlineStyle: z.enum(['solid', 'dashed', 'dotted']).optional(),
+  reverseLegend: z.boolean().optional(),
 });
 
 const imageSchema = z.object({

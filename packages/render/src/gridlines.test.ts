@@ -473,7 +473,7 @@ describe('boxed border on a cascading line plot', () => {
     });
   }
 
-  it('draws the box at the back plane, not the front', () => {
+  it('closes the rear plane — the far face of the oblique box — not the whole canvas', () => {
     const doc = cascadeDoc();
     const geometry = computePlotGeometry(plotOf(doc), doc, NATURE_THEME) as ContinuousPlotGeometry;
     const first = geometry.series[0]!;
@@ -484,10 +484,13 @@ describe('boxed border on a cascading line plot', () => {
     };
     const axisPaths = collectByRole(scene(doc), 'axis').map((n) => String(n.attrs?.['d']));
     const plotWidth = round(geometry.plotWidth);
+    const left = round(backOffset.x);
+    const bottom = round(geometry.plotHeight + backOffset.y);
 
-    expect(axisPaths).toContain(`M${round(backOffset.x)} 0 L${plotWidth} 0`);
-    expect(axisPaths).toContain(`M${plotWidth} 0 L${plotWidth} ${round(geometry.plotHeight + backOffset.y)}`);
-    // The plain, non-offset box corners never appear once cascading.
+    // Top and right edges of the rear plane's rectangle, in the axis stroke.
+    expect(axisPaths).toContain(`M${left} 0 L${plotWidth} 0`);
+    expect(axisPaths).toContain(`M${plotWidth} 0 L${plotWidth} ${bottom}`);
+    // The plain full-canvas box corner never appears once cascading.
     expect(axisPaths).not.toContain(`M0 0 L${plotWidth} 0`);
   });
 
@@ -500,6 +503,82 @@ describe('boxed border on a cascading line plot', () => {
     for (const svg of [cascading, ordinary]) {
       expect(svg).toMatch(/M0 0 L[\d.]+ 0/);
     }
+  });
+});
+
+describe('cascade front axes: trimmed to the front-most series\' own plane', () => {
+  function cascadeDoc(patch: Partial<PlotNode> = {}): FigureDocument {
+    return makeContinuousDocument(XY_PAIRS, 'line', {
+      offsetStepMm: 10,
+      offsetStepXMm: 5,
+      showGridlines: true,
+      ...patch,
+    });
+  }
+
+  function backOffsetOf(geometry: ContinuousPlotGeometry): { x: number; y: number } {
+    const first = geometry.series[0]!;
+    const last = geometry.series[geometry.series.length - 1]!;
+    return {
+      x: round((last.baselineXMm ?? 0) - (first.baselineXMm ?? 0)),
+      y: round((last.baselineMm ?? 0) - (first.baselineMm ?? 0)),
+    };
+  }
+
+  it('trims the front L-axis to the front plane, mirroring the rear axes', () => {
+    const doc = cascadeDoc();
+    const geometry = computePlotGeometry(plotOf(doc), doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const backOffset = backOffsetOf(geometry);
+    const axisPaths = collectByRole(scene(doc), 'axis').map((n) => String(n.attrs?.['d']));
+    const plotWidth = round(geometry.plotWidth);
+    const plotHeight = round(geometry.plotHeight);
+
+    // Front y axis starts level with the front trace's top, not the panel top.
+    expect(axisPaths).toContain(`M0 ${round(-backOffset.y)} L0 ${plotHeight}`);
+    // Front x axis ends short of the right edge by the sideways lean.
+    expect(axisPaths).toContain(`M0 ${plotHeight} L${round(plotWidth - backOffset.x)} ${plotHeight}`);
+    // The old full-canvas lines are gone.
+    expect(axisPaths).not.toContain(`M0 0 L0 ${plotHeight}`);
+    expect(axisPaths).not.toContain(`M0 ${plotHeight} L${plotWidth} ${plotHeight}`);
+  });
+
+  it('makes the front and rear L-axes equal length', () => {
+    const doc = cascadeDoc();
+
+    /** Euclidean length of a two-point `M x y L x y` path. */
+    const segLen = (d: string): number => {
+      const n = [...d.matchAll(/-?[\d.]+/g)].map(Number);
+      return Math.hypot(n[2]! - n[0]!, n[3]! - n[1]!);
+    };
+
+    const front = collectByRole(scene(doc), 'axis')
+      .map((n) => String(n.attrs?.['d']))
+      .filter((d) => /^M-?[\d.]+ -?[\d.]+ L-?[\d.]+ -?[\d.]+$/.test(d));
+    const rear = collectByRole(scene(doc), 'cascade-back-axis').map((n) => String(n.attrs?.['d']));
+
+    // The vertical front axis line and the vertical rear axis line (x0 === x1).
+    const isVertical = (d: string) => {
+      const n = [...d.matchAll(/-?[\d.]+/g)].map(Number);
+      return Math.abs(n[0]! - n[2]!) < 1e-6;
+    };
+    const frontY = front.find(isVertical)!;
+    const rearY = rear.find(isVertical)!;
+    expect(segLen(frontY)).toBeCloseTo(segLen(rearY), 3);
+
+    // The horizontal pair (y0 === y1), longest of each (the axis line, not a tick).
+    const horiz = (arr: string[]) =>
+      arr.filter((d) => !isVertical(d)).sort((a, b) => segLen(b) - segLen(a))[0]!;
+    expect(segLen(horiz(front))).toBeCloseTo(segLen(horiz(rear)), 3);
+  });
+
+  it('leaves a plain (non-cascading) line plot\'s front axes full length', () => {
+    const doc = makeContinuousDocument(XY_PAIRS, 'line');
+    const geometry = computePlotGeometry(plotOf(doc), doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const paths = collectByRole(scene(doc), 'axis').map((n) => String(n.attrs?.['d']));
+    expect(paths).toContain(`M0 0 L0 ${round(geometry.plotHeight)}`);
+    expect(paths).toContain(
+      `M0 ${round(geometry.plotHeight)} L${round(geometry.plotWidth)} ${round(geometry.plotHeight)}`,
+    );
   });
 });
 
