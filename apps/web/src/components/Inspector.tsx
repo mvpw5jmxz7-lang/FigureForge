@@ -64,9 +64,27 @@ import {
   reflowBrackets,
 } from '@figureforge/render';
 import { isRotatable } from './Canvas.js';
+import { ColorChip } from './ColorChip.js';
 import { SymbolPicker } from './SymbolPicker.js';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
-import { PALETTES, findColorConflicts, paletteColors, type Theme } from '@figureforge/theme';
+import { PALETTES, findColorConflicts, paletteColors, type ColorConflict, type Theme } from '@figureforge/theme';
+
+/**
+ * The colour-conflict warning shown wherever a plot's own resolved colours
+ * are checked pairwise (the volcano-colours block and the per-series palette
+ * block) — one implementation so the two can't drift, and so each hex code
+ * gets the same `ColorChip` the Quality tab's matching finding already draws.
+ */
+function ColorConflictWarning({ conflict }: { conflict: ColorConflict }) {
+  return (
+    <p className="warning">
+      {conflict.colorA}
+      <ColorChip hex={conflict.colorA} /> and {conflict.colorB}
+      <ColorChip hex={conflict.colorB} /> are hard to tell apart under {conflict.condition} (ΔE{' '}
+      {conflict.deltaE.toFixed(1)}).
+    </p>
+  );
+}
 import { deleteNodesWithLayout } from '../deleteNodes.js';
 import { insertAtCaret } from '../textEditing.js';
 import type { DocumentApi } from '../useDocument.js';
@@ -323,12 +341,7 @@ function VolcanoColorControls({
           </label>
         ))}
       </div>
-      {conflicts.length > 0 && (
-        <p className="warning">
-          {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
-          {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
-        </p>
-      )}
+      {conflicts.length > 0 && <ColorConflictWarning conflict={conflicts[0]!} />}
 
       <VolcanoLabelControls
         node={node}
@@ -1155,12 +1168,7 @@ function PlotFields({
             </button>
           )}
 
-          {conflicts.length > 0 && (
-            <p className="warning">
-              {conflicts[0]!.colorA} and {conflicts[0]!.colorB} are hard to tell apart under{' '}
-              {conflicts[0]!.condition} (ΔE {conflicts[0]!.deltaE.toFixed(1)}).
-            </p>
-          )}
+          {conflicts.length > 0 && <ColorConflictWarning conflict={conflicts[0]!} />}
 
           <label className="check">
             <input

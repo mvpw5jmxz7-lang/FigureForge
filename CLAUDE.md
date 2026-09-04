@@ -256,6 +256,20 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 30 (the same colour swatch, now on the Inspector's own
+colour-conflict warnings):** 918 TypeScript tests unchanged (this round is
+presentational JSX only — no `quality.ts`/model change and no new test, since
+this codebase verifies canvas/Inspector UI live rather than through a React
+component unit test), 190 Python tests unchanged, `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, and a live-browser
+check in light **and** dark covering both warning sites. **Measured, not
+assumed**: recolouring a line plot's palette and, separately, the volcano
+plot's "Down" swatch each into `#d62728` against an unchanged `#d73027`
+produced the identical warning text `withColorSwatches` already draws in the
+Quality tab, with two `.color-chip` spans read back off the DOM as
+`rgb(214,39,40)` and `rgb(215,48,39)` in both cases, no console errors. See
+"Round 30" below.
+
 **Verified after round 29 (a reversible legend order, and cascade front axes
 trimmed to the projected rear axes):** 918 TypeScript tests (909 + 9 new:
 legend-reversal cases in `continuous-axis.test.ts` — the cascade default, a
@@ -4564,12 +4578,13 @@ ramp ends are now named), 190 Python tests unchanged (nothing here touches
 `services/api`), `tsc --build --force` and `eslint .` clean, 46-check
 acceptance run unaffected (no fixture triggers a colour finding).
 
-**Not done, deliberately:** the two identical `conflicts[0]` warning lines
-in `Inspector.tsx` (the volcano-colours block and the palette block) print
-the same hex codes and would benefit from the same treatment, but the
-request named the Quality tab specifically and `withColorSwatches` operates
-on a string where those render `{colorA}` / `{colorB}` as separate JSX — a
-shared `<ColorChip>` component would be the clean way in if that is wanted.
+**Not done, deliberately (at the time):** the two identical `conflicts[0]`
+warning lines in `Inspector.tsx` (the volcano-colours block and the palette
+block) print the same hex codes and would benefit from the same treatment,
+but the request named the Quality tab specifically and `withColorSwatches`
+operates on a string where those render `{colorA}` / `{colorB}` as separate
+JSX — a shared `<ColorChip>` component would be the clean way in if that is
+wanted. **Done in round 30**, below.
 
 ### Round 29 — a reversible legend order, and trimmed cascade front axes
 
@@ -4652,6 +4667,39 @@ offered the reverse-legend toggle; a cascade with `showGridlines` off still
 gets its front axes trimmed even though no rear axes are drawn to visually
 match — the user chose "on every cascade offset" so the front axes always
 bound the front-most trace's plane.
+
+### Round 30 — the same colour swatch, now on the Inspector's own warnings
+
+Requested as a direct follow-up to round 28: the swatch landed in the
+Quality tab but not the Inspector, where the identical warning text already
+appears in two places.
+
+- **`apps/web/src/components/ColorChip.tsx`** is the shared component round
+  28's own "Not done" note called for — `<ColorChip hex={hex} />`, exactly
+  the `<span className="color-chip" style={{background: hex}}>` both call
+  sites already needed, reusing `.color-chip` from `styles.css` with no new
+  CSS. `withColorSwatches` in `SidePanel.tsx` now renders it too, in place of
+  its own inline `<span>` — one implementation instead of two that could
+  drift, the same discipline `scaleBarWidthMm`/`analysisInputHash` are held
+  to elsewhere in this codebase.
+- **`ColorConflictWarning({ conflict })` in `Inspector.tsx`** replaces both
+  byte-identical `<p className="warning">` blocks (the volcano-colours block
+  and the per-series palette block) with one component, chip placed *after*
+  each hex code to match the Quality tab's own convention. Neither call site
+  needed any other change — both already had a `ColorConflict` in scope from
+  their own `findColorConflicts` call.
+- **No model or `quality.ts` change.** `findColorConflicts` itself is
+  untouched and already covered by `palettes.test.ts`; this round is pure
+  presentation over an existing, already-correct computation.
+
+Driven in a real browser, light **and** dark: a freshly imported two-series
+line plot's palette block, recoloured into round 28's own known-colliding
+pair (`#d62728`/`#d73027`), drew the warning with two `.color-chip` spans
+reading `rgb(214,39,40)`/`rgb(215,48,39)` off the DOM — and, separately, the
+sample document's volcano panel (b), with only its "Down" swatch changed to
+`#d62728` against the theme's own default "Up" colour (already `#d73027`),
+produced the identical warning and chips in its own Colours block. No
+console errors in either theme.
 
 ## What's next
 

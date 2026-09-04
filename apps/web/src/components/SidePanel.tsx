@@ -62,6 +62,7 @@ import {
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
 import { analyze, ApiError, runPca, runUmap, runVolcanoTest } from '../api.js';
+import { ColorChip } from './ColorChip.js';
 import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
@@ -2323,15 +2324,7 @@ function withColorSwatches(text: string): ReactNode {
   parts.forEach((part, i) => {
     out.push(part);
     if (i % 2 === 1) {
-      out.push(
-        <span
-          key={i}
-          className="color-chip"
-          style={{ background: part }}
-          title={part}
-          aria-hidden
-        />,
-      );
+      out.push(<ColorChip key={i} hex={part} />);
     }
   });
   return out;
