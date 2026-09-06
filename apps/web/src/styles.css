@@ -448,6 +448,15 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .finding p { margin: 3px 0 6px; font-size: 12px; color: var(--muted); }
 .finding-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 
+/* Smart layout: one row per candidate arrangement.
+   The glyph is drawn from the candidate's own `gridCells`, so it is a picture
+   of the real thing rather than an illustration of it. */
+.candidate-head { display: flex; align-items: center; gap: 9px; margin-bottom: 4px; }
+.candidate-glyph { flex: none; border-radius: 2px; }
+.score.inline { margin-bottom: 0; }
+.score.inline .score-value { font-size: 20px; }
+.score.inline .score-max { font-size: 11px; }
+
 /* A sample block of a colour a finding names, shown right after its hex code. */
 .color-chip {
   display: inline-block;

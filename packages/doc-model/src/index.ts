@@ -4,6 +4,8 @@ export * from './nodes.js';
 export * from './grouplabel.js';
 export * from './richtext.js';
 export * from './layout.js';
+export * from './arrangement.js';
+export * from './smart-layout.js';
 export * from './templates.js';
 export * from './data.js';
 export * from './analysis.js';

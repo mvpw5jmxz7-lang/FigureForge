@@ -69,6 +69,7 @@ import {
   groupLabelExtentMm,
   fitMontageToImages,
   imageContentRect,
+  resyncScaleBars,
   imagesUsingAsset,
   memberContentRect,
   montagePanelAspect,
@@ -1991,6 +1992,44 @@ describe('scale bars', () => {
     const { doc, bar } = barDocument();
     expect(scaleBarWidthMm(doc.nodes, bar.id)).toBeCloseTo(1.0, 10);
     expect(doc.nodes[bar.id]!.frame.width).toBeCloseTo(1.0, 10);
+  });
+
+  it('sits on the picture, not in the letterbox beside it', () => {
+    /*
+     * An aspect-preserved micrograph in a frame of a different shape leaves
+     * empty space inside its own frame. Placing the bar against the *frame*
+     * put it in that emptiness — measured on the sample figure's montage,
+     * 100 px below the micrograph and horizontally under the next tile along.
+     * A bar that is not on its image measures nothing.
+     */
+    const { doc, bar, image, newId } = barDocument();
+
+    // Make the frame much taller than the picture needs, so the two differ.
+    const tall = editDocument(doc, (draft) => {
+      const img = draft.nodes[image.id]!;
+      img.frame = { ...img.frame, height: img.frame.height * 3 };
+      resyncScaleBars(draft);
+    });
+
+    const placed = tall.nodes[bar.id]!.frame;
+    const content = imageContentRect(tall.nodes[image.id] as ImageNode);
+    expect(placed.y + placed.height).toBeLessThanOrEqual(content.y + content.height + 0.001);
+    expect(placed.x + placed.width).toBeLessThanOrEqual(content.x + content.width + 0.001);
+    expect(placed.y).toBeGreaterThanOrEqual(content.y - 0.001);
+    void newId;
+  });
+
+  it('follows its picture when the image is resized', () => {
+    // `resyncScaleBars` used to rewrite the width alone, so a bar kept its old
+    // `y` and the selection chrome drifted off the drawn bar.
+    const { doc, bar, image } = barDocument();
+    const before = doc.nodes[bar.id]!.frame.y;
+    const shorter = editDocument(doc, (draft) => {
+      const img = draft.nodes[image.id]!;
+      img.frame = { ...img.frame, height: img.frame.height / 2 };
+      resyncScaleBars(draft);
+    });
+    expect(shorter.nodes[bar.id]!.frame.y).not.toBeCloseTo(before, 3);
   });
 
   it('draws black unless asked otherwise', () => {

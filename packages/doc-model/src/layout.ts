@@ -8,7 +8,15 @@
  */
 
 import type { PointMm, RectMm } from './geometry.js';
-import { fitAspect, right, bottom, centerX, centerY, rotatePoint, snapAngle } from './geometry.js';
+import {
+  fitAspectAligned,
+  right,
+  bottom,
+  centerX,
+  centerY,
+  rotatePoint,
+  snapAngle,
+} from './geometry.js';
 import type { FigureNode, NodeId, NodeMap } from './nodes.js';
 
 export interface GridSpec {
@@ -184,8 +192,25 @@ export interface PanelLayoutInput {
 }
 
 /**
- * Assign frames to panels. Panels with an aspect lock are centred inside their
- * cell at the largest size that fits; unlocked panels fill the cell outright.
+ * Assign frames to panels. A panel with an aspect lock takes the largest rect
+ * of that shape that fits its cell, against the cell's **top-left corner**;
+ * unlocked panels fill the cell outright.
+ *
+ * Top-left rather than centred, which is what this did until a figure actually
+ * contained an aspect-locked panel. Two things were wrong with centring, and
+ * the first is not cosmetic:
+ *
+ *   - `readingOrder` bands rows with a 5 mm tolerance on `frame.y`. A wide
+ *     montage centred in a square cell sits ~22 mm below the cell's top, so it
+ *     sorted as though it were on the next row down and `relabelPanels` gave it
+ *     the wrong letter — a figure whose legend then describes the wrong panel.
+ *   - A panel's letter is placed at `frame.x - offset`, so a horizontally
+ *     centred panel leaves its letter floating in the middle of the page
+ *     instead of at the column edge.
+ *
+ * It is also the convention the published figures follow, and the one round 33
+ * already chose for the tiles *inside* a montage: a row of differently
+ * proportioned micrographs lines up along its top edge.
  */
 export function autoLayout(
   panels: readonly PanelLayoutInput[],
@@ -207,7 +232,10 @@ export function autoLayout(
       height: cell.height,
     };
 
-    frames.set(panel.id, panel.aspectLock ? fitAspect(inner, panel.aspectLock) : inner);
+    frames.set(
+      panel.id,
+      panel.aspectLock ? fitAspectAligned(inner, panel.aspectLock, 'start', 'start') : inner,
+    );
   });
 
   return frames;

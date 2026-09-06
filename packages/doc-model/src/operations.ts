@@ -26,6 +26,7 @@ import {
   readingOrder,
   suggestGrid,
   type AlignMode,
+  type GridSlot,
   type GridSpec,
   type GuideAxis,
   type LayoutOptions,
@@ -571,13 +572,40 @@ export function applyAutoLayout(
     },
   );
 
+  placePanels(
+    draft,
+    panels,
+    frames,
+    panels.map((_, index) => (template ? (template.slots[index] ?? null) : null)),
+  );
+}
+
+/**
+ * Move a set of panels onto new frames, and everything that has to follow them.
+ *
+ * Factored out of `applyAutoLayout` so smart layout can reuse it. Smart layout
+ * gives each band its own column boundaries, which one `GridSpec` cannot
+ * express, so it computes frames itself — but the *consequences* of a panel
+ * moving are identical either way, and a second copy of them is how one caller
+ * comes to re-tile its montages while the other forgets to.
+ *
+ * `slots[i]` is the slot to record against `panels[i]`, or null to clear it. A
+ * slot is only meaningful against the grid it was authored for, so anything that
+ * is not a template arrangement must pass null rather than leave a stale one.
+ */
+export function placePanels(
+  draft: FigureDocument,
+  panels: readonly PanelNode[],
+  frames: ReadonlyMap<NodeId, RectMm>,
+  slots: readonly (GridSlot | null)[],
+): void {
   for (const [index, panel] of panels.entries()) {
     const frame = frames.get(panel.id);
     if (!frame) continue;
 
     // Cleared with the arrangement it belonged to, so the next plain layout
     // cannot resurrect it against a differently shaped grid.
-    panel.slot = template ? (template.slots[index] ?? null) : null;
+    panel.slot = slots[index] ?? null;
 
     const dx = frame.x - panel.frame.x;
     const dy = frame.y - panel.frame.y;
@@ -606,6 +634,9 @@ export function applyAutoLayout(
  * (a template application, or a document imported already too small).
  */
 export const MIN_TILE_MM = 5;
+
+/** Gap between a scale bar and the corner of the picture it sits on. */
+export const DEFAULT_SCALE_BAR_INSET_MM = 2;
 
 /**
  * Extra clearance to fold into a montage panel's own internal gutters, one
@@ -659,6 +690,42 @@ function groupLabelGutterExtras(
   }
 
   return { rowExtra, columnExtra };
+}
+
+/**
+ * The part of a montage panel's extent that is *not* cells: gutters, padding
+ * and any group-label bands, on each axis.
+ *
+ * `montagePanelAspect` composes the same two quantities inline to solve the
+ * panel's shape; smart layout needs them to state the smallest frame at which
+ * every cell still clears `MIN_TILE_MM`, which is exactly the condition
+ * `montageCellRects` returns null on. Exported so the two cannot disagree —
+ * reimplementing this arithmetic beside the solver is how a panel comes to be
+ * declared layout-able at a frame the tiler then refuses to fill.
+ */
+export function montageFixedExtentMm(
+  doc: FigureDocument,
+  panelId: NodeId,
+): { rows: number; cols: number; fixedWidthMm: number; fixedHeightMm: number } | null {
+  const panel = doc.nodes[panelId];
+  const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
+  if (!grid || grid.rows < 1 || grid.cols < 1) return null;
+
+  const { rowExtra, columnExtra } = groupLabelGutterExtras(
+    doc,
+    panelId,
+    montageTiles(doc.nodes, panelId),
+    { rows: grid.rows, cols: grid.cols },
+  );
+  const sum = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0);
+  const padding = panel?.type === 'panel' ? panel.paddingMm : 0;
+
+  return {
+    rows: grid.rows,
+    cols: grid.cols,
+    fixedWidthMm: (grid.cols - 1) * grid.gutterMm + sum(columnExtra) + 2 * padding,
+    fixedHeightMm: (grid.rows - 1) * grid.gutterMm + sum(rowExtra) + 2 * padding,
+  };
 }
 
 /**
@@ -1412,11 +1479,56 @@ export function scaleBarWidthMm(nodes: NodeMap, id: NodeId): number | null {
  * is not. The direct parallel is `repositionBrackets`, and it is called from
  * the same places for the same reason.
  */
+/**
+ * Where a scale bar belongs on its image: the bottom-right corner of the
+ * **picture**, not of the image node's frame.
+ *
+ * The two are the same only when the picture fills its frame exactly. An
+ * aspect-preserved micrograph in a cell of a different shape letterboxes, and
+ * a bar placed against the frame then floats in the empty margin — measured on
+ * the sample figure's montage, 100 px clear of the micrograph it was supposed
+ * to be measuring, and horizontally under the *next* tile along. A bar that is
+ * not on its own image is a measurement of nothing, which is precisely the
+ * failure `checkScaleBarCalibration` exists to keep out of a published figure.
+ *
+ * Composed once and read by both `addScaleBar` and `resyncScaleBars`, the same
+ * discipline `scaleBarWidthMm` itself is held to — the placement and the
+ * re-placement cannot then disagree.
+ */
+export function scaleBarFrame(
+  nodes: NodeMap,
+  barId: NodeId,
+  insetMm = DEFAULT_SCALE_BAR_INSET_MM,
+): RectMm | null {
+  const bar = nodes[barId];
+  if (bar?.type !== 'scale-bar') return null;
+  const image = bar.parentId ? nodes[bar.parentId] : undefined;
+  if (image?.type !== 'image') return null;
+
+  const width = scaleBarWidthMm(nodes, barId) ?? bar.frame.width;
+  // Local to the image node's own frame, which is what a child frame is
+  // relative to — so the content rect is used as an offset, not as a position.
+  const content = imageContentRect(image);
+  return {
+    x: Math.max(0, content.x + content.width - insetMm - width),
+    y: Math.max(0, content.y + content.height - insetMm - bar.barHeightMm),
+    width,
+    height: bar.barHeightMm,
+  };
+}
+
+/**
+ * Put every scale bar back on its picture, at its true calibrated width.
+ *
+ * Previously this rewrote the width alone, so a bar kept its old `y` when its
+ * image was resized or re-tiled — the selection chrome and the drawn bar then
+ * sat somewhere the picture no longer was.
+ */
 export function resyncScaleBars(draft: FigureDocument): void {
   for (const node of Object.values(draft.nodes)) {
     if (node.type !== 'scale-bar') continue;
-    const width = scaleBarWidthMm(draft.nodes, node.id);
-    if (width !== null && width > 0) node.frame = { ...node.frame, width };
+    const frame = scaleBarFrame(draft.nodes, node.id);
+    if (frame && frame.width > 0) node.frame = frame;
   }
 }
 
@@ -1450,7 +1562,7 @@ export function addScaleBar(
   const image = draft.nodes[options.imageId];
   if (!image || image.type !== 'image') return null;
 
-  const inset = options.insetMm ?? 2;
+  const inset = options.insetMm ?? DEFAULT_SCALE_BAR_INSET_MM;
   const barHeightMm = options.barHeightMm ?? 0.6;
   const labelPosition = options.labelPosition ?? 'above';
   const id = newId();
@@ -1483,11 +1595,10 @@ export function addScaleBar(
 
   draft.nodes[id] = node;
 
-  const width = scaleBarWidthMm(draft.nodes, id);
-  if (width !== null && width > 0) {
-    // Bottom-right, the conventional corner, once the true width is known.
-    node.frame = { ...node.frame, x: Math.max(0, image.frame.width - inset - width), width };
-  }
+  // Bottom-right of the picture, the conventional corner, once the true width
+  // is known. One derivation, shared with `resyncScaleBars`.
+  const placed = scaleBarFrame(draft.nodes, id, inset);
+  if (placed && placed.width > 0) node.frame = placed;
 
   return node;
 }

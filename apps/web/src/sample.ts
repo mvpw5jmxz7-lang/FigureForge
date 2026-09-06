@@ -1,13 +1,26 @@
 /**
  * Demo figure used as the app's starting document.
  *
- * Shaped like real experimental data: a treatment column plus replicate
- * columns, which is what comes out of a plate reader or an image quantification
- * and is the format most authors will paste in.
+ * Seven panels of deliberately unlike kinds — a categorical bar-dot, a
+ * three-tile micrograph montage, a SAM/S0 volcano, a heatmap, a Kaplan-Meier
+ * curve, a timecourse and a violin. Two reasons for the spread. It shows what
+ * the app can actually draw, which two panels never did; and it gives Smart
+ * layout something real to solve, since panels of unlike demand are exactly
+ * the case an evenly divided page gets wrong.
+ *
+ * The data is shaped like what comes out of a plate reader or an image
+ * quantification, which is what most authors will paste in.
+ *
+ * Asset *bytes* are not here: `createSampleDocument` is called from Node by
+ * `scripts/archive-memory.ts`, so it declares the `Asset` records and
+ * `sampleMicrographs.ts` supplies what they point at.
  */
 
 import {
+  addAsset,
+  addPanelWithImages,
   addPanelWithPlot,
+  addScaleBar,
   applyAutoLayout,
   blocksOfSize,
   createDocument,
@@ -19,6 +32,7 @@ import {
   inferFormat,
   parseDelimited,
   relabelPanels,
+  reflowGroupLabels,
   updateNode,
   type DataFormat,
   type Dataset,
@@ -27,6 +41,7 @@ import {
   type PlotNode,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
+import { SAMPLE_MICROGRAPHS } from './sampleMicrographs.js';
 import {
   SAMPLE_TZ_CURVE_DOWN,
   SAMPLE_TZ_CURVE_UP,
@@ -243,6 +258,69 @@ Protein_099,23.14,23.23,23.07,22.33,22.49,22.19
 Protein_100,21.97,22.06,21.89,22.68,22.83,22.54`;
 
 /** Build a Dataset from pasted or imported delimited text. */
+/**
+ * A correlation matrix over pathway scores — the heatmap panel.
+ *
+ * `matrix` is never auto-inferred (nothing in a rectangle of numbers says
+ * whether it is a grid to colour or replicates to pool), so the sample declares
+ * it, exactly as the differential and proteomics tables above declare theirs.
+ */
+export const SAMPLE_PATHWAY_MATRIX = `Pathway,Ctrl 0 h,Ctrl 6 h,Cmpd 6 h,Cmpd 24 h
+Autophagy,0.12,0.31,1.42,2.08
+Lysosome,0.08,0.44,1.61,2.35
+Proteasome,-0.21,-0.34,-0.88,-1.27
+Oxid. stress,0.45,0.72,1.05,0.94
+Cell cycle,-0.05,-0.42,-1.35,-1.92
+Translation,0.02,-0.18,-0.61,-0.83`;
+
+/**
+ * Time-to-event data for the survival panel: one row per subject, an event
+ * flag, and the arm. Declared `survival` — a bare three-numeric-column table
+ * reads just as plausibly as three repeated measurements.
+ */
+export const SAMPLE_SURVIVAL = `Time,Event,Arm
+9,1,Vehicle
+13,1,Vehicle
+13,0,Vehicle
+18,1,Vehicle
+23,1,Vehicle
+28,0,Vehicle
+31,1,Vehicle
+34,1,Vehicle
+45,0,Vehicle
+48,1,Vehicle
+16,1,Compound X
+20,1,Compound X
+27,1,Compound X
+31,0,Compound X
+43,1,Compound X
+45,1,Compound X
+53,1,Compound X
+58,0,Compound X
+66,1,Compound X
+75,0,Compound X`;
+
+/** Shared time axis, one column per arm — the timecourse line panel. */
+export const SAMPLE_TIMECOURSE = `Hours,Vehicle,Compound X
+0,1.00,1.02
+2,1.08,1.44
+4,1.15,2.31
+8,1.21,3.68
+12,1.18,4.42
+24,1.24,4.85`;
+
+/**
+ * Twelve replicates per genotype for the distribution panel.
+ *
+ * n = 12 deliberately: `checkDistributionSampleSize` warns on a violin below
+ * ten, and the figure the app opens with should not itself be an example of
+ * the thing the quality checker exists to catch.
+ */
+export const SAMPLE_MARKER_DISTRIBUTION = `Genotype,R1,R2,R3,R4,R5,R6,R7,R8,R9,R10,R11,R12
+WT,4.1,4.4,3.9,4.6,4.2,4.0,4.5,4.3,3.8,4.7,4.1,4.4
+KO,7.2,6.8,7.9,7.1,6.5,8.2,7.4,7.7,6.9,8.0,7.3,7.6
+Rescue,4.8,5.2,4.5,5.0,4.9,5.4,4.6,5.1,4.7,5.3,4.4,5.0`;
+
 export interface ImportOptions extends ParseOptions {
   /**
    * Override the inferred layout.
@@ -415,7 +493,10 @@ export function createSampleDocument(): FigureDocument {
     title: 'Compound X induces target expression and shifts the proteome',
     presetId: 'nature-double',
     widthMm: 183,
-    heightMm: 75,
+    // Seven panels on a 3 x 3 grid. Deliberately merely *adequate*: the plain
+    // Auto Layout this ships with divides it evenly, and turning that into a
+    // figure is exactly what the Layout tab is for.
+    heightMm: 180,
     idFactory: newId,
   });
 
@@ -485,8 +566,30 @@ export function createSampleDocument(): FigureDocument {
       importedAt: new Date().toISOString(),
       derivedFrom: { datasetId: tzProteomics.id, kind: 'volcano-test' },
     };
-    draft.datasets = [expression, differential, replicates, tzProteomics, tzVolcano];
+    const pathways = datasetFromText(SAMPLE_PATHWAY_MATRIX, 'Pathway scores', newId(), null, {
+      format: 'matrix',
+    });
+    const survival = datasetFromText(SAMPLE_SURVIVAL, 'Survival by arm', newId(), null, {
+      format: 'survival',
+    });
+    const timecourse = datasetFromText(SAMPLE_TIMECOURSE, 'Reporter timecourse', newId());
+    const markers = datasetFromText(SAMPLE_MARKER_DISTRIBUTION, 'Marker distribution', newId());
 
+    draft.datasets = [
+      expression,
+      differential,
+      replicates,
+      tzProteomics,
+      tzVolcano,
+      pathways,
+      survival,
+      timecourse,
+      markers,
+    ];
+
+    // a — the smallest demand on the page. Three categories and no legend, so
+    // it reads perfectly well in a narrow column, which is what Smart layout
+    // should discover rather than be told.
     addPanelWithPlot(draft, newId, {
       frame: { x: 0, y: 0, width: 80, height: 60 },
       name: 'Expression',
@@ -496,8 +599,48 @@ export function createSampleDocument(): FigureDocument {
       xTitle: 'Genotype',
     });
 
-    // A real SAM/S0 boundary from the start, not a plain fold-change/p-value
-    // cutoff — see `sampleVolcanoTest.ts` for where these numbers came from.
+    // b — the largest demand. Three 800 px tiles, so the panel keeps gaining
+    // real detail right up to the full page width; `autoFit` lets the montage
+    // take the shape its pictures actually want.
+    for (const micrograph of SAMPLE_MICROGRAPHS) {
+      addAsset(draft, {
+        id: micrograph.id,
+        filename: micrograph.filename,
+        mimeType: micrograph.mimeType,
+        path: micrograph.path,
+        byteLength: micrograph.byteLength,
+        naturalPx: micrograph.naturalPx,
+      });
+    }
+    const { images } = addPanelWithImages(draft, newId, {
+      frame: { x: 0, y: 0, width: 90, height: 30 },
+      name: 'Micrographs',
+      gutterMm: 1,
+      images: SAMPLE_MICROGRAPHS.map((m) => ({
+        assetId: m.id,
+        naturalPx: m.naturalPx,
+        name: m.filename.replace('.jpg', ''),
+      })),
+    });
+    /*
+     * Calibrated, not left to be filled in. `checkScaleBarCalibration` treats
+     * an unknown calibration as an *error* weighted 25 — the app would open on
+     * a visibly poor readiness score, and the first thing a new user saw would
+     * be a defect in the example.
+     */
+    const firstTile = images[0];
+    if (firstTile) {
+      addScaleBar(draft, newId, {
+        imageId: firstTile.id,
+        length: 20,
+        pixelsPerUnit: 5.2,
+        unitLabel: 'µm',
+        calibrationSource: 'manual',
+      });
+    }
+
+    // c — a real SAM/S0 boundary from the start, not a plain fold-change and
+    // p-value cutoff. See `sampleVolcanoTest.ts` for where the numbers are from.
     const { plot: volcano } = addPanelWithPlot(draft, newId, {
       frame: { x: 0, y: 0, width: 80, height: 60 },
       name: 'Proteomic hits',
@@ -517,11 +660,52 @@ export function createSampleDocument(): FigureDocument {
       volcanoTest: { ...SAMPLE_TZ_VOLCANO_TEST },
     });
 
+    // d — six rows of row labels and a colourbar, so this one wants width.
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Pathway scores',
+      datasetId: pathways.id,
+      plotType: 'heatmap',
+    });
+
+    // e — the opposite shape to the heatmap: a probability axis fixed at 0..1.
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Survival',
+      datasetId: survival.id,
+      plotType: 'survival',
+      yTitle: 'Survival probability',
+      xTitle: 'Days',
+    });
+
+    // f — continuous x with a two-entry legend, which is what makes its
+    // measured bottom margin larger than the bar chart's.
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Reporter timecourse',
+      datasetId: timecourse.id,
+      plotType: 'line',
+      yTitle: 'Fold induction',
+      xTitle: 'Hours',
+    });
+
+    // g — n = 12 per group, deliberately: `checkDistributionSampleSize` warns
+    // on a violin below ten, and the example should not demonstrate the defect.
+    addPanelWithPlot(draft, newId, {
+      frame: { x: 0, y: 0, width: 80, height: 60 },
+      name: 'Marker distribution',
+      datasetId: markers.id,
+      plotType: 'violin',
+      yTitle: 'Marker intensity',
+      xTitle: 'Genotype',
+    });
+
     applyAutoLayout(draft, {
       marginMm: NATURE_THEME.spacing.marginMm,
       gutterMm: NATURE_THEME.spacing.panelGutterMm,
       labelGutterMm: 4,
     });
+    reflowGroupLabels(draft);
 
     relabelPanels(draft, newId, {
       fontSizePt: NATURE_THEME.type.panelLabelPt,

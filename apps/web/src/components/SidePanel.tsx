@@ -52,6 +52,10 @@ import {
   type NodeId,
   type PlotNode,
   type StatTest,
+  describeArrangement,
+  explainCandidate,
+  type SmartLayoutCandidate,
+  type SmartLayoutOptions,
 } from '@figureforge/doc-model';
 import {
   measureAllPlots,
@@ -70,10 +74,11 @@ import { InspectorTab } from './Inspector.js';
 import { axisTitlesFor, datasetFromText, type ImportOptions } from '../sample.js';
 import type { AssetsApi } from '../assets.js';
 import { deleteNodesWithLayout } from '../deleteNodes.js';
+import { applyCandidate, LABEL_GUTTER_MM, solveForDocument } from '../smartLayout.js';
 import { ACCEPTED_IMAGE_TYPES, importImage, initialImageSize } from '../imageImport.js';
 import type { DocumentApi } from '../useDocument.js';
 
-export type Tab = 'data' | 'inspector' | 'stats' | 'quality' | 'layers';
+export type Tab = 'data' | 'inspector' | 'stats' | 'layout' | 'quality' | 'layers';
 
 /**
  * Warn once the archive gets big enough to be a problem.
@@ -230,7 +235,7 @@ export function SidePanel(props: SidePanelProps) {
   return (
     <aside className="side-panel">
       <nav className="tabs">
-        {(['data', 'inspector', 'stats', 'quality', 'layers'] as const).map((t) => (
+        {(['data', 'inspector', 'stats', 'layout', 'quality', 'layers'] as const).map((t) => (
           <button key={t} className={t === tab ? 'active' : ''} onClick={() => setTab(t)}>
             {t}
           </button>
@@ -255,6 +260,7 @@ export function SidePanel(props: SidePanelProps) {
           />
         )}
         {tab === 'stats' && <StatsTab {...props} />}
+        {tab === 'layout' && <SmartLayoutTab {...props} />}
         {tab === 'quality' && <QualityTab {...props} />}
         {tab === 'layers' && <LayersTab {...props} />}
       </div>
@@ -2341,6 +2347,182 @@ function withColorSwatches(text: string): ReactNode {
     }
   });
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Smart layout
+// ---------------------------------------------------------------------------
+
+/**
+ * A miniature of the arrangement, drawn from the candidate's own frames.
+ *
+ * Worth the twenty lines: a score and a sentence say how good an arrangement
+ * is, and this says what it *is*. The panels' real frames rather than their
+ * cells, so an aspect-locked micrograph shows at the shape it will actually
+ * take — including any strip it leaves beside itself, which is exactly what an
+ * author comparing arrangements is looking for.
+ */
+function CandidateGlyph({
+  candidate,
+  options,
+}: {
+  candidate: SmartLayoutCandidate;
+  options: SmartLayoutOptions;
+}) {
+  const w = options.pageWidthMm;
+  const h = candidate.pageHeightMm;
+  const scale = 34 / Math.max(w, h);
+
+  return (
+    <svg
+      className="candidate-glyph"
+      width={w * scale}
+      height={h * scale}
+      viewBox={`0 0 ${w} ${h}`}
+      aria-hidden="true"
+    >
+      <rect x={0} y={0} width={w} height={h} fill="none" stroke="var(--border)" strokeWidth={1.5} />
+      {candidate.order.map((id) => {
+        const frame = candidate.frames.get(id);
+        if (!frame) return null;
+        return (
+          <rect
+            key={id}
+            x={frame.x}
+            y={frame.y}
+            width={frame.width}
+            height={frame.height}
+            fill="var(--accent)"
+            opacity={0.35}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+/**
+ * Arrangements the solver found, best first, each with what it costs.
+ *
+ * A list rather than a dropdown because the author is choosing between four
+ * things that differ in several ways at once — a `<select>` can show a label
+ * and nothing else, and would apply on change with no chance to compare.
+ */
+function SmartLayoutTab({ api, theme, exportDpi, onSelectionChange }: SidePanelProps) {
+  const doc = api.document;
+  const panelCount = Object.values(doc.nodes).filter((n) => n.type === 'panel').length;
+
+  // Solving measures every plot at up to three type sizes, so it is not free
+  // and must not run on every keystroke elsewhere in the app. Memoised on the
+  // document identity, which Immer replaces on any edit.
+  const result = useMemo(
+    () => (panelCount >= 2 ? solveForDocument(doc, theme, exportDpi) : null),
+    [doc, theme, exportDpi, panelCount],
+  );
+
+  const options = useMemo(
+    () => ({
+      pageWidthMm: doc.page.widthMm,
+      currentPageHeightMm: doc.page.heightMm,
+      maxPageHeightMm: 297,
+      minPageHeightMm: 40,
+      marginMm: theme.spacing.marginMm,
+      gutterMm: theme.spacing.panelGutterMm,
+      labelGutterMm: LABEL_GUTTER_MM,
+    }),
+    [doc.page.widthMm, doc.page.heightMm, theme],
+  );
+
+  const apply = (candidate: SmartLayoutCandidate): void => {
+    // One commit is one undo entry, so the page, the type, every frame and
+    // every letter come back together on a single Ctrl+Z.
+    api.commit('Smart layout', (draft) => {
+      applyCandidate(draft, candidate, api.newId);
+    });
+  };
+
+  if (panelCount < 2) {
+    return (
+      <section>
+        <h3>Smart layout</h3>
+        <p className="muted">
+          Nothing to arrange yet — smart layout compares what each panel needs against the others,
+          so it wants at least two.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      <h3>Smart layout</h3>
+      <p className="muted small">
+        Each arrangement is measured, not guessed: a picture&rsquo;s size comes from the width at
+        which it still holds {exportDpi} dpi, and a plot&rsquo;s from the axis furniture it actually
+        draws. Applying one is a single undo step.
+      </p>
+
+      {result?.blockedBy && (
+        <div className="finding error">
+          <strong>No arrangement fits</strong>
+          <p>{result.blockedBy}. Reduce the panel count, or allow a taller page.</p>
+        </div>
+      )}
+
+      {result?.candidates.length === 0 && !result.blockedBy && (
+        <p className="muted">No arrangement improves on the current one.</p>
+      )}
+
+      {result?.candidates.map((candidate, index) => {
+        const tone = scoreTone(candidate.score);
+        const heightChanged = Math.abs(candidate.pageHeightMm - doc.page.heightMm) > 0.05;
+        const short = candidate.order.filter((id) => {
+          const frame = candidate.frames.get(id);
+          return frame ? frame.width < options.pageWidthMm * 0.1 : false;
+        });
+
+        return (
+          <div key={candidate.id} className="finding">
+            <div className="candidate-head">
+              <CandidateGlyph candidate={candidate} options={options} />
+              <div>
+                <strong>
+                  {describeArrangement(candidate.arrangement)}
+                  {index === 0 ? ' — best fit' : ''}
+                </strong>
+                <div className={`score inline ${tone}`}>
+                  <span className="score-value">{candidate.score}</span>
+                  <span className="score-max">/ 100</span>
+                </div>
+              </div>
+            </div>
+
+            <p>{explainCandidate(candidate, result.baseline)}</p>
+
+            <p className="muted small">
+              {heightChanged
+                ? `Page ${doc.page.heightMm.toFixed(0)} → ${candidate.pageHeightMm.toFixed(0)} mm`
+                : `Page stays ${doc.page.heightMm.toFixed(0)} mm`}
+              {candidate.fontScale < 1
+                ? ` · Type at ${Math.round(candidate.fontScale * 100)} % (floor ${candidate.minPt} pt)`
+                : ' · Type unchanged'}
+            </p>
+
+            <div className="finding-actions">
+              <button className="primary" onClick={() => apply(candidate)}>
+                Apply
+              </button>
+              {short.length > 0 && (
+                <button onClick={() => onSelectionChange([...short])}>
+                  Select {short.length} squeezed
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
 }
 
 function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePanelProps) {

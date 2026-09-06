@@ -29,6 +29,7 @@ import { usePointCloudRasters } from './pointRasters.js';
 import { openAuthorisedPath } from './desktopFiles.js';
 import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
 import { createSampleDocument } from './sample.js';
+import { seedSampleAssets } from './sampleMicrographs.js';
 import { isDesktop, type DesktopMenuCommand } from './shell.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
@@ -134,6 +135,16 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   useUndoShortcuts(api);
 
   const assets = useAssets(api.document);
+
+  /*
+   * The sample figure's micrographs. Asset bytes live outside the document, so
+   * `createSampleDocument()` can only declare the `Asset` records — something
+   * has to supply what they point at, here and in `newFigure` below. Keyed by
+   * a fixed id and `add` is idempotent, so a re-render costs nothing.
+   */
+  useEffect(() => {
+    seedSampleAssets(assets.store);
+  }, [assets.store]);
 
   /**
    * Verbatim source text for every imported dataset, keyed by archive path.
@@ -578,6 +589,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
    */
   const newFigure = useCallback(() => {
     assets.store.clear();
+    seedSampleAssets(assets.store);
     dataOriginals.current = new Map();
     api.store.reset(createSampleDocument());
     setSelectedIds([]);
@@ -756,6 +768,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         showGrid={showGrid}
         onShowGridChange={setShowGrid}
         busy={busy}
+        onOpenSmartLayout={() => setTab('layout')}
       />
 
       {error && (

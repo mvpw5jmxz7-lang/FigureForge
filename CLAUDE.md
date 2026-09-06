@@ -256,6 +256,50 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 36 (ragged rows and L-shapes for smart layout):** 1059
+TypeScript tests (1036 + 23 new: 20 in a new `arrangement.test.ts` covering the
+enumeration's rules, per-band width solving, the stacked column, the height
+demand, `shareOut` and reading order across the *whole* enumeration; 3 in
+`smart-layout.test.ts` for the ragged offering plus the no-hole property over
+every candidate, the eight-figure variety, and slot clearing), 190 Python tests
+unchanged (nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, **16 live-browser checks
+in each of light and dark**, a 6-check L-shape run and a PDF export.
+**Measured, not assumed**: the Layout tab now lists eight distinct shapes
+spanning two to five rows — `2 + 2 + 3`, `1 + 2 + 2 + 2`, `3 + 2 + 2`, a plain
+`4 + 3` and three L-shapes — where before every offer was a uniform grid and a
+seven-panel figure could only be a 2 × 4 with one cell empty; applying the
+`4 + 3` put four panels across the top spanning 10.5 → 181.0 mm and three
+across the bottom spanning 8.7 → 179.0 mm of a 183 mm page, both bands filling
+it edge to edge; applying the `3 + 4` L-shape placed a 45.5 mm and a 37.4 mm
+panel stacked in one column beside two 89 mm-tall neighbours with **no
+overlapping pair** and the letters still reading `a`–`g`; and the export is a
+single page at exactly 183.0000 × 97.5000 mm with 3 image XObjects at readiness
+96 and no error-severity finding. **A real bug was found by measuring rather
+than reading**: the column bound was computed from the *widest* panel's
+minimum, so a row of four was never enumerated even though the four narrowest
+panels needed 136 mm of the 179 mm available — see "Round 36" below.
+
+**Verified after round 35 (smart layout — a content-aware panel arrangement
+solver — and a seven-panel sample figure):** 1036 TypeScript tests (1001 + 35
+new: 24 in `smart-layout.test.ts` covering solved weights, the image/montage
+demand arithmetic, the rejection classes, determinism, reading order,
+explanations and applying; 9 in `panel-demand.test.ts` pinning a plot's demand
+to `computePlotGeometry`'s own margin; 2 in `doc-model.test.ts` for scale-bar
+placement), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run unaffected,
+**20 live-browser checks in each of light and dark** plus a 17-check sample run
+and a PDF export. **Measured, not assumed**: on the new sample figure the
+solver offers four distinct arrangements scoring 88 / 84 / 73 / 62, and
+applying the best gives panel widths of 286, 286, 286, 312, 720, 749, 749 mm-
+equivalents with the micrograph montage the widest panel — against a spread of
+43 px before; one Ctrl+Z restores every frame *and* the page height together;
+the figure opens at readiness 96 with no error-severity finding; and the export
+is a single page at exactly 183.0000 x 191.5000 mm with 3 image XObjects and
+fonts embedded. Three real defects were found by probing the solver and reading
+the rendered figure rather than by reading code — see "Round 35" below. See
+"Round 35" below.
+
 **Verified after round 34 (group-title double-click editing):** 1001
 TypeScript tests unchanged (a React event-handling fix with no pure function
 to unit-test, matching this codebase's standing convention that canvas
@@ -5353,6 +5397,275 @@ panel-label double-click editing (already working) was re-confirmed
 unaffected, still opening a single-line `<input>`. No console errors in
 either theme.
 
+### Round 35 — smart layout, and a seven-panel sample figure
+
+Requested: a tool that works out how best to present several panels on a page —
+resizing so simple graphs are small and detailed micrographs are large,
+minimising wasted whitespace, avoiding squashed content, keeping reading order.
+Offered as an AI feature; built as a **deterministic solver** instead, which the
+user chose. An LLM cannot measure millimetres, and everything else in this
+codebase is a pure function of the document verified against real output.
+
+**No schema change.** All four levers already existed and are already in
+`schema.ts`: `page.heightMm`, `document.themeOverrides`, `PanelNode.aspectLock`
+and `GridSpec`'s weights. `SCHEMA_VERSION` stays 1 and no field was added.
+
+#### The mechanism
+
+- **Nothing sized a panel to its content before this.** The chain was
+  `readingOrder` → `suggestGrid` → `gridCells` → optional `fitAspect`, and
+  `suggestGrid` never emits weights, so the page was divided evenly, full stop.
+- **`PanelDemand` is plain data in `doc-model`, produced in `render`** —
+  `measurePanelDemands` (`packages/render/src/panel-demand.ts`). A plot's real
+  demand is its measured axis furniture, which only `computePlotGeometry`
+  knows, and `doc-model` imports nothing internal. Exactly the
+  `PlotMeasurements`/`measureAllPlots` split, for exactly the same reason.
+  `requiredMargin` stays private: the public `computePlotGeometry` already
+  returns `margin` through the two-pass rule, which is the number wanted.
+- **A picture's size comes from the dpi arithmetic that already existed**, read
+  in the direction it actually points. `checkImageResolution` prints
+  `visiblePx / (exportDpi / 25.4)` as the width to scale *down* to — effective
+  dpi falls as a panel grows — so it is a **maximum useful width**. That single
+  number is the whole "detailed micrographs large, simple graphs small" rule,
+  and it is measured: a 4000 px micrograph wants 338.7 mm and claims the page,
+  a 400 px inset caps at 33.9 mm. Capped at the usable width, or one oversized
+  import swamps every other weight.
+- **A plot is measured at exactly two probe frames**, wide and narrow — this
+  codebase's two-pass rule one level up. `requiredMargin` reads the frame it is
+  given (its 60/60/30/35 % caps, and how many rows a bottom legend wraps to), so
+  one probe cannot answer the question. The probe is a *clone*, so
+  `measurePlot`'s WeakMap misses by construction and is never polluted.
+- **Three fixed font scales** (1.0 / 0.92 / 0.85), clamped to
+  `theme.type.minimumPt`, never a search. Worth knowing, and pinned by a test:
+  the theme's own `plotMarginMm` is a **floor**, so shrinking type buys nothing
+  until the measured margin has already cleared it — the lever is worth less on
+  a plain small plot than on a crowded one.
+- **Bounded search**: at most 8 grid shapes x 3 page heights x 3 font scales.
+  Shapes reuse `suggestMontageGrid`'s no-wholly-empty-row rule and its reason.
+  Slots are row-major over `readingOrder`, so **left-to-right / top-to-bottom
+  holds by construction**, never by a check afterwards.
+- **The finalists are re-scored against a document each was actually applied
+  to.** `reserveSpaceForGroupLabels` translates panels *after* the grid is
+  solved, so a predicted score would describe a near-relative of what Apply
+  produces. Four document clones buys the property the preview depends on.
+- **`SMART_LAYOUT_WEIGHTS` is one exported block.** The balance between "the
+  micrograph is too small" and "the page grew 40 mm" is a judgement, and a
+  judgement spread over five call sites cannot be revised coherently.
+- **The UI is a SidePanel tab, not a modal** — this app has no modal or popover
+  infrastructure, and a `<select>` cannot show four scores and four sentences.
+  Each row carries an SVG glyph drawn from the candidate's own `gridCells`, so
+  it cannot depict a shape the candidate does not have. `explainCandidate` is
+  generated from the score's own terms, so it cannot describe a trade the score
+  did not make.
+
+#### Four defects found by measuring, not by reading
+
+Each was invisible to a green suite, and three were invisible to the solver's
+own unit tests until it was run against a real figure.
+
+- **A vacuous test hid a real design flaw.** The over-resolution case asserted
+  inside a `for` over `result.candidates` — which was **empty**, so it passed
+  proving nothing. A lone 400 px image always receives its whole cell and so
+  *cannot* comply with its own resolution limit; rejecting on that basis
+  discarded every arrangement and returned nothing. Being drawn past its pixels
+  is now a scored cost (`overResolution`, weighted level with `unmetDemand`)
+  and named in the explanation. The replacement test was checked by zeroing the
+  weight and confirming it fails.
+- **Solving weights purely from comfort starved the minimums.** On the sample
+  figure the montage honestly wants 175 mm; in a three-column grid that took
+  109 mm and left the heatmap's column 28 mm against a 49 mm minimum, so every
+  multi-column shape was rejected and the solver's only answer was a 247 mm
+  single column. `shareOut` now allocates every minimum first and divides the
+  surplus by remaining hunger.
+- **An aspect-locked panel's implied height had to be a minimum, not a want.**
+  A montage's row minimum is the mechanical 5 mm tile floor, so min-first
+  sharing handed the hungriest panel the *shortest* row — and `autoLayout`,
+  fitting it inside, threw away the column width it had just been granted: a
+  montage allotted 175 mm came out **74.6 mm** wide.
+- **`autoLayout` centred aspect-locked panels, which mislettered the figure.**
+  `fitAspect` centres, so a wide montage in a square cell sat 21.7 mm below its
+  cell top — past `readingOrder`'s 5 mm row tolerance — and sorted as a later
+  row: the sample opened with its *middle* panel lettered `c` and the panel to
+  its right lettered `b`. Now `fitAspectAligned(..., 'start', 'start')`: it
+  fixes the lettering by construction, stops a panel's letter floating mid-page,
+  and is the convention round 33 already chose for the tiles *inside* a montage.
+
+#### The sample figure, and a scale bar that was measuring nothing
+
+The old sample was two panels on a 183 x 75 mm strip. It exercised almost
+nothing the app can draw and gave the solver nothing to solve — two panels of
+equal demand is the one case an even split already gets right. It is now
+**seven** panels of deliberately unlike kinds: a bar-dot, a three-tile
+micrograph montage with a calibrated scale bar, the SAM/S0 volcano, a heatmap, a
+Kaplan-Meier curve, a timecourse and a violin (n = 12, so
+`checkDistributionSampleSize` has nothing to say about the example itself).
+
+- **Asset bytes are split from the document.** `createSampleDocument()` is
+  called from Node by `scripts/archive-memory.ts`, so it declares the `Asset`
+  records and browser-only `sampleMicrographs.ts` supplies the bytes, seeded in
+  **both** places the sample is created — the launch initialiser and
+  `newFigure`, which clears the store first. Missing the second is how New
+  Figure would open with three images pointing at nothing.
+- The micrographs are the already-committed ones in `reference-and-test-files/`,
+  re-encoded to JPEG (14–21 KB each; the PNGs base64 to 430 KB and 750 KB) and
+  kept at native 800 x 600, which is well past 300 dpi at the ~30 mm a tile
+  takes. Downscaling to 640 px would land at 295 dpi and greet every new user
+  with a warning.
+- **A scale bar was positioned against the image node's *frame*, not its
+  picture.** With `preserveAspect` the two differ, and measured on the montage
+  the bar sat **100 px below** the micrograph and horizontally under the next
+  tile along — a bar that is not on its image measures nothing, which is exactly
+  what `checkScaleBarCalibration` exists to keep out of a figure. `scaleBarFrame`
+  now derives the position from `imageContentRect` and is read by both
+  `addScaleBar` and `resyncScaleBars`, so placement and re-placement cannot
+  disagree. It also fixes a second, quieter bug: `resyncScaleBars` rewrote the
+  width alone, so a bar kept its old `y` when its image was resized.
+
+**Not done, deliberately:** no free-form span search (only row-major slots —
+that is where the candidate count explodes and where reading order stops being
+guaranteed by construction); no live canvas preview of a candidate (the score,
+the glyph and one Apply-then-undo answer the same question far more cheaply);
+no per-panel font scale (`theme.type` is document-wide, and mixed sizes across
+panels is itself what `checkFontConsistency` flags); no page *width* change and
+no `theme.spacing` change, so the reported trade stays verifiable against the
+measured demand; nothing persisted, since re-solving is cheap; and no
+Quality-tab fix recipe, because a `FixRecipe` cannot present four choices and
+would have to pick silently — which is the behaviour this feature exists to
+avoid.
+
+### Round 36 — ragged rows and L-shapes for smart layout
+
+Reported after using round 35: the arrangements offered still waste space, and
+a seven-panel figure ought to be able to put three panels in row 1 and four in
+row 2 with the last three narrower. Both halves were right, and the second
+named the cause exactly. Round 35's candidates were uniform `rows × columns`
+grids, so seven panels could only be a **2 × 4 — eight cells for seven panels,
+with one simply empty**. That hole *is* the wasted strip. The user also asked
+for L-shapes (a tall panel beside a stack of two) and for more options in the
+list; both are in.
+
+**No schema change.** The four levers are unchanged and `SCHEMA_VERSION` stays 1.
+
+#### A candidate stops being a grid
+
+The alternative — keep `GridSpec` and express ragged rows through a fine column
+grid plus `colSpan` — was worked through and rejected on arithmetic, not taste.
+A shared column grid forces the **gutter positions** to be global. Row 1's
+three gutters and row 2's four fall in different places, so the grid needs a
+boundary at the union of both; but a boundary interior to a row's panel makes
+that panel absorb an extra gutter, which shifts every position after it, which
+moves the boundaries being placed. It terminates only by iterating, and layout
+here refuses convergence loops (`requiredMargin`'s "exactly two passes",
+`montagePanelAspect`'s closed form).
+
+So `packages/doc-model/src/arrangement.ts` is a new module and a candidate
+carries an `Arrangement` plus explicit `frames`. It is pure geometry over four
+numbers per panel (`PanelSizeDemand`) with no notion of priority, resolution or
+where a demand came from — which is what lets it be tested against exact
+millimetres with no document, theme or measurement behind it.
+`solveWeights`/`gridShapes`/`rowMajorSlots` are gone; their two-pass reasoning
+moved into `arrangementFrames` unchanged.
+
+- **`placePanels` is factored out of `applyAutoLayout`** rather than
+  duplicated. A panel moving has the same consequences however its frame was
+  computed — re-tile, translate the letter, re-sync scale bars — and a second
+  copy is how one caller comes to re-tile and the other forgets to.
+- **`applySmartLayout` clears every `panel.slot`.** A smart arrangement is not
+  a template grid, and `applyAutoLayout`'s own comment already records what a
+  slot replayed against a differently-shaped grid does.
+- **It also stopped taking margin/gutter, and `applyCandidate` stopped taking a
+  theme.** Both were now unused, and the theme one was the stale-theme hazard
+  its own comment warned about: taking no parameter makes the mistake
+  unavailable rather than merely documented.
+
+#### Reading order, derived and then checked
+
+Bands top to bottom; within a band every column's *first* panel left to right
+(they all start at the band's top edge, so `readingOrder`'s 5 mm y-band groups
+them); then the stacked column's lower panel, which sits below all of them
+whichever column holds it.
+
+That is provable only while **at most one column per band is stacked, and a
+stack holds exactly two** — with two stacks, which lower panel comes first
+depends on the heights the demands happen to produce, so the order could not be
+known from the structure. Hence the enumeration's rule, and the reason for it.
+
+It is then *verified* rather than trusted: `readsInOrder` sorts the frames a
+candidate produced with `readingOrder`'s own comparator and the candidate is
+**dropped at generation time** if they disagree. `applySmartLayout`'s assertion
+stays as a backstop but can no longer be the thing that fires — a refusal at
+Apply reads to an author as a button that does nothing. The unit test asserts
+the property across the *whole* enumeration at deliberately uneven demands
+rather than for one example.
+
+#### The bug that measurement found
+
+**`maxCols` was computed from the widest panel's minimum**, i.e. "how many
+columns if every column were as wide as the widest one needs". On the sample
+that is `floor(184 / 47.4) = 3`, so **a band of four was never enumerated** —
+and no amount of tuning the ranking could have surfaced the `3 + 4` the round
+is about. The four narrowest panels there need 136 mm of the 179 mm available
+and fit comfortably. `mostThatFit` now takes the *k smallest* minimums, which
+is the true ceiling; whether a particular set of k panels fits is `shareOut`'s
+question, asked per band a few lines later. A loose bound the real test then
+tightens is the right shape; a tight bound applied *before* the real test can
+only discard arrangements that would have worked.
+
+Found by probing the solver against the real sample document — reading the
+code, the bound looks like an ordinary feasibility check.
+
+#### Getting eight genuinely different figures in front of the author
+
+The offered count went from four to eight, and two ranking problems had to be
+fixed before that bought anything. Both were found by running the tab, not by
+reading it.
+
+- **Deduping on the exact structure was too fine.** For seven equal panels the
+  top eight came back as four all-but-identical L-shapes — the stack at the left
+  or the right of either band, scoring within nothing of each other — plus four
+  three-band shapes. `figureSignature` is the coarser key: panels per row,
+  whether anything is stacked, whether the columns align. Which *end* the stack
+  sits at is not a choice anyone is making.
+- **Ranking purely by score bunched the list by row count.** On the real sample
+  all eight were three, four or five bands, with no two-row split at all —
+  because four panels across 183 mm is genuinely a little tight and it scored a
+  couple of points lower. Honest, and a poor offer. Each `(row count, stacked?)`
+  bucket now gets its best entry before any bucket gets a second; the rest fill
+  by score. Bucketing on row count *alone* was tried first and was not enough —
+  the best two-row entry was an L-shape, so the plain `3 + 4` still stayed out,
+  and the two kinds have to be separate buckets or the more exotic one wins the
+  slot on a point of score. Nothing is reordered by any of this: the
+  highest-scoring candidate is still first, only what makes the cut changes.
+
+#### Two smaller things
+
+- **The glyph draws the candidate's real frames**, not `gridCells`. More
+  truthful — an aspect-locked micrograph shows at the shape it will actually
+  take, including any strip it leaves beside itself, which is exactly what
+  someone comparing arrangements is looking at — and `candidateCells` is gone.
+- **The title is generated by `describeArrangement`** (`3 + 4`, `3 + 3 ·
+  aligned columns`, `2 + 2 + 3 · one tall panel beside a stack`), from the
+  structure, so it cannot name a shape the candidate does not have.
+
+**Two test-fixture errors of my own, both corrected rather than worked around.**
+A demand carrying `aspect` but not `aspectFromContent` was expected to get an
+aspect-shaped row: the solver quite rightly ignores an aspect it will not write
+as a lock, and reserving height for a shape then not enforcing it is what round
+35's own montage bug was. And a `shareOut` expectation of `[50, 50]` was
+arithmetic I got wrong — a track already at its want has zero hunger and gets
+none of the surplus, which is the rule, not a defect. Each new regression guard
+was checked by reverting the fix and confirming it fails.
+
+**Not done, deliberately:** stacks deeper than two, or two stacked columns in
+one band — both stop the reading order being derivable and neither appears in
+the reference figures. No free guillotine nesting (a stack whose cell is split
+again sideways): the search stops being enumerable. No score term rewarding
+column alignment — aligned candidates are offered as their own option and the
+author picks; a tidiness weight would make the reported trade unverifiable
+against the measured demand. Round 35's "no free-form span search" note is
+partly superseded — spans *down* now exist as the stacked column; spans across
+several columns still do not.
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -5365,14 +5678,20 @@ Phases 5–9, with the actual entry points:
 | 6 | **done** — export/QC hardening, autofixes | `Finding.fix` in `quality.ts`, recipes in `fixes.ts`; `apps/web/src/exportImages.ts` bakes crops |
 | 7 | **done** — all five chart types (volcano, heatmap, survival, PCA, UMAP) | the DOM-volume prerequisite — `planPointClouds`/`MAX_VECTOR_POINTS` in `render-document.ts`; volcano's `'differential'` format and per-point colour resolution, heatmap's `GridPlotGeometry`/`PlotGeometryBase` split and colour-scale machinery, survival's `toSurvivalGroups`/`kaplanMeier` data-prep path reusing the ordinary continuous geometry, PCA's "Analysis output becomes a new plottable Dataset" mechanism (`figureforge/pca.py`, the `'pca'` `DataFormat`, `DataTab`'s "Run PCA" action), and UMAP's reuse of that same mechanism plus its own new dependency (`figureforge/umap.py`, the `'umap'` `DataFormat`, "Run UMAP") — see "Phase 7, Stage 1" through "Stage 5" below |
 | 8 | **stages 1–3 done** — shell + sidecar lifecycle, native dialogs and the menu, then streaming archive I/O; stage 4 (packaging) open | `apps/desktop/src/sidecar.ts` is the supervisor (injected effects; the real ones in `sidecar.node.ts`), `figureforge/sidecar.py` the parent watchdog, `channels.ts` the one place both Electron worlds may import from; `make desktop` runs it, `make desktop-smoke` asserts on it. Stage 2's entry points are `apps/desktop/src/{menu,projects,projects.node,recent}.ts` and `apps/web/src/{shell,desktopFiles}.ts`; stage 3's are `packages/doc-model/src/archive-stream.ts` and the chunked bridge in `projects.node.ts`; stage 4 is electron-builder plus a bundled interpreter — see "Phase 8, Stage 1" through "Stage 3" |
-| 9 | AI layout assistant | `packages/doc-model/src/layout.ts` already has the geometry |
+| 9 | AI layout assistant | **Partly answered deterministically by round 35's smart layout** (`packages/doc-model/src/smart-layout.ts` + `packages/render/src/panel-demand.ts`), which measures each panel's demand and solves the arrangement without a model. What remains genuinely model-shaped is *narrative* grouping — which panels belong together — not geometry |
 
 ### Already scaffolded but unused
 
 - **Panel `slot`** (`{row, col, rowSpan, colSpan}`) is written by layout
   templates and honoured by `autoLayout`, but nothing lets a user author a slot
-  directly — templates are the only way to set one. It is also *cleared*
-  whenever layout runs without a template; see the reported-bug rounds for why.
+  directly — templates and, since round 35, smart layout (which hands
+  `applyAutoLayout` a *synthetic* `LayoutTemplate` rather than growing a second
+  way in) are the only ways to set one. It is also *cleared* whenever layout
+  runs without a template; see the reported-bug rounds for why.
+- **`GridSpec.columnWeights`/`rowWeights`** were in this list in spirit: real,
+  honoured by `tracks`, and only ever set by the six weighted entries in
+  `templates.ts`, never derived from anything. Round 35 solves them from
+  measured demands.
 - **`theme.stroke.bracketMm`** is declared and read by nothing; `addBracket`
   hardcodes `widthMm: 0.18`. `theme.spacing.bracketGapMm` was in the same state
   until round 4 wired it into `bracketStepMm`.
@@ -5416,7 +5735,7 @@ Phases 5–9, with the actual entry points:
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
-| **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
+| **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
 | **The archive is built whole in memory** | *Fixed, and not only on the desktop.* `writeArchiveStream`/`readArchiveStream` move the archive a chunk at a time, so it is never materialised: measured on a 200 MB payload, the save peak fell 525.8 → 337.3 MB (+200.5 MB of overhead became +1.7 MB) and the save-then-open cycle 725.9 → 589.1 MB. The browser benefits too — `createWritable()` was always a stream and was simply being handed one buffer. What remains is the working set the app must hold either way: the images themselves. The **download fallback** for Firefox/Safari still builds one buffer, because it hands a `Blob` to an anchor and there is no stream to give it instead. |

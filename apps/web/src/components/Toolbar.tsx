@@ -46,6 +46,8 @@ export interface ToolbarProps {
   showGrid: boolean;
   onShowGridChange: (show: boolean) => void;
   busy: string | null;
+  /** Opens the Layout tab, where the solved arrangements are compared. */
+  onOpenSmartLayout: () => void;
 }
 
 /**
@@ -79,6 +81,7 @@ export function Toolbar({
   showGrid,
   onShowGridChange,
   busy,
+  onOpenSmartLayout,
 }: ToolbarProps) {
   const { document: doc, commit, newId } = api;
   const unit = doc.page.displayUnit;
@@ -405,6 +408,21 @@ export function Toolbar({
       <div className="toolbar-group">
         <button onClick={() => arrange('Auto layout')} title={`Arrange as ${grid.rows}×${grid.columns}`}>
           Auto layout ({grid.rows}×{grid.columns})
+        </button>
+
+        {/* Auto layout divides the page evenly and applies at once; this one
+            sizes each panel from what it measures and offers the arrangements
+            to compare, so it opens the tab rather than acting. */}
+        <button
+          onClick={onOpenSmartLayout}
+          disabled={panelCount < 2}
+          title={
+            panelCount < 2
+              ? 'Smart layout weighs each panel against the others, so it needs at least two'
+              : 'Size panels from what each one needs, and compare the arrangements'
+          }
+        >
+          Smart layout…
         </button>
 
         {/* Arrangement templates, so panels need not all be the same size.
