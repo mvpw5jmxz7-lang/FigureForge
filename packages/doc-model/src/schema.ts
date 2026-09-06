@@ -13,6 +13,9 @@ import { SCHEMA_VERSION } from './document.js';
 const finite = z.number().finite();
 const nonNeg = finite.nonnegative();
 
+/** Matches `FitAlign` in geometry.ts — where letterboxed content sits. */
+const fitAlignSchema = z.enum(['start', 'middle', 'end']);
+
 const rectSchema = z.object({
   x: finite,
   y: finite,
@@ -110,6 +113,8 @@ const panelSchema = z.object({
       rows: z.number().int().positive(),
       cols: z.number().int().positive(),
       gutterMm: finite.min(0),
+      // Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note.
+      autoFit: z.boolean().optional(),
     })
     .optional(),
 });
@@ -261,6 +266,9 @@ const imageSchema = z.object({
     height: finite.gt(0).max(1),
   }),
   preserveAspect: z.boolean(),
+  // Optional: post-date SCHEMA_VERSION 1. See the bracket schema's note.
+  alignX: fitAlignSchema.optional(),
+  alignY: fitAlignSchema.optional(),
 });
 
 const textSchema = z.object({
@@ -333,6 +341,22 @@ const scaleBarSchema = z.object({
 
 const groupSchema = z.object({ ...nodeBaseShape, type: z.literal('group') });
 
+const groupLabelSchema = z.object({
+  ...nodeBaseShape,
+  type: z.literal('group-label'),
+  memberIds: z.array(z.string()).min(1),
+  edge: z.enum(['top', 'left', 'right']),
+  title: z.string(),
+  richText: z.array(textRunSchema).optional(),
+  showRule: z.boolean().optional(),
+  gapMm: nonNeg.optional(),
+  placement: z.enum(['outside', 'overlay']).optional(),
+  labelColor: z.string().optional(),
+  stroke: strokeSchema.optional(),
+  style: textStyleSchema.optional(),
+  userOffsetMm: pointSchema.optional(),
+});
+
 export const nodeSchema = z.discriminatedUnion('type', [
   panelSchema,
   plotSchema,
@@ -344,6 +368,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   bracketSchema,
   scaleBarSchema,
   groupSchema,
+  groupLabelSchema,
 ]);
 
 const cellSchema = z.union([finite, z.string(), z.null()]);
@@ -542,6 +567,17 @@ export function checkReferentialIntegrity(doc: {
       const analysisId = anyNode['analysisId'];
       if (analysisId !== null && !analysisIds.has(String(analysisId))) {
         issues.push({ path: `nodes.${key}.analysisId`, message: 'unknown analysis' });
+      }
+    }
+    if (node.type === 'group-label') {
+      const memberIds = Array.isArray(anyNode['memberIds']) ? (anyNode['memberIds'] as unknown[]) : [];
+      if (memberIds.length === 0) {
+        issues.push({ path: `nodes.${key}.memberIds`, message: 'a group-label needs at least one member' });
+      }
+      for (const memberId of memberIds) {
+        if (!doc.nodes[String(memberId)]) {
+          issues.push({ path: `nodes.${key}.memberIds`, message: `unknown member "${String(memberId)}"` });
+        }
       }
     }
 

@@ -10,7 +10,9 @@ import {
   BRACKET_HEIGHT_MM,
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_BRACKET_GAP_MM,
+  DEFAULT_GROUP_LABEL_PT,
   DEFAULT_VOLCANO_THRESHOLDS,
+  GROUP_LABEL_RULE_TEXT_GAP_MM,
   GRID_PLOT_TYPES,
   absoluteFrame,
   isLocked,
@@ -18,7 +20,9 @@ import {
   findAsset,
   findDataset,
   findLayer,
-  fitAspect,
+  imageContentRect,
+  montageCellRects,
+  montageTiles,
   isTwoFactor,
   ptToMm,
   repositionBrackets,
@@ -33,6 +37,7 @@ import {
   type FigureDocument,
   type FigureNode,
   type GridlineStyle,
+  type GroupLabelNode,
   type HeatmapScaleMode,
   type ImageNode,
   type LineStyle,
@@ -259,6 +264,8 @@ function renderNodeBody(
       return renderScaleBar(node, doc, options.theme);
     case 'group':
       return group({}, renderChildren(node, doc, options));
+    case 'group-label':
+      return renderGroupLabel(node, options.theme);
     default:
       return null;
   }
@@ -332,8 +339,74 @@ function renderPanel(node: PanelNode, doc: FigureDocument, options: RenderOption
     );
   }
 
+  children.push(...montageChrome(node, doc, options));
   children.push(...renderChildren(node, doc, options));
   return group({}, children, { role: 'panel' });
+}
+
+/**
+ * Editor-only furniture for a montage panel: a hit target over its whole
+ * frame, and a dashed outline in every cell no tile has reached yet.
+ *
+ * Both answer reports against round 31. The hit target is what makes a
+ * montage *selectable at all*: `selectionTarget` in `Canvas.tsx` sends a
+ * plain click on a tile straight to that tile (deliberately — see round 20),
+ * but a panel drawing nothing of its own has no pixels outside its tiles for
+ * a click to land on, so an empty montage was entirely unclickable and a
+ * filled one could only ever select tiles. A transparent rect gives the
+ * gutters, the padding and the empty cells something to hit; the click then
+ * resolves to the panel exactly the way it always would have.
+ *
+ * The placeholders are the same rectangles `fillPanelChildren` will hand the
+ * tiles, read from `montageCellRects` rather than derived a second time, so
+ * an outline cannot promise a position the tile then fails to take.
+ *
+ * Both are gated on `options.chrome`, which the export path never passes —
+ * so this is invisible to the exporter, to `checkFigure`, and to every
+ * parity assertion, which all render chrome-free.
+ */
+function montageChrome(
+  node: PanelNode,
+  doc: FigureDocument,
+  options: RenderOptions,
+): SceneNode[] {
+  if (!options.chrome || !node.contentGrid) return [];
+
+  const nodes: SceneNode[] = [
+    // `fill: transparent` rather than `none`: only a painted fill receives
+    // pointer events, and `none` would leave the panel as unclickable as it
+    // was. It carries no `nodeId`, so the event bubbles to the wrapper `<g>`
+    // `renderNode` already puts the panel's own id on.
+    el('rect', {
+      x: 0,
+      y: 0,
+      width: node.frame.width,
+      height: node.frame.height,
+      fill: 'transparent',
+    }, undefined, { role: 'montage-hit-area' }),
+  ];
+
+  const cells = montageCellRects(doc, node.id, node.frame);
+  if (cells) {
+    const filled = montageTiles(doc.nodes, node.id).length;
+    for (let index = filled; index < cells.length; index++) {
+      const cell = cells[index]!;
+      nodes.push(
+        el('rect', {
+          x: round(cell.x),
+          y: round(cell.y),
+          width: round(cell.width),
+          height: round(cell.height),
+          fill: 'none',
+          stroke: '#9aa0a6',
+          'stroke-width': 0.2,
+          'stroke-dasharray': '1.2 1.2',
+        }, undefined, { role: 'montage-cell-placeholder' }),
+      );
+    }
+  }
+
+  return nodes;
 }
 
 function renderText(node: TextNode, theme: Theme): SceneNode {
@@ -532,6 +605,141 @@ function renderPanelLabel(node: PanelLabelNode, theme: Theme): SceneNode {
   );
 }
 
+/**
+ * A heading over a row/column of panels or images, or a caption on one.
+ *
+ * `node.frame` is already settled by `reflowGroupLabels` (`doc-model`) before
+ * this ever runs — and since round 33 that frame is measured against the drawn
+ * *picture* rather than the cell it letterboxes in, which is what makes the
+ * rule stop at the image's own edge. This draws exactly what that geometry
+ * says and computes nothing about where the heading sits.
+ *
+ * Bare text by default: a rule is the exception a published column heading
+ * does not use, so it has to be asked for. 'top' draws the ordinary way;
+ * 'left'/'right' rotate the title through the same `rotate(-90)` convention
+ * the y/y2 axis titles already use, so a heading beside a column reads
+ * bottom-to-top exactly the way an axis title beside a plot does.
+ *
+ * `placement: 'overlay'` instead draws the title *on* the picture, reserving
+ * nothing — see `groupLabelFrame`.
+ */
+function renderGroupLabel(node: GroupLabelNode, theme: Theme): SceneNode {
+  const fontSizePt = node.style?.fontSizePt ?? DEFAULT_GROUP_LABEL_PT;
+  const showRule = node.showRule ?? false;
+  const stroke: Stroke = node.stroke ?? { color: theme.foreground, widthMm: 0.35, cap: 'butt' };
+  const lineHeightMm = ptToMm(fontSizePt) * 1.2;
+  const { width, height } = node.frame;
+  // Non-bold: the same weight the tick labels and annotations around it use.
+  // `node.style` still overrides, so an author can bold one heading.
+  //
+  // `labelColor` wins over `style.color` because it is the field the Inspector
+  // exposes for this; an overlay with neither falls back to white, which is
+  // legible over the dark backgrounds micrographs usually have.
+  const overlay = node.placement === 'overlay';
+  const color = node.labelColor ?? node.style?.color ?? (overlay ? '#ffffff' : undefined);
+  const titleStyle: TextStyle = {
+    fontWeight: 'normal',
+    ...node.style,
+    fontSizePt,
+    ...(color ? { color } : {}),
+  };
+
+  const children: SceneNode[] = [];
+
+  /*
+   * Overlaid on the picture: left-aligned at the inset frame's own origin, in
+   * white unless told otherwise, with a soft dark shadow so it survives a pale
+   * patch of an otherwise dark micrograph. No rule — a rule drawn across a
+   * photograph reads as damage to the picture, not as typography.
+   *
+   * The shadow is a `paint-order`/`stroke` pair rather than an SVG filter:
+   * filters are a `<defs>` construct this renderer has no precedent for, and
+   * would need per-node unique ids to avoid two labels colliding — the same
+   * reasoning that kept the heatmap colourbar a strip of rects.
+   */
+  if (overlay) {
+    children.push(
+      multilineTitleNode(
+        node.title,
+        node.richText,
+        {
+          x: 0,
+          y: ptToMm(fontSizePt),
+          ...textAttrs(titleStyle, theme),
+          'text-anchor': 'start',
+          stroke: '#000000',
+          'stroke-width': ptToMm(fontSizePt) * 0.12,
+          'stroke-opacity': 0.55,
+          'stroke-linejoin': 'round',
+          'paint-order': 'stroke fill',
+        },
+        fontSizePt,
+        { role: 'group-label', editTarget: 'title' },
+      ),
+    );
+    return group({}, children);
+  }
+
+  if (node.edge === 'top') {
+    children.push(
+      multilineTitleNode(
+        node.title,
+        node.richText,
+        {
+          x: width / 2,
+          y: ptToMm(fontSizePt),
+          ...textAttrs(titleStyle, theme),
+          'text-anchor': 'middle',
+        },
+        fontSizePt,
+        { role: 'group-label', editTarget: 'title' },
+      ),
+    );
+    if (showRule) {
+      const ruleY = round(lineHeightMm + GROUP_LABEL_RULE_TEXT_GAP_MM + stroke.widthMm / 2);
+      children.push(
+        el(
+          'line',
+          { x1: 0, y1: ruleY, x2: round(width), y2: ruleY, ...strokeAttrs(stroke) },
+          undefined,
+          { role: 'group-label-rule' },
+        ),
+      );
+    }
+    return group({}, children);
+  }
+
+  const textX = node.edge === 'left' ? ptToMm(fontSizePt) : width - ptToMm(fontSizePt);
+  children.push(
+    multilineTitleNode(
+      node.title,
+      node.richText,
+      {
+        x: 0,
+        y: 0,
+        transform: `translate(${round(textX)} ${round(height / 2)}) rotate(-90)`,
+        ...textAttrs(titleStyle, theme),
+        'text-anchor': 'middle',
+        'dominant-baseline': 'alphabetic',
+      },
+      fontSizePt,
+      { role: 'group-label', editTarget: 'title' },
+    ),
+  );
+  if (showRule) {
+    const ruleX = round(node.edge === 'left' ? width - stroke.widthMm / 2 : stroke.widthMm / 2);
+    children.push(
+      el(
+        'line',
+        { x1: ruleX, y1: 0, x2: ruleX, y2: round(height), ...strokeAttrs(stroke) },
+        undefined,
+        { role: 'group-label-rule' },
+      ),
+    );
+  }
+  return group({}, children);
+}
+
 function renderShape(node: ShapeNode): SceneNode {
   const { width, height } = node.frame;
   const common = {
@@ -646,6 +854,23 @@ function renderBracket(node: BracketNode, theme: Theme): SceneNode {
   ]);
 }
 
+/**
+ * The `preserveAspectRatio` alignment token for an image's own placement.
+ *
+ * `FitAlign`'s members are named after these exactly so this is a lookup
+ * rather than a mapping with a judgement in it — and so the uncropped path
+ * (which lets SVG do the fitting) and the cropped one (which calls
+ * `imageContentRect` and does it in millimetres) cannot land the picture in
+ * two different places.
+ */
+function preserveAspectAlign(node: ImageNode): string {
+  const x = node.alignX ?? 'middle';
+  const y = node.alignY ?? 'middle';
+  const xToken = x === 'start' ? 'xMin' : x === 'end' ? 'xMax' : 'xMid';
+  const yToken = y === 'start' ? 'YMin' : y === 'end' ? 'YMax' : 'YMid';
+  return `${xToken}${yToken}`;
+}
+
 function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOptions): SceneNode {
   const asset = findAsset(doc, node.assetId);
   const href = asset ? options.resolveAsset?.(node.assetId) : undefined;
@@ -678,7 +903,7 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
       y: 0,
       width,
       height,
-      preserveAspectRatio: node.preserveAspect ? 'xMidYMid meet' : 'none',
+      preserveAspectRatio: node.preserveAspect ? `${preserveAspectAlign(node)} meet` : 'none',
       // Micrographs must not be smoothed; interpolation invents detail.
       'image-rendering': 'pixelated',
     }, undefined, { role: 'image' });
@@ -703,12 +928,11 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
    * `preserveAspectRatio="none"` cannot stretch anything, it just stops a
    * second centring rule from moving what this one placed.
    */
-  const aspect = node.naturalPx.height > 0 ? node.naturalPx.width / node.naturalPx.height : 0;
-  const frameRect = { x: 0, y: 0, width, height };
-  const kept =
-    node.preserveAspect && aspect > 0
-      ? fitAspect(frameRect, (aspect * crop.width) / crop.height)
-      : frameRect;
+  // `imageContentRect` is the one implementation of "where does the picture
+  // land inside its frame", shared with `memberContentRect` — which is what
+  // makes a group-label's rule stop at the image's edge rather than the cell's.
+  // Deriving it a second time here is how the two would come to disagree.
+  const kept = imageContentRect(node);
 
   const image = el('image', {
     href,

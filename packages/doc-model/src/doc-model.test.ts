@@ -49,7 +49,9 @@ import {
   addArrow,
   addAsset,
   addBracket,
+  addEmptyMontagePanel,
   addGroup,
+  addGroupLabel,
   addImage,
   addPanelWithImage,
   addPanelWithImages,
@@ -63,7 +65,17 @@ import {
   defaultPlotTypeFor,
   deleteNode,
   duplicateNode,
+  fillPanelChildren,
+  groupLabelExtentMm,
+  fitMontageToImages,
+  imageContentRect,
   imagesUsingAsset,
+  memberContentRect,
+  montagePanelAspect,
+  montageTileAspect,
+  suggestMontageGrid,
+  montageCellRects,
+  montageTiles,
   isDerivedNode,
   MIN_CROP,
   normaliseArrowFrame,
@@ -72,6 +84,7 @@ import {
   editDataset,
   plotsUsingDataset,
   recordBracketOffset,
+  reflowGroupLabels,
   relabelPanels,
   removeBracketsForPlot,
   removeDataset,
@@ -82,9 +95,11 @@ import {
   replaceAnalysisForPlot,
   repositionBrackets,
   rescaleArrowPoints,
+  reserveSpaceForGroupLabels,
   resizeGroup,
   resizePanel,
   scaleBarWidthMm,
+  setMontageCellImage,
   snapshotPanelAbsolutePositions,
   syncPanelLabelsFromSnapshot,
   setArrowPoint,
@@ -94,7 +109,8 @@ import {
   type PlotMeasurements,
 } from './operations.js';
 import { absoluteFrame } from './nodes.js';
-import type { BracketNode } from './nodes.js';
+import type { BracketNode, GroupLabelNode, ImageNode } from './nodes.js';
+import { GROUP_LABEL_GAP_MM, groupLabelClearanceMm } from './grouplabel.js';
 import {
   alignFrames,
   autoLayout,
@@ -104,7 +120,7 @@ import {
   snapFrame,
   suggestGrid,
 } from './layout.js';
-import { rotatePoint, snapAngle, snapRotation } from './geometry.js';
+import { fitAspect, fitAspectAligned, rotatePoint, snapAngle, snapRotation } from './geometry.js';
 import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './templates.js';
 import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
@@ -981,6 +997,45 @@ describe('layout', () => {
       .toEqual(gridCells({ rows: 2, columns: 3 }, options));
   });
 
+  it('matches today\'s behaviour when the boundary-extras arrays are absent', () => {
+    // Additive: a caller that never sets these must get byte-identical
+    // frames to before they existed.
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+    expect(gridCells({ rows: 1, columns: 2 }, options)).toEqual(
+      gridCells({ rows: 1, columns: 2 }, { ...options, columnGutterExtraMm: undefined }),
+    );
+  });
+
+  it('grows a specific boundary by the requested extra clearance — the room a group-label needs', () => {
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+    // Boundary 0 is *before* the first column — a heading over the very
+    // first column still has a boundary to grow, unlike a plain gutter
+    // (which only ever sits *between* tracks).
+    const cells = gridCells(
+      { rows: 1, columns: 2 },
+      { ...options, columnGutterExtraMm: [10, 0, 0] },
+    );
+    const plain = gridCells({ rows: 1, columns: 2 }, options);
+
+    expect(cells[0]!.x).toBeCloseTo(plain[0]!.x + 10, 6);
+    // The second column's own gutter to the first is untouched.
+    expect(cells[1]!.x - (cells[0]!.x + cells[0]!.width)).toBeCloseTo(5, 6);
+    // The extra came out of both cells' shared usable width, not the page.
+    expect(cells[0]!.width).toBeLessThan(plain[0]!.width);
+  });
+
+  it('grows the trailing boundary too — a heading past the last row/column', () => {
+    const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
+    // Boundary `rows` (here 1) is *after* the last row.
+    const cells = gridCells({ rows: 1, columns: 2 }, { ...options, rowGutterExtraMm: [0, 8] });
+    const plain = gridCells({ rows: 1, columns: 2 }, options);
+
+    // Nothing moves — there is no row after it — but every cell shrank to
+    // leave the trailing 8 mm free.
+    expect(cells[0]!.y).toBeCloseTo(plain[0]!.y, 6);
+    expect(cells[0]!.height).toBeCloseTo(plain[0]!.height - 8, 6);
+  });
+
   it('spans a panel across cells, gutters included', () => {
     const template = findLayoutTemplate('large-left-two-stacked')!;
     const options = { pageWidthMm: 183, pageHeightMm: 75, marginMm: 2, gutterMm: 5 };
@@ -1660,6 +1715,10 @@ describe('duplicate and draw order', () => {
     expect(isDerivedNode(label)).toBe(true);
     expect(isDerivedNode(bracket)).toBe(true);
     expect(isDerivedNode(panel)).toBe(false);
+    // A group-label — a caption or a heading — describes another node's
+    // content rather than standing on its own, the same reasoning as the two
+    // above.
+    expect(isDerivedNode({ ...panel, type: 'group-label', memberIds: [panel.id], edge: 'top', title: '' } as unknown as Parameters<typeof isDerivedNode>[0])).toBe(true);
   });
 
   it('reorders siblings and renumbers z with no gaps', () => {
@@ -4301,10 +4360,14 @@ describe('panel tile grid', () => {
 
   it('tiles four images into a 2×2 grid that fills the panel', () => {
     const { panel, tiles } = montage(4);
+    // 2 × 2, not the 2 × 3 a shape-only fit would prefer for a wide panel:
+    // `suggestMontageGrid` refuses a grid with a wholly empty row or column,
+    // because an empty cell in a published montage is a hole in the figure.
     expect(panel.type === 'panel' && panel.contentGrid).toEqual({
       rows: 2,
       cols: 2,
       gutterMm: 2,
+      autoFit: true,
     });
 
     // Four distinct cells — stacked at the origin is what happened before, and
@@ -4648,5 +4711,1232 @@ describe('dataset reading', () => {
     // Lossless and reversible: only the reading moved.
     expect(changed.rows).toEqual(before.rows);
     expect(changed.columns).toEqual(before.columns);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Group labels
+// ---------------------------------------------------------------------------
+
+describe('group labels', () => {
+  function oneImagePanel(newId: () => string, doc: FigureDocument, frame = { x: 0, y: 0, width: 60, height: 30 }) {
+    return editDocument(doc, (draft) => {
+      addAsset(draft, {
+        id: `asset-${newId()}`,
+        filename: 'tile.png',
+        mimeType: 'image/png',
+        byteLength: 10,
+        naturalPx: { width: 100, height: 100 },
+      });
+      const asset = draft.assets[draft.assets.length - 1]!;
+      addPanelWithImage(draft, newId, {
+        frame,
+        name: 'Panel',
+        assetId: asset.id,
+        naturalPx: asset.naturalPx!,
+      });
+    });
+  }
+
+  it('frames a caption on a single image as one member', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = oneImagePanel(newId, base, { x: 5, y: 5, width: 60, height: 30 });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [image.id], edge: 'top', title: 'Panel a' });
+    });
+    const label = Object.values(withLabel.nodes).find((n) => n.type === 'group-label') as GroupLabelNode;
+    expect(label).toBeDefined();
+    expect(label.memberIds).toEqual([image.id]);
+
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+    /*
+     * Sits directly above the *picture*, spanning the picture's width — not
+     * the cell's. The panel is 60 × 30 mm holding a square (100 × 100 px)
+     * image, so `preserveAspect` letterboxes it to a 30 mm square centred at
+     * x = 5 + (60 - 30) / 2 = 20. Framing this against the cell is what used
+     * to run a heading's rule out past the edge of the image it labels.
+     *
+     * The height is the geometry's own clearance formula rather than a
+     * literal, so it cannot drift from what `renderGroupLabel` draws against —
+     * and it is the *no-rule* clearance now, since a bare heading is the
+     * default.
+     */
+    expect(label.frame).toEqual({ x: 20, y: 5 - clearance, width: 30, height: clearance });
+  });
+
+  it('frames a heading spanning two independent panels', () => {
+    const { doc, newId } = sampleDocument();
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+    expect(panels).toHaveLength(2);
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, {
+        memberIds: panels.map((p) => p.id),
+        edge: 'top',
+        title: 'Both panels',
+      });
+    });
+    const label = Object.values(withLabel.nodes).find((n) => n.type === 'group-label') as GroupLabelNode;
+
+    const bounds = {
+      x: Math.min(...panels.map((p) => p.frame.x)),
+      y: Math.min(...panels.map((p) => p.frame.y)),
+      right: Math.max(...panels.map((p) => p.frame.x + p.frame.width)),
+    };
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+    expect(label.frame.x).toBeCloseTo(bounds.x, 6);
+    expect(label.frame.width).toBeCloseTo(bounds.right - bounds.x, 6);
+    expect(label.frame.y).toBeCloseTo(bounds.y - clearance, 6);
+  });
+
+  it('follows its members when reflowed, without touching anything else', () => {
+    const { doc, newId } = sampleDocument();
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [panels[0]!.id], edge: 'left', title: 'Row' });
+    });
+
+    const moved = editDocument(withLabel, (draft) => {
+      const target = draft.nodes[panels[0]!.id]!;
+      target.frame = { ...target.frame, x: target.frame.x + 15, y: target.frame.y + 4 };
+      reflowGroupLabels(draft);
+    });
+
+    const label = Object.values(moved.nodes).find((n) => n.type === 'group-label') as GroupLabelNode;
+    const panel = moved.nodes[panels[0]!.id]!;
+    expect(label.frame.y).toBeCloseTo(panel.frame.y, 6);
+    // The *other* panel and its own label never moved.
+    const otherPanel = moved.nodes[panels[1]!.id]!;
+    expect(otherPanel.frame).toEqual(doc.nodes[panels[1]!.id]!.frame);
+  });
+
+  it('grows the gap between two stacked panels for a top heading, translating the lower one', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    doc = oneImagePanel(newId, doc, { x: 0, y: 32, width: 60, height: 30 }); // only 2 mm clear
+
+    const panels = Object.values(doc.nodes)
+      .filter((n) => n.type === 'panel')
+      .sort((a, b) => a.frame.y - b.frame.y);
+    const lowerImage = childImageOf(doc, panels[1]!.id);
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [lowerImage], edge: 'top', title: 'Group B' });
+    });
+
+    const reserved = editDocument(withLabel, (draft) => {
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+    const upper = reserved.nodes[panels[0]!.id]!;
+    const lower = reserved.nodes[panels[1]!.id]!;
+    // The gap between the two panels now equals exactly the clearance the
+    // heading needs — not merely "some amount larger than before".
+    expect(lower.frame.y - (upper.frame.y + upper.frame.height)).toBeCloseTo(clearance, 6);
+    // The upper panel never moved: only what sits at or beyond the heading's
+    // own edge is translated.
+    expect(upper.frame).toEqual(doc.nodes[panels[0]!.id]!.frame);
+  });
+
+  it('does nothing when the existing gap already covers the clearance', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    doc = oneImagePanel(newId, doc, { x: 0, y: 50, width: 60, height: 30 }); // 20 mm clear already
+
+    const panels = Object.values(doc.nodes)
+      .filter((n) => n.type === 'panel')
+      .sort((a, b) => a.frame.y - b.frame.y);
+    const lowerImage = childImageOf(doc, panels[1]!.id);
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [lowerImage], edge: 'top', title: 'Group B' });
+    });
+    const reserved = editDocument(withLabel, (draft) => reserveSpaceForGroupLabels(draft));
+
+    expect(reserved.nodes[panels[1]!.id]!.frame).toEqual(withLabel.nodes[panels[1]!.id]!.frame);
+  });
+
+  it('same-panel headings are excluded from reserveSpaceForGroupLabels — the grid gutter handles them live instead', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 2 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `tile-${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tiles = Object.values(doc.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z);
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [tiles[0]!.id, tiles[1]!.id], edge: 'top', title: 'Row' });
+    });
+
+    const reserved = editDocument(withLabel, (draft) => reserveSpaceForGroupLabels(draft));
+    // The panel itself never moves for a same-panel heading — its own grid
+    // gutter, not a translated sibling, is what makes room.
+    expect(reserved.nodes[panel.id]!.frame).toEqual(withLabel.nodes[panel.id]!.frame);
+  });
+
+  it('widens a montage panel\'s own grid gutter above a captioned row, live on every re-tile', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 4 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `tile-${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 60 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const plainTiles = Object.values(doc.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z);
+
+    // Caption the bottom row (indices 2, 3 of a 2×2 grid) with a top heading —
+    // the boundary between row 0 and row 1.
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [plainTiles[2]!.id, plainTiles[3]!.id], edge: 'top', title: 'Treated' });
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+    });
+
+    const tiles = Object.values(withLabel.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z);
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+    // The gap between the two rows now equals the plain gutter plus the
+    // heading's own clearance — measured against row 0's *new* bottom edge,
+    // which itself sits slightly higher than in the plain layout: the extra
+    // boundary space comes out of the shared usable height before it is
+    // split evenly between the two equal-weight rows, exactly the way a
+    // widened column already does in `gridCells`'s own test above. Nothing
+    // outside the panel moved.
+    expect(tiles[2]!.frame.y - (tiles[0]!.frame.y + tiles[0]!.frame.height)).toBeCloseTo(2 + clearance, 6);
+    expect(tiles[0]!.frame.height).toBeLessThan(plainTiles[0]!.frame.height);
+    // The un-captioned column boundary is untouched.
+    expect(tiles[1]!.frame.x - (tiles[0]!.frame.x + tiles[0]!.frame.width)).toBeCloseTo(2, 6);
+    expect(panel.frame).toEqual(withLabel.nodes[panel.id]!.frame);
+
+    const label = Object.values(withLabel.nodes).find((n) => n.type === 'group-label') as GroupLabelNode;
+    expect(label).toBeDefined();
+  });
+
+  it('drops a group-label the instant any one member is deleted', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    doc = oneImagePanel(newId, doc, { x: 70, y: 0, width: 60, height: 30 });
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: panels.map((p) => p.id), edge: 'top', title: 'Row' });
+    });
+    expect(Object.values(withLabel.nodes).some((n) => n.type === 'group-label')).toBe(true);
+
+    const afterDelete = editDocument(withLabel, (draft) => deleteNode(draft, panels[0]!.id));
+    expect(Object.values(afterDelete.nodes).some((n) => n.type === 'group-label')).toBe(false);
+    // The surviving panel is untouched — only the label and the deleted
+    // panel are gone.
+    expect(afterDelete.nodes[panels[1]!.id]).toBeDefined();
+  });
+
+  it('duplicates a caption alongside its sole member, remapped to the copy', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [image.id], edge: 'top', title: 'Panel a' });
+    });
+    const panel = Object.values(withLabel.nodes).find((n) => n.type === 'panel')!;
+
+    const duplicated = editDocument(withLabel, (draft) => {
+      duplicateNode(draft, newId, panel.id, { x: 20, y: 0 });
+    });
+    const labels = Object.values(duplicated.nodes).filter((n) => n.type === 'group-label') as GroupLabelNode[];
+    expect(labels).toHaveLength(2);
+    const copy = labels.find((l) => l.id !== Object.values(withLabel.nodes).find((n) => n.type === 'group-label')!.id)!;
+    const copiedImage = Object.values(duplicated.nodes).find(
+      (n) => n.type === 'image' && n.id !== image.id,
+    )!;
+    // The copy's member is remapped to the *copied* image, not the original.
+    expect(copy.memberIds).toEqual([copiedImage.id]);
+  });
+
+  it('does not duplicate a heading when only one of its several members is copied', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    doc = oneImagePanel(newId, doc, { x: 70, y: 0, width: 60, height: 30 });
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: panels.map((p) => p.id), edge: 'top', title: 'Row' });
+    });
+
+    const duplicated = editDocument(withLabel, (draft) => {
+      duplicateNode(draft, newId, panels[0]!.id, { x: 0, y: 40 });
+    });
+    // Still exactly one heading — a lone duplicated panel is left uncaptioned
+    // rather than either joining the original heading or being refused.
+    expect(Object.values(duplicated.nodes).filter((n) => n.type === 'group-label')).toHaveLength(1);
+  });
+
+  it('round-trips through save/load with no schema version bump', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = oneImagePanel(newId, base, { x: 0, y: 0, width: 60, height: 30 });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [image.id], edge: 'left', title: 'Caption' });
+    });
+
+    expect(checkReferentialIntegrity(withLabel)).toEqual([]);
+    const loaded = loadArchive(saveArchive(buildArchiveContents(withLabel)));
+    const label = Object.values(loaded.document.nodes).find((n) => n.type === 'group-label') as GroupLabelNode;
+    expect(label.title).toBe('Caption');
+    expect(label.memberIds).toEqual([image.id]);
+    expect(label.edge).toBe('left');
+  });
+
+  it('refuses a group-label with no members at the referential-integrity check', () => {
+    const bad = {
+      nodes: {
+        gl1: { id: 'gl1', parentId: null, layerId: 'l1', type: 'group-label', memberIds: [] as string[] },
+      },
+      layers: [{ id: 'l1' }],
+      datasets: [],
+      assets: [],
+      analyses: [],
+    };
+    const issues = checkReferentialIntegrity(bad);
+    expect(issues.some((i) => i.path === 'nodes.gl1.memberIds')).toBe(true);
+  });
+});
+
+/** The single image child of a panel, for group-label member tests. */
+function childImageOf(doc: FigureDocument, panelId: string): string {
+  return Object.values(doc.nodes).find((n) => n.type === 'image' && n.parentId === panelId)!.id;
+}
+
+// ---------------------------------------------------------------------------
+// Per-cell montage image upload/replace
+// ---------------------------------------------------------------------------
+
+describe('per-cell montage image upload', () => {
+  function emptyMontage(rows: number, cols: number) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addEmptyMontagePanel(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', rows, cols, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    return { doc, panel, newId };
+  }
+
+  function withAsset(doc: FigureDocument, newId: () => string, filename: string) {
+    return editDocument(doc, (draft) => {
+      addAsset(draft, { id: `${filename}-asset`, filename, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+    });
+  }
+
+  it('starts with an empty grid and no children', () => {
+    const { doc, panel } = emptyMontage(2, 2);
+    // `autoFit` is on for montages made from here on: the panel keeps the
+    // shape that lets its pictures fill their cells. Existing figures carry no
+    // such flag and are left exactly as they were.
+    expect(panel.type === 'panel' && panel.contentGrid).toEqual({
+      rows: 2,
+      cols: 2,
+      gutterMm: 2,
+      autoFit: true,
+    });
+    expect(Object.values(doc.nodes).filter((n) => n.parentId === panel.id)).toHaveLength(0);
+  });
+
+  it('fills cells one at a time, each new tile landing in the next empty slot', () => {
+    /*
+     * Cells are addressed purely by z-order — the same "children take cells
+     * in z order" rule `fillPanelChildren` has always followed — so there is
+     * no way to leave a gap in the middle: an index beyond the current child
+     * count always lands in the next still-empty slot, whichever cell button
+     * the author actually clicked. That is a real, load-bearing constraint of
+     * this model, not a defect — every empty cell looks identical anyway, so
+     * "fill the next one" is indistinguishable from "fill this one" until a
+     * cell is already occupied, at which point the same index instead
+     * replaces it (covered separately below).
+     */
+    const initial = emptyMontage(2, 2);
+    const { panel, newId } = initial;
+    let doc = initial.doc;
+    doc = withAsset(doc, newId, 'b.png');
+    doc = withAsset(doc, newId, 'a.png');
+
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 3, { assetId: 'b.png-asset', naturalPx: { width: 100, height: 100 } });
+    });
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 3, { assetId: 'a.png-asset', naturalPx: { width: 100, height: 100 } });
+    });
+
+    const tiles = Object.values(doc.nodes)
+      .filter((n) => n.type === 'image')
+      .sort((a, b) => a.z - b.z);
+    expect(tiles).toHaveLength(2);
+    expect(tiles[0]!.type === 'image' && tiles[0]!.assetId).toBe('b.png-asset');
+    expect(tiles[1]!.type === 'image' && tiles[1]!.assetId).toBe('a.png-asset');
+    // Distinct, non-degenerate frames — each really did land in its own cell.
+    expect(new Set(tiles.map((t) => `${t.frame.x},${t.frame.y}`)).size).toBe(2);
+  });
+
+  it('replaces an existing tile in place, keeping its neighbours untouched', () => {
+    const initial = emptyMontage(1, 2);
+    const { panel, newId } = initial;
+    let doc = initial.doc;
+    doc = withAsset(doc, newId, 'a.png');
+    doc = withAsset(doc, newId, 'b.png');
+    doc = withAsset(doc, newId, 'c.png');
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a.png-asset', naturalPx: { width: 100, height: 100 } });
+    });
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 1, { assetId: 'b.png-asset', naturalPx: { width: 100, height: 100 } });
+    });
+    const before = Object.values(doc.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z);
+
+    const replaced = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'c.png-asset', naturalPx: { width: 100, height: 100 } });
+    });
+    const after = Object.values(replaced.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z);
+
+    expect(after).toHaveLength(2);
+    expect(after[0]!.type === 'image' && after[0]!.assetId).toBe('c.png-asset');
+    // The untouched neighbour keeps its own asset and its own frame.
+    expect(after[1]!.type === 'image' && after[1]!.assetId).toBe('b.png-asset');
+    expect(after[1]!.frame).toEqual(before[1]!.frame);
+  });
+
+  it('re-derives a scale bar calibrated to a tile that was just replaced', () => {
+    const initial = emptyMontage(1, 1);
+    const { panel, newId } = initial;
+    let doc = initial.doc;
+    doc = withAsset(doc, newId, 'a.png');
+    doc = withAsset(doc, newId, 'b.png');
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a.png-asset', naturalPx: { width: 200, height: 100 } });
+    });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    doc = editDocument(doc, (draft) => {
+      addScaleBar(draft, newId, {
+        imageId: image.id,
+        length: 10,
+        pixelsPerUnit: 20,
+        unitLabel: 'µm',
+        calibrationSource: 'manual',
+        fontSizePt: 6,
+      });
+    });
+    const bar = Object.values(doc.nodes).find((n) => n.type === 'scale-bar')!;
+    const before = scaleBarWidthMm(doc.nodes, bar.id);
+
+    // A wider natural pixel size at the same physical frame means the same
+    // real-world length now spans fewer millimetres.
+    const replaced = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'b.png-asset', naturalPx: { width: 400, height: 100 } });
+    });
+    const after = scaleBarWidthMm(replaced.nodes, bar.id);
+    expect(after).not.toBeCloseTo(before!, 6);
+    // resyncScaleBars keeps frame.width in step with the derived value.
+    const barNode = replaced.nodes[bar.id]!;
+    expect(barNode.frame.width).toBeCloseTo(after!, 6);
+  });
+
+  it('refuses an out-of-range cell index', () => {
+    const { doc, panel, newId } = emptyMontage(1, 2);
+    const result = editDocument(doc, (draft) =>
+      setMontageCellImage(draft, newId, panel.id, 2, { assetId: 'nope', naturalPx: { width: 1, height: 1 } }),
+    );
+    // Nothing was added — the document is unchanged.
+    expect(Object.values(result.nodes).filter((n) => n.type === 'image')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 32 — image alignment, montage cell geometry, stacked headings,
+// heading clearance
+// ---------------------------------------------------------------------------
+
+describe('fitAspectAligned', () => {
+  // A 2:1 picture in a square box letterboxes vertically: 20 wide, 10 tall,
+  // leaving 10 mm of spare height that has to be placed somewhere.
+  const box = { x: 0, y: 0, width: 20, height: 20 };
+
+  it('centres on both axes by default, and fitAspect is exactly that', () => {
+    expect(fitAspectAligned(box, 2, 'middle', 'middle')).toEqual({ x: 0, y: 5, width: 20, height: 10 });
+    expect(fitAspect(box, 2)).toEqual(fitAspectAligned(box, 2, 'middle', 'middle'));
+  });
+
+  it('puts the picture against the top for alignY start — the montage default', () => {
+    expect(fitAspectAligned(box, 2, 'middle', 'start')).toEqual({ x: 0, y: 0, width: 20, height: 10 });
+  });
+
+  it('puts the picture against the bottom for alignY end', () => {
+    expect(fitAspectAligned(box, 2, 'middle', 'end')).toEqual({ x: 0, y: 10, width: 20, height: 10 });
+  });
+
+  it('aligns horizontally when the spare space is on that axis instead', () => {
+    // A 1:2 picture in the same square box letterboxes horizontally.
+    expect(fitAspectAligned(box, 0.5, 'start', 'middle').x).toBeCloseTo(0, 6);
+    expect(fitAspectAligned(box, 0.5, 'end', 'middle').x).toBeCloseTo(10, 6);
+    expect(fitAspectAligned(box, 0.5, 'middle', 'middle').x).toBeCloseTo(5, 6);
+  });
+
+  it('returns the box untouched for a degenerate aspect, as fitAspect always did', () => {
+    expect(fitAspectAligned(box, 0, 'start', 'start')).toEqual(box);
+  });
+});
+
+describe('montage image alignment', () => {
+  function montageOf(count: number) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: count }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `tile-${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 200, height: 100 } });
+        return { assetId, naturalPx: { width: 200, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    return { doc, newId };
+  }
+
+  it('top-aligns every tile of a real montage', () => {
+    const { doc } = montageOf(4);
+    const tiles = Object.values(doc.nodes).filter((n) => n.type === 'image');
+    expect(tiles).toHaveLength(4);
+    // A tile's frame comes from `gridCells` and has nothing to do with the
+    // micrograph's own shape, so the letterboxing is real and has to be placed.
+    for (const tile of tiles) expect(tile.type === 'image' && tile.alignY).toBe('start');
+  });
+
+  it('leaves a lone image un-aligned, so every existing one-image panel is byte-identical', () => {
+    const { doc } = montageOf(1);
+    const tile = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    // Absent rather than an explicit 'middle': writing a value would set a
+    // field on every figure whose author never asked for one.
+    expect(tile.type === 'image' && tile.alignY).toBeUndefined();
+    expect(tile.type === 'image' && tile.alignX).toBeUndefined();
+  });
+
+  it('top-aligns a tile uploaded into an empty cell, and keeps the chosen alignment on replace', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = editDocument(base, (draft) => {
+      addEmptyMontagePanel(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', rows: 1, cols: 2, gutterMm: 2 });
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 200, height: 100 } });
+      addAsset(draft, { id: 'b', filename: 'b.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 200, height: 100 } });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a', naturalPx: { width: 200, height: 100 } });
+    });
+    const tile = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    expect(tile.type === 'image' && tile.alignY).toBe('start');
+
+    // Move it to the bottom, then replace the picture: the alignment belongs
+    // to the cell the author arranged, not to the file that sits in it.
+    doc = editDocument(doc, (draft) => {
+      const target = draft.nodes[tile.id];
+      if (target?.type === 'image') target.alignY = 'end';
+    });
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'b', naturalPx: { width: 300, height: 100 } });
+    });
+    const replaced = doc.nodes[tile.id]!;
+    expect(replaced.type === 'image' && replaced.alignY).toBe('end');
+    expect(replaced.type === 'image' && replaced.assetId).toBe('b');
+  });
+
+  it('keeps alignX/alignY through a save, with SCHEMA_VERSION unchanged', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 30 },
+        name: 'Panel',
+        assetId: 'a',
+        naturalPx: { width: 100, height: 100 },
+      });
+    });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    const aligned = editDocument(doc, (draft) => {
+      const target = draft.nodes[image.id];
+      if (target?.type === 'image') {
+        target.alignX = 'end';
+        target.alignY = 'start';
+      }
+    });
+
+    // zod strips a key present only on the TS type, so the round-trip is the
+    // assertion that matters here, not the field simply being assignable.
+    const loaded = loadArchive(saveArchive(buildArchiveContents(aligned)));
+    expect(loaded.document).toEqual(aligned);
+    const node = loaded.document.nodes[image.id]!;
+    expect(node.type === 'image' && node.alignX).toBe('end');
+    expect(node.type === 'image' && node.alignY).toBe('start');
+  });
+});
+
+describe('montageCellRects', () => {
+  function montage(rows: number, cols: number) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addEmptyMontagePanel(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', rows, cols, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    return { doc, panel, newId };
+  }
+
+  it('returns one rect per declared cell even with no tiles at all', () => {
+    const { doc, panel } = montage(2, 2);
+    // This is what the renderer draws its dashed placeholders from: an empty
+    // montage has to show four outlines, not nothing at all.
+    expect(montageCellRects(doc, panel.id, panel.frame)).toHaveLength(4);
+  });
+
+  it('agrees exactly with the frames fillPanelChildren hands the tiles', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 4 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const cells = montageCellRects(doc, panel.id, panel.frame)!;
+    const tiles = montageTiles(doc.nodes, panel.id);
+
+    // One derivation read twice. An outline promising a position the tile then
+    // failed to take would be exactly the round-6 crop bug over again.
+    tiles.forEach((tile, index) => expect(tile.frame).toEqual(cells[index]));
+  });
+
+  it('returns null for a panel with no grid, and for one too small for its grid', () => {
+    const { doc, panel } = montage(2, 2);
+    const noGrid = editDocument(doc, (draft) => {
+      const target = draft.nodes[panel.id];
+      if (target?.type === 'panel') target.contentGrid = undefined;
+    });
+    expect(montageCellRects(noGrid, panel.id, panel.frame)).toBeNull();
+
+    // Below MIN_TILE_MM per cell the renderer draws no placeholders rather
+    // than degenerate slivers — the same stance `fillPanelChildren` takes.
+    expect(montageCellRects(doc, panel.id, { x: 0, y: 0, width: 6, height: 6 })).toBeNull();
+  });
+});
+
+describe('stacked group labels', () => {
+  /** A 1×3 montage — a row of three tiles inside one panel. */
+  function rowOfThree() {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 3 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 10, width: 90, height: 40 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tiles = montageTiles(doc.nodes, panel.id);
+    return { doc, panel, tiles, newId };
+  }
+
+  it('sits a single-tile caption underneath the heading spanning its whole row', () => {
+    const { doc, panel, tiles, newId } = rowOfThree();
+
+    const withBoth = editDocument(doc, (draft) => {
+      // The wide heading first, then the caption on one tile — creation order
+      // must not be what decides which one ends up on top.
+      addGroupLabel(draft, newId, { memberIds: tiles.map((t) => t.id), edge: 'top', title: 'Treatment' });
+      addGroupLabel(draft, newId, { memberIds: [tiles[1]!.id], edge: 'top', title: 'Middle' });
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+      reflowGroupLabels(draft);
+    });
+
+    const labels = Object.values(withBoth.nodes).filter(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    );
+    const wide = labels.find((l) => l.memberIds.length === 3)!;
+    const caption = labels.find((l) => l.memberIds.length === 1)!;
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+
+    // The caption takes the space nearest its tile and the wide heading stacks
+    // above it. Without this rule both are drawn in the same millimetres.
+    expect(caption.frame.y).toBeGreaterThan(wide.frame.y);
+    expect(wide.frame.y + wide.frame.height).toBeCloseTo(caption.frame.y, 6);
+    expect(groupLabelExtentMm(withBoth.nodes, caption)).toBeCloseTo(clearance, 6);
+    expect(groupLabelExtentMm(withBoth.nodes, wide)).toBeCloseTo(2 * clearance, 6);
+  });
+
+  it('gives the row enough gutter for both, not just for the taller one', () => {
+    const { doc, panel, tiles, newId } = rowOfThree();
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+
+    const headingOnly = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: tiles.map((t) => t.id), edge: 'top', title: 'Treatment' });
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+    });
+    const oneLevel = montageTiles(headingOnly.nodes, panel.id)[0]!.frame.y;
+
+    const both = editDocument(headingOnly, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [tiles[1]!.id], edge: 'top', title: 'Middle' });
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+    });
+    const twoLevels = montageTiles(both.nodes, panel.id)[0]!.frame.y;
+
+    // The boundary grows by a second clearance — the sum, not the max. A max
+    // is what would have drawn the caption on top of the heading.
+    expect(twoLevels - oneLevel).toBeCloseTo(clearance, 6);
+  });
+
+  it('does not stack captions on different tiles of the same row against each other', () => {
+    const { doc, panel, tiles, newId } = rowOfThree();
+
+    const captioned = editDocument(doc, (draft) => {
+      for (const tile of tiles) {
+        addGroupLabel(draft, newId, { memberIds: [tile.id], edge: 'top', title: tile.id });
+      }
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+      reflowGroupLabels(draft);
+    });
+
+    const labels = Object.values(captioned.nodes).filter(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    );
+    expect(labels).toHaveLength(3);
+    // Three captions over three tiles are one level: they sit side by side,
+    // never in a staircase. Equal member counts never stack.
+    expect(new Set(labels.map((l) => Math.round(l.frame.y * 1000))).size).toBe(1);
+  });
+
+  it('ignores a heading over a different row entirely', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 4 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 60 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tiles = montageTiles(doc.nodes, panel.id);
+
+    const withBoth = editDocument(doc, (draft) => {
+      // Row 0 spanned, plus a caption on a row 1 tile: different lines, so
+      // neither takes any room from the other.
+      addGroupLabel(draft, newId, { memberIds: [tiles[0]!.id, tiles[1]!.id], edge: 'top', title: 'Row 0' });
+      addGroupLabel(draft, newId, { memberIds: [tiles[2]!.id], edge: 'top', title: 'One of row 1' });
+      const target = draft.nodes[panel.id]!;
+      fillPanelChildren(draft, panel.id, target.frame);
+      reflowGroupLabels(draft);
+    });
+
+    const caption = Object.values(withBoth.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label' && n.memberIds.length === 1,
+    )!;
+    expect(groupLabelExtentMm(withBoth.nodes, caption)).toBeCloseTo(
+      groupLabelClearanceMm(undefined, false, undefined),
+      6,
+    );
+  });
+});
+
+describe('group-label gap override', () => {
+  it('reads gapMm in place of the default, grows the frame, and survives a save', () => {
+    const base = groupLabelClearanceMm(8, true, 0.35);
+    const wider = groupLabelClearanceMm(8, true, 0.35, GROUP_LABEL_GAP_MM + 3);
+    // The gap is the only term that changed, so the difference is exactly it.
+    expect(wider - base).toBeCloseTo(3, 6);
+
+    const newId = createIdFactory();
+    const start = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(start, (draft) => {
+      addAsset(draft, { id: 'gap-asset', filename: 'g.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 5, y: 20, width: 60, height: 30 },
+        name: 'Panel',
+        assetId: 'gap-asset',
+        naturalPx: { width: 100, height: 100 },
+      });
+    });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+
+    const withLabel = editDocument(doc, (draft) => {
+      const label = addGroupLabel(draft, newId, { memberIds: [image.id], edge: 'top', title: 'Caption' });
+      const target = label ? draft.nodes[label.id] : undefined;
+      if (target?.type === 'group-label') target.gapMm = 6;
+      reflowGroupLabels(draft);
+    });
+
+    const label = Object.values(withLabel.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+    expect(label.gapMm).toBe(6);
+    // The frame really grew by the override — the field is read, not just stored.
+    expect(label.frame.height).toBeCloseTo(groupLabelClearanceMm(undefined, false, undefined, 6), 6);
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(withLabel)));
+    expect(loaded.document).toEqual(withLabel);
+  });
+});
+
+describe('a declared grid is honoured at any occupancy', () => {
+  function emptyGrid(rows: number, cols: number) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addEmptyMontagePanel(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', rows, cols, gutterMm: 2 });
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addAsset(draft, { id: 'b', filename: 'b.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    return { doc, panel, newId };
+  }
+
+  it('puts a montage\'s first tile in its first cell, not across the whole panel', () => {
+    /*
+     * Under the old rule — which bailed out of the grid at one child — the
+     * first tile uploaded into an empty montage stretched across the whole
+     * panel and then snapped back into cell 1 the moment a second arrived.
+     * That was invisible while a `contentGrid` could only ever be created
+     * alongside two or more images; filling a montage a cell at a time is
+     * what walks straight through the state it got wrong.
+     */
+    const { doc, panel, newId } = emptyGrid(2, 2);
+    const filled = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a', naturalPx: { width: 100, height: 100 } });
+    });
+
+    const tile = Object.values(filled.nodes).find((n) => n.type === 'image')!;
+    const cells = montageCellRects(filled, panel.id, panel.frame)!;
+    expect(tile.frame).toEqual(cells[0]);
+    // Emphatically not the whole panel.
+    expect(tile.frame.width).toBeLessThan(panel.frame.width);
+    expect(tile.frame.height).toBeLessThan(panel.frame.height);
+  });
+
+  it('leaves the first tile exactly where it was when a second one joins it', () => {
+    const { doc, panel, newId } = emptyGrid(1, 2);
+    const one = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a', naturalPx: { width: 100, height: 100 } });
+    });
+    const firstFrame = { ...montageTiles(one.nodes, panel.id)[0]!.frame };
+
+    const two = editDocument(one, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 1, { assetId: 'b', naturalPx: { width: 100, height: 100 } });
+    });
+    // No jump: the tile already sat in its cell, so adding a neighbour moves
+    // nothing that was already placed.
+    expect(montageTiles(two.nodes, panel.id)[0]!.frame).toEqual(firstFrame);
+  });
+
+  it('still fills the whole panel for a one-child panel with no grid at all', () => {
+    // The ordinary single-plot/single-image panel, which is every existing
+    // figure — this is the byte-identical case the change must not touch.
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 40 },
+        name: 'Panel',
+        assetId: 'a',
+        naturalPx: { width: 100, height: 100 },
+      });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tile = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    expect(panel.type === 'panel' && panel.contentGrid).toBeUndefined();
+    expect(tile.frame).toEqual({ x: 0, y: 0, width: 60, height: 40 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 33 — image-edge framing, overlay labels, montage auto-fit
+// ---------------------------------------------------------------------------
+
+describe('imageContentRect', () => {
+  function image(overrides: Partial<ImageNode> = {}) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 200, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 60 },
+        name: 'Panel',
+        assetId: 'a',
+        naturalPx: { width: 200, height: 100 },
+      });
+    });
+    const node = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    return { ...node, ...overrides } as ImageNode;
+  }
+
+  it('letterboxes a 2:1 picture inside a square frame, centred by default', () => {
+    // 60 × 60 frame, 2:1 source → 60 × 30 of picture with 30 mm of spare
+    // height, centred means 15 mm above it.
+    expect(imageContentRect(image())).toEqual({ x: 0, y: 15, width: 60, height: 30 });
+  });
+
+  it('follows alignY, which is what a montage tile is given', () => {
+    expect(imageContentRect(image({ alignY: 'start' }))).toEqual({ x: 0, y: 0, width: 60, height: 30 });
+    expect(imageContentRect(image({ alignY: 'end' }))).toEqual({ x: 0, y: 30, width: 60, height: 30 });
+  });
+
+  it('is the whole frame when the picture is stretched to fill it', () => {
+    // Nothing letterboxes, so there is no spare space and the ink really does
+    // reach every edge.
+    expect(imageContentRect(image({ preserveAspect: false }))).toEqual({
+      x: 0,
+      y: 0,
+      width: 60,
+      height: 60,
+    });
+  });
+
+  it('accounts for the crop, which changes the drawn shape', () => {
+    // Cropping a 2:1 source to half its width leaves a 1:1 region, which fills
+    // the square frame exactly.
+    const cropped = image({ crop: { x: 0, y: 0, width: 0.5, height: 1 } });
+    expect(imageContentRect(cropped)).toEqual({ x: 0, y: 0, width: 60, height: 60 });
+  });
+
+  it('is the whole frame for a vector asset, which has no intrinsic shape', () => {
+    // naturalPx {0, 0} — there is nothing to letterbox against.
+    expect(imageContentRect(image({ naturalPx: { width: 0, height: 0 } }))).toEqual({
+      x: 0,
+      y: 0,
+      width: 60,
+      height: 60,
+    });
+  });
+});
+
+describe('group labels measure the picture, not the cell', () => {
+  /** One montage tile that letterboxes: a 2:1 picture in a square-ish cell. */
+  function letterboxedTile() {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 200, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 10, y: 20, width: 60, height: 60 },
+        name: 'Panel',
+        assetId: 'a',
+        naturalPx: { width: 200, height: 100 },
+      });
+    });
+    const tile = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    // Centre it, so the letterboxing is on both sides and unmistakable.
+    const centred = editDocument(doc, (draft) => {
+      const target = draft.nodes[tile.id];
+      if (target?.type === 'image') target.alignY = 'middle';
+    });
+    return { doc: centred, tile, newId };
+  }
+
+  it('frames a caption to the drawn picture, not to the frame around it', () => {
+    const { doc, tile, newId } = letterboxedTile();
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [tile.id], edge: 'top', title: 'Caption' });
+      reflowGroupLabels(draft);
+    });
+    const label = Object.values(withLabel.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+
+    // The picture is 60 × 30 sitting 15 mm down inside a 60 × 60 frame at
+    // (10, 20), so its own top edge is y = 35 — not the frame's y = 20. A rule
+    // drawn at the frame's edge floats 15 mm above the thing it labels.
+    const clearance = groupLabelClearanceMm(undefined, false, undefined);
+    expect(label.frame.y + label.frame.height).toBeCloseTo(35, 6);
+    expect(label.frame.y).toBeCloseTo(35 - clearance, 6);
+  });
+
+  it('spans the picture\'s width, so an opted-in rule stops at the image edge', () => {
+    const { doc, tile, newId } = letterboxedTile();
+    // Narrow the picture instead: a 1:2 source in a 60-wide frame draws 30 wide.
+    const narrow = editDocument(doc, (draft) => {
+      const target = draft.nodes[tile.id];
+      if (target?.type === 'image') target.naturalPx = { width: 100, height: 200 };
+    });
+    const withLabel = editDocument(narrow, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [tile.id], edge: 'top', title: 'Caption' });
+      reflowGroupLabels(draft);
+    });
+    const label = Object.values(withLabel.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+
+    // 60 × 60 frame, 1:2 source → 30 × 60 of picture, centred at x = 10 + 15.
+    expect(label.frame.width).toBeCloseTo(30, 6);
+    expect(label.frame.x).toBeCloseTo(25, 6);
+  });
+});
+
+describe('overlay group labels', () => {
+  function tileWithLabel(placement: 'outside' | 'overlay') {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 4 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 60 }, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tiles = montageTiles(doc.nodes, panel.id);
+    doc = editDocument(doc, (draft) => {
+      const label = addGroupLabel(draft, newId, {
+        memberIds: [tiles[0]!.id],
+        edge: 'top',
+        title: 'Channel',
+      });
+      const target = label ? draft.nodes[label.id] : undefined;
+      if (target?.type === 'group-label' && placement === 'overlay') target.placement = 'overlay';
+      fillPanelChildren(draft, panel.id, panel.frame);
+      reflowGroupLabels(draft);
+    });
+    return { doc, panel, tiles, newId };
+  }
+
+  it('reserves no space at all, so nothing on the page moves for it', () => {
+    const outside = tileWithLabel('outside');
+    const overlay = tileWithLabel('overlay');
+
+    const outsideTop = montageTiles(outside.doc.nodes, outside.panel.id)[0]!.frame.y;
+    const overlayTop = montageTiles(overlay.doc.nodes, overlay.panel.id)[0]!.frame.y;
+
+    // The outside caption grows the row's gutter and pushes its tile down; the
+    // overlaid one is drawn on the picture and costs nothing.
+    expect(outsideTop).toBeGreaterThan(overlayTop);
+    expect(overlayTop).toBeCloseTo(0, 6);
+  });
+
+  it('sits inside the picture it labels', () => {
+    const { doc, panel } = tileWithLabel('overlay');
+    const label = Object.values(doc.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+    const tile = montageTiles(doc.nodes, panel.id)[0]!;
+    const content = memberContentRect(doc.nodes, tile.id)!;
+
+    expect(label.frame.x).toBeGreaterThanOrEqual(content.x);
+    expect(label.frame.y).toBeGreaterThanOrEqual(content.y);
+    expect(label.frame.x + label.frame.width).toBeLessThanOrEqual(content.x + content.width + 1e-6);
+    expect(label.frame.y + label.frame.height).toBeLessThanOrEqual(content.y + content.height + 1e-6);
+  });
+
+  it('neither stacks nor is stacked against', () => {
+    // An overlaid caption takes no space, so a heading spanning the same row
+    // must not be pushed out to clear it.
+    const { doc, panel, tiles, newId } = tileWithLabel('overlay');
+    const withHeading = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, {
+        memberIds: tiles.map((t) => t.id),
+        edge: 'top',
+        title: 'All',
+      });
+      fillPanelChildren(draft, panel.id, panel.frame);
+      reflowGroupLabels(draft);
+    });
+    const heading = Object.values(withHeading.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label' && n.memberIds.length === 4,
+    )!;
+    expect(groupLabelExtentMm(withHeading.nodes, heading)).toBeCloseTo(
+      groupLabelClearanceMm(undefined, false, undefined),
+      6,
+    );
+  });
+});
+
+describe('montage auto-fit', () => {
+  function montageOf(aspects: readonly (readonly [number, number])[], frame = { x: 0, y: 0, width: 60, height: 60 }) {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = aspects.map(([w, h], i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: w, height: h } });
+        return { assetId, naturalPx: { width: w, height: h } };
+      });
+      addPanelWithImages(draft, newId, { frame, name: 'Montage', images, gutterMm: 2 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    return { doc, panel, newId };
+  }
+
+  it('takes the median tile aspect, not the mean', () => {
+    // Three squares and one panorama: the median is 1, the mean is 3.25. A
+    // mean would drag every cell wide for one outlier.
+    const { doc, panel } = montageOf([[100, 100], [100, 100], [100, 100], [1000, 100]]);
+    expect(montageTileAspect(doc.nodes, panel.id)).toBeCloseTo(1, 6);
+  });
+
+  it('shapes the panel so square tiles get square cells', () => {
+    const { doc, panel } = montageOf([[100, 100], [100, 100], [100, 100], [100, 100]]);
+    const aspect = montagePanelAspect(doc, panel.id)!;
+    // A 2 × 2 grid of square cells with equal gutters and padding is square.
+    expect(aspect).toBeCloseTo(1, 6);
+  });
+
+  it('shapes it wider for wide tiles', () => {
+    const { doc, panel } = montageOf([[200, 100], [200, 100], [200, 100], [200, 100]]);
+    const square = montageOf([[100, 100], [100, 100], [100, 100], [100, 100]]);
+    const wide = montagePanelAspect(doc, panel.id)!;
+    const plain = montagePanelAspect(square.doc, square.panel.id)!;
+    expect(wide).toBeGreaterThan(plain);
+  });
+
+  it('sets aspectLock, which is what auto-layout already honours', () => {
+    const { doc, panel } = montageOf([[200, 100], [200, 100]]);
+    const locked = doc.nodes[panel.id]!;
+    expect(locked.type === 'panel' && locked.aspectLock).toBeCloseTo(
+      montagePanelAspect(doc, panel.id)!,
+      6,
+    );
+  });
+
+  it('leaves a montage with autoFit off exactly as it was', () => {
+    const { doc, panel } = montageOf([[200, 100], [200, 100], [200, 100], [200, 100]]);
+    const off = editDocument(doc, (draft) => {
+      const target = draft.nodes[panel.id];
+      if (target?.type === 'panel' && target.contentGrid) {
+        target.contentGrid = { ...target.contentGrid, autoFit: false };
+        target.aspectLock = null;
+      }
+    });
+    const after = editDocument(off, (draft) => fitMontageToImages(draft, panel.id));
+    // Every figure saved before this existed carries no `autoFit`, and must
+    // not be reshaped the first time it is opened.
+    expect(after.nodes[panel.id]!.frame).toEqual(off.nodes[panel.id]!.frame);
+    const reloaded = after.nodes[panel.id]!;
+    expect(reloaded.type === 'panel' ? reloaded.aspectLock : undefined).toBeNull();
+  });
+});
+
+describe('suggestMontageGrid', () => {
+  it('never leaves a wholly empty row or column', () => {
+    // Four tiles in a wide cell: 2 × 3 is the better *shape* but wastes two
+    // cells, and an empty cell in a published montage is a hole in the figure.
+    for (const cellAspect of [0.5, 1, 2, 4]) {
+      const grid = suggestMontageGrid(4, 1, cellAspect);
+      expect(grid.rows * grid.cols - 4).toBeLessThan(Math.min(grid.rows, grid.cols));
+    }
+  });
+
+  it('gives wide images fewer columns than tall ones, for the same cell', () => {
+    const wide = suggestMontageGrid(6, 3, 1);
+    const tall = suggestMontageGrid(6, 1 / 3, 1);
+    expect(wide.cols).toBeLessThan(tall.cols);
+  });
+
+  it('lays four square tiles out 2 × 2 in a square cell', () => {
+    expect(suggestMontageGrid(4, 1, 1)).toEqual({ rows: 2, cols: 2 });
+  });
+
+  it('falls back to suggestGrid when there is no aspect to aim at', () => {
+    const fallback = suggestGrid(5);
+    expect(suggestMontageGrid(5, 1, 0)).toEqual({ rows: fallback.rows, cols: fallback.columns });
+    expect(suggestMontageGrid(5, 0, 1)).toEqual({ rows: fallback.rows, cols: fallback.columns });
+  });
+});
+
+describe('round 33 round-trip', () => {
+  it('keeps placement, labelColor and autoFit through a save', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = editDocument(base, (draft) => {
+      addEmptyMontagePanel(draft, newId, { frame: { x: 0, y: 0, width: 60, height: 40 }, name: 'Montage', rows: 1, cols: 2, gutterMm: 2 });
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    doc = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panel.id, 0, { assetId: 'a', naturalPx: { width: 100, height: 100 } });
+    });
+    const tile = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    const styled = editDocument(doc, (draft) => {
+      const label = addGroupLabel(draft, newId, { memberIds: [tile.id], edge: 'top', title: 'Ch1' });
+      const target = label ? draft.nodes[label.id] : undefined;
+      if (target?.type === 'group-label') {
+        target.placement = 'overlay';
+        target.labelColor = '#ffcc00';
+      }
+      reflowGroupLabels(draft);
+    });
+
+    // zod strips a key present only on the TS type, so the round-trip is the
+    // assertion that matters, not the field being assignable.
+    const loaded = loadArchive(saveArchive(buildArchiveContents(styled)));
+    expect(loaded.document).toEqual(styled);
+    const label = Object.values(loaded.document.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+    expect(label.placement).toBe('overlay');
+    expect(label.labelColor).toBe('#ffcc00');
+    const reloadedPanel = loaded.document.nodes[panel.id]!;
+    expect(reloadedPanel.type === 'panel' && reloadedPanel.contentGrid?.autoFit).toBe(true);
+  });
+
+  it('creates a heading with no rule and no bold, so the defaults actually apply', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 75, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a', filename: 'a.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addPanelWithImage(draft, newId, {
+        frame: { x: 0, y: 0, width: 60, height: 60 },
+        name: 'Panel',
+        assetId: 'a',
+        naturalPx: { width: 100, height: 100 },
+      });
+    });
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [image.id], edge: 'top', title: 'Caption' });
+    });
+    const label = Object.values(withLabel.nodes).find(
+      (n): n is GroupLabelNode => n.type === 'group-label',
+    )!;
+    // Absent, not false/normal: an explicit value would override the default
+    // and is exactly what made every heading arrive bold and ruled.
+    expect(label.showRule).toBeUndefined();
+    expect(label.style?.fontWeight).toBeUndefined();
   });
 });

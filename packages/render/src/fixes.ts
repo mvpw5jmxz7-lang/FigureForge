@@ -66,7 +66,10 @@ function restyle(
   change: (style: TextStyle) => TextStyle,
 ): void {
   const node = draft.nodes[id];
-  if (!node || !('style' in node)) return;
+  // A group-label's `style` is optional (absent means "theme default"), so
+  // `'style' in node` alone no longer guarantees a value to restyle — a
+  // node with no style of its own has no *own* size to be out of range.
+  if (!node || !('style' in node) || node.style === undefined) return;
   node.style = change(node.style);
 }
 

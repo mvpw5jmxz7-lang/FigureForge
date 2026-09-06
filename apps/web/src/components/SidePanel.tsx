@@ -29,6 +29,7 @@ import {
   isStale,
   nextPanelFrame,
   pointLabelColumnIndex,
+  reflowGroupLabels,
   relabelPanels,
   removeAsset,
   removeBracketsForPlot,
@@ -36,6 +37,7 @@ import {
   reorderNode,
   replaceAnalysisForPlot,
   repositionBrackets,
+  reserveSpaceForGroupLabels,
   toMatrix,
   toSeries,
   toSurvivalGroups,
@@ -249,6 +251,7 @@ export function SidePanel(props: SidePanelProps) {
             onMeasureNodeChange={props.onMeasureNodeChange}
             labelPickNodeId={props.labelPickNodeId}
             onLabelPickNodeChange={props.onLabelPickNodeChange}
+            assets={props.assets}
           />
         )}
         {tab === 'stats' && <StatsTab {...props} />}
@@ -377,6 +380,7 @@ function DataTab({
           gutterMm: theme.spacing.panelGutterMm,
           labelGutterMm: 4,
         });
+        reserveSpaceForGroupLabels(draft);
         relabelPanels(draft, newId, {
           uppercase: theme.panelLabelCase === 'upper',
           fontSizePt: theme.type.panelLabelPt,
@@ -384,6 +388,7 @@ function DataTab({
         });
         // Importing re-lays out every panel, so existing brackets would
         // otherwise be left where the old, wider panels used to be.
+        reflowGroupLabels(draft);
         reflowBrackets(draft, theme);
       });
     });
@@ -487,11 +492,13 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
+          reserveSpaceForGroupLabels(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
             offsetMm: 4,
           });
+          reflowGroupLabels(draft);
           reflowBrackets(draft, theme);
         });
       });
@@ -582,11 +589,13 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
+          reserveSpaceForGroupLabels(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
             offsetMm: 4,
           });
+          reflowGroupLabels(draft);
           reflowBrackets(draft, theme);
         });
       });
@@ -743,11 +752,13 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
+          reserveSpaceForGroupLabels(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
             offsetMm: 4,
           });
+          reflowGroupLabels(draft);
           reflowBrackets(draft, theme);
         });
       });
@@ -865,11 +876,13 @@ function DataTab({
           gutterMm: theme.spacing.panelGutterMm,
           labelGutterMm: 4,
         });
+        reserveSpaceForGroupLabels(draft);
         relabelPanels(draft, newId, {
           uppercase: theme.panelLabelCase === 'upper',
           fontSizePt: theme.type.panelLabelPt,
           offsetMm: 4,
         });
+        reflowGroupLabels(draft);
         reflowBrackets(draft, theme);
       });
 

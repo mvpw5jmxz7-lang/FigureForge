@@ -12,7 +12,7 @@ import {
   ancestorsOf,
   childrenOf,
   duplicateNode,
-  fitAspect,
+  fitAspectAligned,
   isDerivedNode,
   isLocked,
   MIN_TILE_MM,
@@ -20,6 +20,7 @@ import {
   plainTextOfRuns,
   reconcileTextEdit,
   recordBracketOffset,
+  reflowGroupLabels,
   rescaleArrowPoints,
   resizeFrame,
   resizeGroup,
@@ -181,7 +182,14 @@ function isPureMontagePanel(doc: FigureDocument, panelId: NodeId): boolean {
   const panel = doc.nodes[panelId];
   if (!panel || panel.type !== 'panel' || !panel.contentGrid) return false;
   const children = childrenOf(doc.nodes, panelId);
-  return children.length > 1 && children.every((c) => c.type === 'plot' || c.type === 'image');
+  // One tile counts. The original rule required two, from a time when a
+  // `contentGrid` could only arrive with a multi-image import — but a montage
+  // filled a cell at a time passes through having exactly one, and a tile that
+  // is directly clickable at two tiles and not at one is the kind of
+  // inconsistency an author reads as a bug. Safe to widen now that the panel
+  // itself has a hit target of its own (`montageChrome`), so reaching the
+  // panel no longer depends on this returning false.
+  return children.length >= 1 && children.every((c) => c.type === 'plot' || c.type === 'image');
 }
 
 /**
@@ -594,6 +602,7 @@ export function Canvas({
           resyncScaleBars(draft);
           // The direct fix for stranded significance brackets: their geometry
           // is absolute, so nothing else would move them with the bars.
+          reflowGroupLabels(draft);
           reflowBrackets(draft, theme);
         });
         return;
@@ -651,6 +660,12 @@ export function Canvas({
         }
 
         syncPanelLabelsFromSnapshot(draft, before);
+        // A group-label heading is the same kind of top-level, absolute-space
+        // follower a panel-label is — it must track a dragged panel, but
+        // (unlike `reserveSpaceForGroupLabels`) a plain drag must never grow
+        // a gap on its own account, which is exactly why this recomputes the
+        // heading's own frame and touches nothing else.
+        reflowGroupLabels(draft);
       });
     },
     [api, doc, theme, zoom],
@@ -699,6 +714,31 @@ export function Canvas({
       if (event.key === 'Escape' && enteredId !== null) {
         setEnteredId(null);
         return;
+      }
+
+      /*
+       * Escape from a montage tile selects the montage itself.
+       *
+       * A pure montage panel is the one container a plain click resolves
+       * *through* rather than to (`selectionTarget`), so without this the only
+       * way to reach the panel is to find a gap between its tiles. That gap is
+       * real — the transparent hit area the renderer draws over the panel's own
+       * gutters and empty cells — but on a tightly packed montage it is a
+       * millimetre wide, so the keyboard route is what makes the panel
+       * reliably reachable. Selecting the parent, not merely deselecting, is
+       * the useful half: the panel's Inspector is where rows, columns, gutter
+       * and per-cell upload live.
+       */
+      if (event.key === 'Escape' && selectedIds.length > 0) {
+        const parents = new Set<NodeId>();
+        for (const id of selectedIds) {
+          const parentId = doc.nodes[id]?.parentId ?? null;
+          if (parentId !== null && isPureMontagePanel(doc, parentId)) parents.add(parentId);
+        }
+        if (parents.size === 1) {
+          onSelectionChange([...parents]);
+          return;
+        }
       }
 
       /*
@@ -1122,16 +1162,22 @@ function CropOverlay({
    * and the next drag applied frame fractions as source fractions.
    *
    * So crop mode shows the entire picture instead, letterboxed exactly as
-   * `preserveAspectRatio="xMidYMid meet"` would. The window is then genuinely
-   * in source space: what is outlined is what is kept.
+   * the renderer's own `preserveAspectRatio` would. The window is then
+   * genuinely in source space: what is outlined is what is kept.
    */
   const fullBox = { x: 0, y: 0, width: box.width, height: box.height };
   const imageRect =
     node.preserveAspect && node.naturalPx.height > 0
-      ? // `fitAspect` is the same centred fit the renderer's "xMidYMid meet"
-        // performs, and already carries the layout tests. A second copy of the
-        // arithmetic here is a second thing that can disagree with the drawing.
-        fitAspect(fullBox, node.naturalPx.width / node.naturalPx.height)
+      ? // `fitAspectAligned` is the same fit the renderer performs, read with
+        // the *same* alignment — a top-aligned montage tile letterboxes
+        // downward, and a centred outline over it would be the round-6 crop
+        // bug again: the region outlined not being the region drawn.
+        fitAspectAligned(
+          fullBox,
+          node.naturalPx.width / node.naturalPx.height,
+          node.alignX ?? 'middle',
+          node.alignY ?? 'middle',
+        )
       : fullBox;
 
   const crop = pending ?? node.crop;

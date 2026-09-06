@@ -256,6 +256,86 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 33 (montage typography, image-edge rules, overlay
+labels, auto-fit):** 1001 TypeScript tests (973 + 28 new: 21 in
+`doc-model.test.ts` covering `imageContentRect` across the cropped, aligned,
+stretched and vector cases, a heading framed to the picture rather than the
+cell in both dimensions, overlay labels reserving zero space and neither
+stacking nor being stacked against, the median tile aspect, the closed-form
+panel aspect, `suggestMontageGrid`'s no-holes and balance rules, `autoFit`
+absent leaving a figure untouched, and a round-trip of `placement`/
+`labelColor`/`autoFit`; 7 in `parity.test.tsx` covering a bare 6 pt non-bold
+heading, an opted-in rule at the picture's width, and the overlay's
+white-with-dark-outline drawing through both adapters), 190 Python tests
+unchanged (nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, **50 live-browser checks
+in each of light and dark**, and a 10-check reference rebuild. **Measured, not
+assumed**: a pane label read back at exactly a tick label's own computed
+`font-size` (2.1167 px) at `font-weight` 400 with no rule; an opted-in rule
+over a 1:3 picture in a square cell drew **70.2 px** against a ~68 px picture
+in a **163.4 px** cell — at the image's edge, not the cell's — and centred on
+it; switching a label to overlay moved its tile by **0 mm** against the 22.9 px
+an outside caption pushes it; one "Label size" edit collapsed every label in a
+montage to a single computed size; and a rebuilt 1 × 3 VSCyto-style panel put
+its spanning heading above three pane labels sharing one baseline, over tiles
+aligned along their tops, exporting to a 75,473-byte PDF with no console
+errors. See "Round 33" below.
+
+**Verified after round 32 (four reported bugs in round 31's montage/group-label
+surface: an unselectable montage, no placeholder for an empty cell, image
+alignment and per-pane labels, heading spacing):** 973 TypeScript tests
+(942 + 31 new: 20 in `doc-model.test.ts` covering `fitAspectAligned`, the
+montage top-alignment defaults and their round-trip, `montageCellRects`
+agreeing cell-for-cell with `fillPanelChildren`, the group-label stacking
+rule in four configurations, the `gapMm` override, and the declared-grid-at-
+any-occupancy fix; 11 in `parity.test.tsx` covering the montage chrome
+appearing only under `RenderOptions.chrome` and the `preserveAspectRatio`
+token for every alignment, including the separately-implemented cropped
+path), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected, **46 live-browser checks in each of light and dark**, and a
+9-check export run. **Measured, not assumed**: an empty 2×2 montage drew
+exactly four dashed cell placeholders and one transparent hit target, and a
+click on it selected the montage panel itself where before the click reached
+nothing at all; a tile uploaded into a cell rendered
+`preserveAspectRatio="xMidYMin meet"` with its drawn top edge landing within
+0.7 px of its cell's own top; the three remaining placeholders dropped to
+three and then two as cells filled; a cell caption and a heading over the
+whole montage were read off the DOM at y = 320.3 and 274.6 px — the caption
+under the heading, not on top of it — with the lower rule clearing the
+picture below it by 3.27 mm; raising that caption's "Gap to content" from
+2.5 mm to 8 mm pushed its tile down 6.31 mm; and the SVG actually posted to
+the exporter contained neither `montage-hit-area` nor
+`montage-cell-placeholder` while still carrying both headings and the
+`xMidYMin meet` alignment, with the PDF returning 72,530 bytes. See
+"Round 32" below.
+
+**Verified after round 31 (group titles for image panels, with adaptive
+spacing, plus per-cell montage image upload/replace):** 942 TypeScript tests
+(918 + 24 new: 20 in `doc-model.test.ts` covering `groupLabelFrame`,
+`reflowGroupLabels`, `reserveSpaceForGroupLabels`'s shortfall arithmetic
+pinned to exact millimetres, the same-panel grid-gutter widening, the
+delete/duplicate cascades, a schema round-trip, `gridCells`'s new
+boundary-extras parameter, and `addEmptyMontagePanel`/`setMontageCellImage`
+including the scale-bar re-sync and out-of-range cases; 4 in
+`parity.test.tsx` covering a cross-panel heading and a single-image caption,
+both adapters), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected (no existing fixture uses a group-label or an empty
+montage), and 17 live-browser checks in each of light and dark. **Measured,
+not assumed**: creating a heading over two selected sample panels drew
+exactly one `group-label` and one `group-label-rule` scene node reading
+"Group title"; editing the title in the Inspector updated the canvas text
+live; switching its position to "Left" produced a `rotate(-90)` transform on
+the drawn title; deleting one of the two member panels removed the heading
+entirely, and one undo restored both together; adding an empty 2×2 montage
+via the toolbar, uploading a 1×1 PNG into an empty cell, and captioning that
+one tile all worked end to end with the Upload button correctly relabelling
+itself "Replace cell 1"; and a PDF export taken with a heading present
+returned `HTTP 200`, `content-type: application/pdf` and a 70,253-byte body
+per its own `Content-Length` header, with zero console errors throughout
+both theme runs. See "Round 31" below.
+
 **Verified after round 30 (the same colour swatch, now on the Inspector's own
 colour-conflict warnings):** 918 TypeScript tests unchanged (this round is
 presentational JSX only — no `quality.ts`/model change and no new test, since
@@ -4701,6 +4781,485 @@ sample document's volcano panel (b), with only its "Down" swatch changed to
 produced the identical warning and chips in its own Colours block. No
 console errors in either theme.
 
+### Round 31 — group titles for image panels, with adaptive spacing
+
+Requested: a way to caption a single image or head a row/column of several,
+matching the row/column-heading convention common in published multi-panel
+figures (the reference was a Nature Scientific Reports paper, unreachable
+behind a login wall — the convention itself is standard and needed no more
+than that to build against). Scoped up front via direct questions rather
+than guessed: titles apply at both a group-heading and a per-image-caption
+granularity through **one mechanism** (a caption is a group of one member);
+a group can span images inside one montage panel **or** independent panels
+on the page; a heading draws a rule as well as text; and this round also
+adds per-cell image upload/replace on an existing montage panel. A
+Plan-agent review before any code was written surfaced the one real hazard:
+this codebase has a standing, explicit contract that **auto-layout** (a
+from-scratch grid recompute) may translate frames, while **manual layout**
+(drag, resize, align, distribute) must leave them alone except for
+snapping. A naive "grow the gap for a new heading by pushing every panel
+after it" would have violated that contract every time it ran after a drag.
+The design below is built around keeping the two apart.
+
+- **One new node type, `GroupLabelNode`** (`packages/doc-model/src/nodes.ts`) —
+  top-level, absolute-page-space, the same family as `PanelLabelNode`/
+  `BracketNode`: `memberIds` (panel or image ids; length 1 is a caption),
+  `edge` (`'top' | 'left' | 'right'`), `title`, an optional `richText`
+  sibling array (the same shape `AxisSpec.title`/`richText` already use),
+  `showRule`, `stroke`, `style`, and `userOffsetMm` (the same "auto base +
+  stored delta" shape `BracketNode.userOffsetMm` already uses). Added to
+  `DERIVED_NODE_TYPES` — a heading describes its members rather than
+  standing on its own, the same reasoning `bracket`/`panel-label`/
+  `scale-bar` are already held to, so it is refused as a standalone
+  duplicate. No `SCHEMA_VERSION` bump: a new node `type` variant is the
+  same bump-free precedent those three already are.
+- **Two mechanisms, not one — the load-bearing split the Plan-agent review
+  produced.** `reflowGroupLabels` (`operations.ts`) only ever recomputes a
+  `GroupLabelNode`'s own frame from the current union of its members'
+  absolute frames (`groupLabelFrame`, via the existing `union` primitive
+  `bracketFrame` already uses) — it never touches any other node, so it is
+  exactly as safe to call after *anything* as `reflowBrackets` already is,
+  including a manual drag. `reserveSpaceForGroupLabels`, by contrast,
+  measures whether the gap on the heading's own side of its members already
+  covers `groupLabelClearanceMm`, and if not, translates every top-level
+  panel at or beyond the heading's edge by the shortfall — genuinely
+  rearranging the page, so it is called **only** from creating/editing a
+  heading and from the handful of places that already run `applyAutoLayout`
+  from scratch (import, delete, template apply, PCA/UMAP/volcano-test panel
+  creation), never from a resize/move/align/distribute. A same-panel heading
+  (every member sharing one montage panel's own grid) needs neither
+  function's shortfall arithmetic at all: its clearance is folded directly
+  into `gridCells`'s tiling as a per-boundary gutter extra (see below), which
+  `fillPanelChildren` already re-derives on every resize, so it stays live
+  for free with no separate reflow step.
+- **`groupLabelClearanceMm`, in `doc-model` rather than `render`.** The
+  planning session assumed this would need `text-width.ts` (hence `render`),
+  mirroring why `reflowBrackets`'s own measuring half lives there — but a
+  heading's reserved band only ever needs its own line height plus a rule
+  and a small gap, never the *width* of its title (nothing here auto-wraps
+  or truncates a heading the way a tick label does). Since only glyph
+  *width* needs `text-width.ts`, this stayed a plain function of point size
+  in `packages/doc-model/src/grouplabel.ts`, letting `fillPanelChildren`,
+  `reflowGroupLabels` and `reserveSpaceForGroupLabels` all live in
+  `doc-model` too, sharing one clearance formula with no cross-package call
+  needed at all.
+- **`gridCells` (`layout.ts`) gained `columnGutterExtraMm`/
+  `rowGutterExtraMm`**, indexed by *boundary* rather than track — index 0 is
+  *before* the first row/column, index `rows`/`columns` is *after* the
+  last — so a heading over the very first or very last row/column still has
+  a boundary to grow into, not only an internal gutter. Purely additive:
+  absent, every existing caller (`autoLayout`, `spanCell`,
+  `fillPanelChildren`'s own pre-existing calls) produces byte-identical
+  frames, pinned by a regression test. **A widened boundary shrinks the
+  *other* equal-weight tracks slightly to make room**, rather than growing
+  the page — the same "two equal rows share what's left after the extra is
+  taken out" arithmetic an unweighted `gridCells` already used, just with a
+  bigger deduction; a first draft of the group-label test measured the new
+  row against the *old, unwidened* layout's other row and got a puzzling
+  half-sized gap until this was traced by hand and the test fixed to compare
+  against the tiles' own new, correctly-shrunk positions.
+- **`fillPanelChildren` (`operations.ts`) is now exported** (Stage 2 needs
+  it directly) and, before tiling, scans for any `GroupLabelNode` whose
+  members are *all* children of the panel being tiled, converts its members'
+  z-order indices into the row/column they occupy, and folds
+  `groupLabelClearanceMm` into the matching `gridCells` boundary. Every
+  existing figure with no group-label passes an all-zero extras array,
+  which is why this needed no regression fixture of its own beyond the
+  existing "byte-identical without a grid" test.
+- **`reserveSpaceForGroupLabels`** measures the gap between a heading's
+  members and whatever top-level panel sits on the near side (the side the
+  heading actually draws into — behind the members for `'top'`/`'left'`,
+  ahead of them for `'right'`, which the same boundary-coordinate comparison
+  handles uniformly without a per-edge branch), and if short, translates
+  every panel at or beyond that boundary by the shortfall — reusing round
+  26's own `snapshotPanelAbsolutePositions`/`syncPanelLabelsFromSnapshot` so
+  a pushed panel's own letter follows it, exactly as an align/distribute
+  already does.
+- **Cascading delete and duplicate mirror `bracket`/`panel-label`'s existing
+  rules, extended rather than reinvented.** `deleteNode`'s fixed-point sweep
+  drops a group-label the instant *any one* of its members is doomed — a
+  heading over a partial row it no longer fully spans misdescribes what
+  remains, which is worse than none at all. `duplicateNode`'s cascade
+  **only** copies a group-label when *every* one of its members is already
+  in the set being copied (a judgement call made during planning, mirroring
+  a bracket's own single-reference rule generalised to a list): duplicating
+  one panel out of a three-panel heading leaves the duplicate uncaptioned
+  rather than either silently joining the original heading or refusing the
+  duplicate outright. A group-label's own `memberIds` are remapped to the
+  copies exactly as a bracket's `plotId` already is.
+- **Render** (`packages/render/src/render-document.ts`, `scene.ts`): new
+  `SceneRole`s `'group-label'` and `'group-label-rule'`, kept distinct from
+  `'panel-label'`/`'text'`/`'line'` for the standing reason a role-count
+  assertion for any of those must not be silently widened. `renderGroupLabel`
+  draws a `'top'` heading the ordinary way (title over a horizontal rule,
+  reusing `multilineTitleNode`/`richRunTspans` — the exact machinery an axis
+  title's own rich text already draws through, so a heading gets rich
+  formatting for free) and a `'left'`/`'right'` one through the identical
+  `rotate(-90)` convention the y/y2 axis titles already use, so a column
+  heading reads bottom-to-top the same way an axis title beside a plot does.
+- **Creation and editing reuse existing UI, not new selection machinery.**
+  "Add group title" in `Toolbar.tsx` is enabled the moment one or more
+  panels/images are selected — round 26's own shift-click multi-select,
+  unchanged — and decides which of the two mechanisms to run by checking
+  whether every selected member shares one montage-panel parent. Selecting
+  the created label shows `GroupLabelFields` in `Inspector.tsx`: title
+  (through the same `useRichTextToggle`/`FormatToggleRow` pipeline
+  `TextFields` already uses), a position `<select>`, a rule toggle, and
+  stroke colour/width — every write re-derives the same reserve/reflow pair
+  the toolbar action runs at creation, since editing a heading's size or
+  edge changes how much room it needs exactly as creating one does.
+- **Stage 2 — per-cell montage image upload/replace needs no new
+  placeholder concept.** `fillPanelChildren` already tolerates a
+  `contentGrid` with more cells than children (the extras stay unused,
+  invisible) — an empty cell was already representable, so this only needed
+  new operations and UI. `addEmptyMontagePanel` is a thin sibling of
+  `addPanelWithImages` with zero children. `setMontageCellImage` retargets a
+  filled cell **in place** — overwriting the existing `ImageNode`'s
+  `assetId`/`naturalPx`/`crop` rather than deleting it and inserting a fresh
+  one — because a scale bar's `parentId` and a group-label's `memberIds` may
+  already point at that node's id; the first draft deleted and recreated the
+  node, which silently orphaned any scale bar calibrated to that tile, and a
+  live-then-caught unit test (`scaleBarWidthMm` returning `null` after a
+  replace) is what found it before it reached a live check. An empty cell,
+  addressed by its z-order index, still needs an explicit z-insert/renumber
+  so the new tile lands in the cell whose button was clicked rather than
+  always the last one; because cells are strictly z-ordered with no way to
+  leave a gap mid-sequence, an index beyond the current child count always
+  fills the *next* empty slot regardless of which still-empty cell's button
+  was clicked — documented as the real, load-bearing constraint it is,
+  rather than a bug, since every empty cell looks identical anyway.
+  `PanelFields` (`Inspector.tsx`) shows one button per declared cell
+  ("Upload to cell N" / "Replace cell N (name)"), wired to a single hidden
+  file input reusing `importImage`/`ACCEPTED_IMAGE_TYPES` — the same decode
+  step `SidePanel.tsx`'s own bulk import already uses — and a small
+  `Toolbar.tsx` entry point ("Add empty montage…", four size presets) is the
+  minimum needed to reach a starting empty grid at all.
+- **Deliberately deferred, named so it is not mistaken for an oversight:**
+  a from-scratch "design the whole grid, then drag images into slots"
+  screen — a materially different, layout-first UI paradigm than "create an
+  empty montage, then fill named cells one at a time," which is what this
+  round actually builds.
+
+Driven in a real browser, light **and** dark, **17 checks each**: selecting
+two sample panels and clicking "Add group title" drew exactly one heading
+and one rule reading "Group title"; editing the title in the Inspector
+updated the canvas live; switching position to "Left" produced a
+`rotate(-90)` transform on the drawn title; deleting one of the two member
+panels dropped the whole heading, and one undo restored panel and heading
+together; adding an empty 2×2 montage from the toolbar offered four "Upload
+to cell N" buttons, uploading a PNG into cell 1 relabelled it "Replace cell
+1 (…)" and drew an image tile, and captioning that one tile added a second,
+independent heading; and a PDF export taken with a heading present returned
+`HTTP 200`, `content-type: application/pdf` and a real 70,253-byte body
+(read off the response's own `Content-Length`), with zero console errors
+across the whole run in either theme. One click-selection strategy failed
+silently before the checks above were written and had to be replaced:
+clicking the geometric centre of a sparse `dot`/`scatter` panel's bounding
+box routinely lands on empty space between marks, and `elementFromPoint`
+there resolves to the page background rather than any panel content —
+confirmed directly before assuming otherwise — so every check instead
+clicks an actual drawn mark (a bar, point, box, violin or line) inside the
+target panel, which is unambiguous for any plot type.
+
+### Round 32 — four bugs in round 31's montage and group-label surface
+
+Reported from real use of round 31: a montage could not be selected by
+clicking it; an empty montage showed nothing at all where its panes would go;
+uploaded images floated in the middle of their cells rather than lining up
+along the top, with no alignment control, and no way to put a label over one
+pane under a heading spanning the row; and a heading's rule sat too close to
+the pictures below it. One new optional field per node type, so
+`SCHEMA_VERSION` stays 1.
+
+- **A montage could not be selected because it draws nothing of its own.**
+  Round 20 deliberately made a plain click on a montage tile resolve straight
+  to that tile (`isPureMontagePanel`/`selectionTarget`, `Canvas.tsx`) rather
+  than to the panel — correct, and not the defect. The defect is that a panel
+  with no background and no border paints no pixels outside its tiles, so its
+  gutters, its padding and its empty cells had nothing for a click to land
+  on; `elementFromPoint` there resolves to the page background. An **empty**
+  montage was therefore entirely unclickable, which is the state round 31's
+  own "Add empty montage…" drops an author into.
+  - **`montageChrome` (`render-document.ts`) draws a transparent rect over
+    the panel's whole frame**, `fill: 'transparent'` rather than `'none'` —
+    only a *painted* fill receives pointer events, and `none` would have left
+    the panel exactly as unclickable as it was. It carries no `nodeId`, so
+    the event bubbles to the wrapper `<g>` `renderNode` already puts the
+    panel's id on and `selectionTarget` resolves it the ordinary way, with no
+    special case.
+  - **Gated on `options.chrome`**, which the export path never passes — so
+    this is invisible to the exporter, to `checkFigure`, and to every parity
+    assertion, all of which render chrome-free. New `SceneRole`s
+    `'montage-hit-area'` and `'montage-cell-placeholder'`, kept distinct for
+    the standing reason and deliberately **not** added to `quality.ts`'s
+    `MARK_ROLES` — chrome, not data-ink, the same standing `'gridline'`
+    already has.
+  - **Escape from a tile selects the montage**, because on a tightly packed
+    montage the gap between tiles is a millimetre wide and a keyboard route
+    is what makes the panel *reliably* reachable. Selecting the parent rather
+    than merely deselecting is the useful half: the panel's Inspector is
+    where rows, columns, gutter and per-cell upload live. It is checked after
+    the existing `enteredId` branch, so stepping out of a container still
+    wins.
+  - **The "spacing between panes should be adjustable" half of the report
+    needed no code at all** — `PanelFields` has had a Gutter field since
+    round 31. It was unreachable because the panel carrying it could not be
+    selected, which is the same bug.
+
+- **Empty cells now show where their panes will go.** `montageCellRects` is
+  extracted out of `fillPanelChildren` (`operations.ts`) and exported, so the
+  dashed outline the renderer draws and the frame the tile will actually take
+  are **one derivation read twice** — deriving them separately in `render` is
+  precisely how round 6's crop bug happened, an outline promising a region
+  the drawing did not keep. A test asserts cell-for-cell equality between the
+  two. `montageTiles` is extracted alongside it as the one place the z-order
+  cell addressing is decided, shared by the tiler, `setMontageCellImage` and
+  the placeholders.
+
+- **A latent round-31 bug the placeholders exposed immediately.**
+  `fillPanelChildren` bailed out of its grid at `children.length <= 1` and
+  gave the lone child the whole panel. That was harmless while a
+  `contentGrid` could only ever be created alongside two or more images —
+  but filling an empty montage a cell at a time walks straight through the
+  state it got wrong, so the *first* tile uploaded stretched across the whole
+  panel and then snapped back into cell 1 the moment a second arrived. The
+  count is no longer part of that test: a declared grid is a declared grid at
+  any occupancy. Found because the placeholder for cell 2 was drawn under a
+  tile that had spread over it — the new chrome earning its keep on its first
+  run. `isPureMontagePanel` was widened to one tile in the same pass (a tile
+  directly clickable at two tiles and not at one is the kind of inconsistency
+  an author reads as a bug), which is only safe *because* the panel now has a
+  hit target of its own: reaching the panel no longer depends on that
+  predicate returning false.
+
+- **Images sit where they are told to inside their cell.** A tile's frame
+  comes from `gridCells` and has nothing to do with the micrograph's own
+  shape, so an aspect-preserved image genuinely has spare room in its cell,
+  and it was being centred — leaving a row of differently-proportioned
+  micrographs each floating at its own height.
+  - **`ImageNode.alignX`/`alignY`**, both optional; absent is `'middle'` on
+    both axes, exactly the centring every image had before, so no saved
+    figure moves. A tile uploaded into a montage is written `alignY: 'start'`
+    explicitly (`addPanelWithImages` for a real montage, `setMontageCellImage`
+    for a new tile) — a *replacement* keeps whatever alignment the author had
+    already chosen, since that belongs to the cell they arranged rather than
+    to the file that sits in it.
+  - **`fitAspectAligned` (`geometry.ts`) is the one implementation**, with
+    `fitAspect` now a two-argument wrapper on it, so the centred behaviour is
+    the same code rather than a parallel copy. It is read by `renderImage`'s
+    *cropped* path and by `Canvas.tsx`'s crop overlay; the *uncropped* path
+    hands the job to SVG through `preserveAspectAlign`, whose tokens
+    (`xMinYMin`…`xMaxYMax`) is why `FitAlign`'s members are named
+    `start`/`middle`/`end` — the mapping is a lookup with no judgement in it.
+    The crop overlay had to move with it or a top-aligned tile would outline
+    its crop window somewhere other than where the picture is drawn: round
+    6's bug again, in a new place.
+  - The Inspector's two selects are shown **only while `preserveAspect` is
+    on**. A stretched image fills its frame exactly, so there is no spare
+    space to place and the control would adjust nothing — the standing "a
+    control that visibly does nothing is a defect" rule.
+
+- **A label over one pane, sitting under the heading that spans the row.**
+  This needed no new node type: a caption is already a `GroupLabelNode` with
+  one member, and round 31 built that. What was missing is that two headings
+  on the same line were drawn in the same millimetres, because
+  `groupLabelGutterExtras` took the **max** of their clearances and
+  `groupLabelFrame` placed both against the same edge.
+  - **`groupLabelStackOffsetMm`/`groupLabelExtentMm`** are the rule: anything
+    on the same edge, on the same line, overlapping this heading's span, and
+    covering strictly *fewer* members takes the space nearer the content and
+    pushes this one further out by its own clearance. The narrower heading is
+    the inner one — a caption belongs against the pane it names, the heading
+    spanning the row belongs above it. Labels covering the *same* number of
+    members share one level, so three captions across three panes sit side by
+    side rather than in a staircase, and a level costs the widest clearance
+    among its members once.
+  - **The direction was wrong in the first draft and a unit test caught it**:
+    counting labels with *more* members pushed the caption above the heading
+    instead of below. Written the other way round it read just as plausibly
+    in prose, which is why the test asserts the two frames' actual order
+    rather than only that they differ.
+  - **`groupLabelExtentMm` is what both reservation paths now read** — the
+    same-panel grid gutter and the cross-panel push — so the space a heading
+    is *given* and the space it is *drawn in* cannot disagree. A row carrying
+    both a spanning heading and a caption per pane grows by the **sum**, not
+    the max.
+  - A stored explicit "level" per heading was rejected: it is a second source
+    of truth for something the member sets already say unambiguously, and it
+    would go stale the moment a heading's members changed.
+  - **`PanelFields` offers a "Label cell N" button per filled cell**, which
+    calls the same `addGroupLabel` the Toolbar's own action does and then
+    selects the new label so the placeholder title can be typed over
+    immediately. The button disappears once that cell has a caption — two
+    captions stacked over one pane is never wanted.
+
+- **A heading's rule now clears what it labels.** `GROUP_LABEL_GAP_MM` is
+  2.5 mm rather than 1.5: measured against the theme's own numbers, 1.5 mm
+  left the rule about 1.7 mm clear of the picture's top edge, which reads as
+  a border drawn *on* the image rather than a heading above it. Overridable
+  per heading via **`GroupLabelNode.gapMm`** with an Inspector field, since
+  how much air a heading needs depends on what sits under it.
+  `clearanceForLabel` in `grouplabel.ts` is now the one place a node's four
+  relevant fields become a clearance, so no call site can read three of them
+  and quietly disagree with the others.
+
+Driven in a real browser, light **and** dark, **46 checks each**, plus a
+9-check export run — the numbers are in the verification note near the top of
+this file. Two live-test traps worth recording: a click on the montage
+panel's own corner is intercepted by the *currently selected* node's resize
+grip, so the panel has to be selected through an empty cell instead; and the
+heading created by "Add group title" is left selected, so re-selecting it by
+clicking its own `<text>` is both unnecessary and unreliable — a text
+element's bounding-box centre falls between glyphs as often as on one, the
+same class of trap as clicking a sparse plot panel's centre in round 31.
+
+**Not done, deliberately:** alignment is offered per image rather than as a
+montage-wide default an author sets once — every tile takes `'start'` on
+upload, which covers the reported case, and a panel-level default would be a
+second place the same fact is stored. The dashed placeholders are not
+clickable *as upload targets*; clicking one selects the panel, whose
+Inspector then names every cell. Panel labels and bracket labels still get no
+`gapMm`.
+
+### Round 33 — montage typography, image-edge rules, overlay labels, auto-fit
+
+Reported after using round 31/32's montages on real figures: pane labels came
+out 8 pt bold with a rule under them; font sizes could not be made consistent
+in one edit; the rule ran to the *cell* edge rather than the image's; nothing
+sized a montage so its pictures filled their cells; and there was no way to put
+a label on the image. Six published figures were supplied as guides. Read
+against them the conventions are unambiguous and confirm every request: small
+non-bold headings at the same size as the surrounding type, no rule, headings
+tight against the picture, tiles filling their cells.
+
+- **Every group-label default was wrong, and `addGroupLabel` was why.**
+  `DEFAULT_GROUP_LABEL_PT` was 8 (a panel *letter*'s size) and
+  `renderGroupLabel`'s base style was `fontWeight: 'bold'` — but changing both
+  fixed nothing on its own, because **`addGroupLabel` wrote `showRule: true`
+  and `fontWeight: 'bold'` onto every heading it created**, and an explicit
+  value always beats a default. The stored values are now left absent so the
+  defaults apply: 6 pt (`theme.type.annotationPt`, the size tick labels and
+  annotations already use), non-bold, no rule. `stroke` is still stored so
+  turning a rule on later has something sensible to draw with. A test asserts
+  the *absence* of `showRule`/`fontWeight` rather than their values, since an
+  explicit `false` would read identically today and reintroduce the bug the
+  moment a default moved again.
+- **The gap is rule-dependent, because the two cases genuinely differ.** Round
+  32 raised `GROUP_LABEL_GAP_MM` to 2.5 mm on a report that a rule sat too
+  close to a micrograph; this round reports the *opposite* — that the space is
+  larger than it needs to be. Both are right about their own case: a rule needs
+  room not to read as a border on the picture, while a bare 6 pt caption at
+  2.5 mm is most of a line height of dead space. So `GROUP_LABEL_GAP_NO_RULE_MM`
+  (1 mm) applies when there is no rule and 2.5 mm when there is,
+  `GroupLabelNode.gapMm` overrides either, and both are read only through
+  `clearanceForLabel` so no call site can pick the wrong one for its case.
+- **A heading now measures the picture, not the cell — one change fixing two
+  reports.** A tile's frame comes from `gridCells` and has nothing to do with
+  the micrograph's shape, so an aspect-preserved picture letterboxes inside it
+  and the frame is not where the ink is. `imageContentRect` is the one
+  implementation of where the picture lands (`preserveAspect ?
+  fitAspectAligned(frame, aspect × crop.w / crop.h, alignX, alignY) : frame`,
+  one formula covering the cropped and uncropped cases alike), and
+  `memberContentRect` lifts it into page space. `groupLabelBounds` reads it, so
+  the rule stops at the image's edge *and* the heading stops floating a
+  letterbox's worth too high. `renderImage`'s cropped branch calls
+  `imageContentRect` too rather than repeating the fit — deriving it twice is
+  how the drawing and the geometry would come to disagree, which is round 6's
+  crop bug in a new place.
+- **Overlay labels reserve nothing.** `GroupLabelNode.placement: 'overlay'`
+  draws the title on the picture — the convention the csLFM and VSCyto figures
+  use for channel names and timestamps — inset from its top-left, left-aligned,
+  in `labelColor ?? white` with a dark stroke under the fill (`paint-order:
+  stroke fill`) so it survives a pale patch. `clearanceForLabel` returns **0**
+  for it, so it grows no grid gutter, triggers no `reserveSpaceForGroupLabels`
+  push, and neither stacks nor is stacked against. The shadow is a stroke pair
+  rather than an SVG filter: a filter needs a `<defs>` block and per-node
+  unique ids, the same reasoning that kept the heatmap colourbar a strip of
+  rects. Automatic contrast detection was considered and refused — reading the
+  image's brightness needs pixel access `packages/render` must not have, and a
+  value sampled once in the app would go stale the moment the crop changed.
+- **A pane's label is edited from the pane.** `ImageFields` renders the very
+  same `GroupLabelFields` the label's own Inspector shows whenever the selected
+  image is the sole member of a group-label, with an "Add label" button when it
+  has none — one editor, so the two cannot drift. `PanelFields` gained a
+  **"Label size (pt)"** that writes to every label in the montage at once
+  (each pane's caption *and* any heading spanning the panel) plus a readout
+  naming the sizes currently in use, which is the requested single edit.
+- **Auto-fit uses a lever that already existed.** `autoLayout` has always
+  honoured `panel.aspectLock` (`fitAspect(inner, panel.aspectLock)`), and
+  `addPanelWithImages` set it to `null` for the stated reason that
+  differently-shaped micrographs have "no one honest ratio". They do have one:
+  the ratio at which every cell matches the tiles' median aspect, so nothing
+  letterboxes. `montageTileAspect` takes the **median**, not the mean — one
+  panorama among square micrographs should not drag every cell wide.
+  `montagePanelAspect` solves the panel shape in **closed form**: cell height
+  cancels out of the ratio, so it terminates by construction rather than
+  converging, the same argument the two-pass margin rule rests on.
+  `fitMontageToImages` sets the lock; `applyAutoLayout` then gives the panel the
+  largest correctly-shaped rect in its page cell and `fillPanelChildren` fills
+  every cell edge to edge. `contentGrid.autoFit` gates all of it and is absent
+  — off — for every figure saved before this existed, so nothing already laid
+  out by hand is reshaped on open. The Inspector's off switch clears
+  `aspectLock` back to null, since leaving the lock would keep constraining the
+  manual resize the author just asked for.
+- **`suggestMontageGrid` refuses grids with holes, and needed a tie-break.**
+  It picks rows × cols whose aspect best matches the page cell — wide images
+  get fewer, wider columns — scoring in log space so "twice as wide" and "half
+  as wide" are equally wrong. Two corrections came out of testing rather than
+  reasoning: four images scored best as 2 × 3, a better *shape* with two empty
+  cells, so grids leaving a wholly empty row or column are now excluded
+  outright (an empty cell in a published montage is a hole in the figure, not a
+  saving); and four 2:1 tiles in a square cell scored *identically* as 4 × 1 and
+  2 × 2 — equally far off in opposite directions — so the first tried won and a
+  montage of wide images became a tall single column. A small balance term
+  breaks that toward the squarer arrangement without ever outvoting the shape.
+  `autoGridForMontage` runs only from `addPanelWithImages`, never from
+  `setMontageCellImage`: a grid the author declared when making the montage is
+  not silently rearranged the moment a picture lands in it.
+- **A latent bug this exposed:** `fillPanelChildren` bailed out of its grid at
+  one child, so the first tile uploaded into an empty montage stretched across
+  the whole panel and snapped back into cell 1 when a second arrived. Harmless
+  while a `contentGrid` could only be created alongside two or more images;
+  filling a montage a cell at a time walks straight through it. Fixed in round
+  32's follow-up work here — a declared grid is a declared grid at any
+  occupancy.
+
+Driven in a real browser, light **and** dark, **50 checks each**: a pane label
+read back at exactly the same computed `font-size` as a tick label (2.1167 px
+at 100%), `font-weight` 400, and no rule drawn; turning a rule on for a 1:3
+picture in a square cell drew it **70.2 px** wide against a ~68 px picture in a
+**163.4 px** cell — at the image's edge, not the cell's — and centred on it;
+switching a label to overlay moved the tile by 0 mm (against the 22.9 px an
+outside caption pushes it) and drew it inside the picture in white; selecting a
+pane offered "Add label" and then its full size/placement/colour controls; one
+"Label size" edit made every label in the montage the same size; and auto-fit
+was on for a new montage with all four tiles drawn at equal, non-zero area.
+Plus a **10-check reference rebuild**: a 1 × 3 montage captioned A549 /
+BJ-5ta / HEK293T under a spanning "Virtual stain" heading laid out exactly as
+the published panel does — heading above all three pane labels, the three
+sharing one baseline, tiles aligned along their tops, no rules anywhere — and
+exported to a 75,473-byte PDF with no console errors. The screenshot was
+inspected by eye, not only by attribute: reading the numbers back proves the
+fields are set, not that the figure looks right.
+
+**Two live-test traps, both costing a run before being understood.** A click on
+the montage panel's own corner is intercepted by whatever is currently
+selected — its resize grip sits exactly there — so the panel has to be reached
+by clicking a tile and pressing Escape, which is the keyboard route round 32
+added for precisely this reason. And the first version of the rule-width check
+labelled a *square* picture in a square cell, where the picture and the cell
+have the same width and the assertion could not fail; it was rewritten around a
+1:3 picture, where the two differ by more than a factor of two.
+
+**Not done, deliberately:** reallocating page area *between* panels (slot
+spans, row weights). A montage claims the largest correctly-shaped rect inside
+the cell auto-layout gives it and re-chooses its grid to suit that cell, which
+is the honest version of "use the page space well"; taking area from a
+neighbouring panel is a different mechanism with its own staleness rules. There
+is no automatic light/dark contrast detection for overlay labels, for the
+reason given above. `autoFit` is not turned on retroactively for existing
+figures.
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -4763,7 +5322,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`) is **optional**, so old files still load. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

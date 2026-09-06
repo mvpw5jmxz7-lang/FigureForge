@@ -196,7 +196,30 @@ export type SceneRole =
    * exemption `'tick-label-sup'` already has, down to `SUPERSCRIPT_MIN_PT`.
    */
   | 'text-sup'
-  | 'text-sub';
+  | 'text-sub'
+  /**
+   * A `GroupLabelNode`'s heading text — a row/column caption over several
+   * panels or images, or a caption on one. Kept distinct from 'panel-label'
+   * (a computed panel letter) and 'text' (a free-standing `TextNode`) for
+   * the standing reason: a role-count assertion for either must not be
+   * silently widened by this feature.
+   */
+  | 'group-label'
+  /** The rule drawn beside a group-label's title. Kept distinct from 'line'
+   *  for the same reason. */
+  | 'group-label-rule'
+  /**
+   * Editor chrome for a montage panel, drawn only when `RenderOptions.chrome`
+   * is passed and therefore never exported: a transparent rect over the whole
+   * panel so its gutters and empty cells can be clicked (without it a montage
+   * has no pixels of its own to select), and a dashed outline in each cell no
+   * tile has reached yet.
+   *
+   * Never added to `quality.ts`'s `MARK_ROLES` — chrome, not data-ink, the
+   * same standing this file already records for `'gridline'`.
+   */
+  | 'montage-hit-area'
+  | 'montage-cell-placeholder';
 
 export const el = (
   tag: string,

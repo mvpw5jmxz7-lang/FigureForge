@@ -16,8 +16,8 @@ import type { DataFormat, Dataset } from './data.js';
 import { isTwoFactor, toSeries } from './data.js';
 import type { Asset, FigureDocument } from './document.js';
 import { layerByName, nextZ } from './document.js';
-import type { PointMm, RectMm } from './geometry.js';
-import { union } from './geometry.js';
+import type { FitAlign, PointMm, RectMm } from './geometry.js';
+import { fitAspectAligned, union } from './geometry.js';
 import {
   alignFrames,
   autoLayout,
@@ -31,6 +31,12 @@ import {
   type LayoutOptions,
 } from './layout.js';
 import type { LayoutTemplate } from './templates.js';
+import {
+  clearanceForLabel,
+  DEFAULT_GROUP_LABEL_PT,
+  GROUP_LABEL_OVERLAY_PAD_MM,
+} from './grouplabel.js';
+import { ptToMm } from './units.js';
 import {
   absoluteFrame,
   childrenOf,
@@ -48,6 +54,7 @@ import type {
   DatasetId,
   Fill,
   FigureNode,
+  GroupLabelNode,
   GroupNode,
   ImageNode,
   NodeId,
@@ -60,6 +67,7 @@ import type {
   ShapeNode,
   Stroke,
   TextNode,
+  TextStyle,
 } from './nodes.js';
 
 export interface NodeFactoryContext {
@@ -600,6 +608,60 @@ export function applyAutoLayout(
 export const MIN_TILE_MM = 5;
 
 /**
+ * Extra clearance to fold into a montage panel's own internal gutters, one
+ * per grid boundary, for every group-label whose members are *all* tiles of
+ * this one panel's grid.
+ *
+ * This is the "always live" half of the two group-label mechanisms: because
+ * `fillPanelChildren` already re-tiles on every resize, folding the
+ * clearance in here means it stays correct automatically, with no separate
+ * reflow step and no risk of fighting a manual drag the way translating a
+ * *sibling* panel would (see `reserveSpaceForGroupLabels`, the other half,
+ * for why that one is deliberately not live).
+ */
+function groupLabelGutterExtras(
+  doc: FigureDocument,
+  panelId: NodeId,
+  children: readonly FigureNode[],
+  grid: { rows: number; cols: number },
+): { rowExtra: number[]; columnExtra: number[] } {
+  const rowExtra = new Array<number>(grid.rows + 1).fill(0);
+  const columnExtra = new Array<number>(grid.cols + 1).fill(0);
+
+  const indexOf = new Map<NodeId, number>();
+  children.forEach((child, index) => indexOf.set(child.id, index));
+
+  for (const node of Object.values(doc.nodes)) {
+    if (node.type !== 'group-label') continue;
+    const parents = new Set(node.memberIds.map((memberId) => doc.nodes[memberId]?.parentId ?? null));
+    if (parents.size !== 1 || [...parents][0] !== panelId) continue;
+
+    const indices = node.memberIds
+      .map((memberId) => indexOf.get(memberId))
+      .filter((i): i is number => i !== undefined);
+    if (indices.length === 0) continue;
+
+    // The heading's own clearance *plus* anything wider stacked outside it,
+    // so a row carrying both a spanning heading and a caption per tile is
+    // given room for both rather than for whichever happens to be taller.
+    const extent = groupLabelExtentMm(doc.nodes, node);
+
+    if (node.edge === 'top') {
+      const row = Math.min(...indices.map((i) => Math.floor(i / grid.cols)));
+      rowExtra[row] = Math.max(rowExtra[row]!, extent);
+    } else if (node.edge === 'left') {
+      const col = Math.min(...indices.map((i) => i % grid.cols));
+      columnExtra[col] = Math.max(columnExtra[col]!, extent);
+    } else {
+      const col = Math.max(...indices.map((i) => i % grid.cols));
+      columnExtra[col + 1] = Math.max(columnExtra[col + 1]!, extent);
+    }
+  }
+
+  return { rowExtra, columnExtra };
+}
+
+/**
  * Size a panel's content children to it — filling it, or tiled into its grid.
  *
  * One implementation shared by `applyAutoLayout` and `resizePanel`. They had
@@ -608,26 +670,90 @@ export const MIN_TILE_MM = 5;
  *
  * Without a `contentGrid` this is exactly what it always was, byte for byte,
  * which a regression test pins: every existing figure has one child per panel
- * and must not move.
+ * and must not move. Exported so `setMontageCellImage` can re-tile a panel
+ * whose child count just changed without duplicating this function.
  */
-function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm): void {
+export function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm): void {
   const panel = draft.nodes[panelId];
   const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
+  const children = montageTiles(draft.nodes, panelId);
 
-  const children = Object.values(draft.nodes)
-    .filter((c) => c.parentId === panelId && (c.type === 'plot' || c.type === 'image'))
-    // Cells in z order — what the Layers list shows, and what `reorderNode`
-    // already lets an author rearrange. `Object.values` order is not a
-    // guarantee, and a montage that reshuffled itself on every layout would be
-    // unusable.
-    .sort((a, b) => a.z - b.z);
-
-  if (!grid || grid.rows < 1 || grid.cols < 1 || children.length <= 1) {
+  /*
+   * No declared grid: every child fills the panel, exactly as it always has.
+   *
+   * The child *count* is deliberately not part of this test any more. It used
+   * to bail out at one child too, which was harmless while a `contentGrid`
+   * could only ever be created alongside two or more images — but an empty
+   * montage can now be created first and filled a cell at a time, and under
+   * the old rule its first tile stretched across the whole panel instead of
+   * taking cell 1, then snapped back into the grid the moment a second
+   * arrived. A declared grid is a declared grid at any occupancy.
+   */
+  if (!grid || grid.rows < 1 || grid.cols < 1) {
     for (const child of children) {
       child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
     }
     return;
   }
+
+  const cells = montageCellRects(draft, panelId, frame);
+  // A frame too small for its own grid (a template applied onto a
+  // too-small panel, or an already-too-small imported document — the live
+  // drag path can no longer reach this, see `panelGridMinimumMm`) leaves
+  // every child exactly where it was rather than handing it a degenerate,
+  // ungrabbable frame. The same "extras keep their size" stance the
+  // more-children-than-cells case below already takes.
+  if (!cells) return;
+
+  children.forEach((child, index) => {
+    const cell = cells[index];
+    // More children than cells: the extras keep their size rather than being
+    // stacked at the origin, where they would be invisible under a tile.
+    if (cell) child.frame = { ...cell };
+  });
+}
+
+/**
+ * A montage panel's tiles, in the z order `fillPanelChildren` fills cells in.
+ *
+ * `Object.values` order is not a guarantee, and a montage that reshuffled
+ * itself on every layout would be unusable — so this is the one place that
+ * order is decided, shared by the tiler, `setMontageCellImage`'s cell
+ * addressing, and the renderer's empty-cell placeholders.
+ */
+export function montageTiles(nodes: NodeMap, panelId: NodeId): FigureNode[] {
+  return Object.values(nodes)
+    .filter((c) => c.parentId === panelId && (c.type === 'plot' || c.type === 'image'))
+    .sort((a, b) => a.z - b.z);
+}
+
+/**
+ * Where a montage panel's cells sit, in the panel's own local coordinates.
+ *
+ * Null when the panel has no grid, or when the grid cannot be given usable
+ * cells at this frame — the caller decides what that means (the tiler leaves
+ * children alone; the renderer draws no placeholders).
+ *
+ * Exported because the renderer draws a dashed outline in every cell no tile
+ * has reached yet, and deriving those rectangles a second time there is
+ * exactly how an outline comes to sit somewhere other than where the tile
+ * will actually land.
+ */
+export function montageCellRects(
+  doc: FigureDocument,
+  panelId: NodeId,
+  frame: RectMm,
+): RectMm[] | null {
+  const panel = doc.nodes[panelId];
+  const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
+  if (!grid || grid.rows < 1 || grid.cols < 1) return null;
+
+  const { rowExtra, columnExtra } = groupLabelGutterExtras(
+    doc,
+    panelId,
+    montageTiles(doc.nodes, panelId),
+    { rows: grid.rows, cols: grid.cols },
+  );
 
   /*
    * `gridCells` tiles a page into panels; here it tiles a panel into tiles.
@@ -642,23 +768,206 @@ function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame: RectMm
       pageHeightMm: frame.height,
       marginMm: panel?.type === 'panel' ? panel.paddingMm : 0,
       gutterMm: grid.gutterMm,
+      rowGutterExtraMm: rowExtra,
+      columnGutterExtraMm: columnExtra,
     },
   );
 
-  // A frame too small for its own grid (a template applied onto a
-  // too-small panel, or an already-too-small imported document — the live
-  // drag path can no longer reach this, see `panelGridMinimumMm`) leaves
-  // every child exactly where it was rather than handing it a degenerate,
-  // ungrabbable frame. The same "extras keep their size" stance the
-  // more-children-than-cells case above already takes.
-  if (cells.some((cell) => cell.width < MIN_TILE_MM || cell.height < MIN_TILE_MM)) return;
+  if (cells.some((cell) => cell.width < MIN_TILE_MM || cell.height < MIN_TILE_MM)) return null;
+  return cells;
+}
 
-  children.forEach((child, index) => {
-    const cell = cells[index];
-    // More children than cells: the extras keep their size rather than being
-    // stacked at the origin, where they would be invisible under a tile.
-    if (cell) child.frame = { ...cell };
+// ---------------------------------------------------------------------------
+// Fitting a montage to its images
+// ---------------------------------------------------------------------------
+
+/**
+ * The aspect (w/h) of one tile's picture, after its crop.
+ *
+ * Null where there is nothing to measure — a plot, or a vector asset, which
+ * carries `{0, 0}` and has no intrinsic proportions.
+ */
+function tileAspect(node: FigureNode): number | null {
+  if (node.type !== 'image') return null;
+  if (node.naturalPx.height <= 0 || node.naturalPx.width <= 0) return null;
+  const aspect = node.naturalPx.width / node.naturalPx.height;
+  const cropped = (aspect * node.crop.width) / node.crop.height;
+  return Number.isFinite(cropped) && cropped > 0 ? cropped : null;
+}
+
+/**
+ * One representative aspect for a montage's tiles.
+ *
+ * The **median**, not the mean: a single panorama among otherwise square
+ * micrographs should not drag every cell wide. Null when no tile has a
+ * measurable aspect, which is what tells the caller there is nothing to fit.
+ */
+export function montageTileAspect(nodes: NodeMap, panelId: NodeId): number | null {
+  const aspects = montageTiles(nodes, panelId)
+    .map(tileAspect)
+    .filter((a): a is number => a !== null)
+    .sort((a, b) => a - b);
+  if (aspects.length === 0) return null;
+  const mid = Math.floor(aspects.length / 2);
+  return aspects.length % 2 === 1 ? aspects[mid]! : (aspects[mid - 1]! + aspects[mid]!) / 2;
+}
+
+/**
+ * The panel aspect (w/h) at which every cell matches the tiles' own aspect —
+ * the shape at which pictures stop letterboxing and fill their cells.
+ *
+ * Solved in closed form rather than converged to. Writing `h` for the cell
+ * height, cell width is `aspect * h`, so
+ *
+ *   panelWidth  = cols * aspect * h + fixedWidth
+ *   panelHeight = rows * h          + fixedHeight
+ *
+ * where the fixed terms are the gutters, the padding and the label bands
+ * `groupLabelGutterExtras` already computes — all independent of `h`. Picking
+ * any `h` therefore gives the same ratio, so this terminates by construction,
+ * the same argument the two-pass margin rule and `offsetReserveMm` rest on.
+ *
+ * Returns null when the panel has no grid or no measurable tile.
+ */
+export function montagePanelAspect(doc: FigureDocument, panelId: NodeId): number | null {
+  const panel = doc.nodes[panelId];
+  const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
+  if (!grid || grid.rows < 1 || grid.cols < 1) return null;
+
+  const aspect = montageTileAspect(doc.nodes, panelId);
+  if (aspect === null) return null;
+
+  const { rowExtra, columnExtra } = groupLabelGutterExtras(doc, panelId, montageTiles(doc.nodes, panelId), {
+    rows: grid.rows,
+    cols: grid.cols,
   });
+  const sum = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0);
+
+  const padding = panel?.type === 'panel' ? panel.paddingMm : 0;
+  const fixedWidth = (grid.cols - 1) * grid.gutterMm + sum(columnExtra) + 2 * padding;
+  const fixedHeight = (grid.rows - 1) * grid.gutterMm + sum(rowExtra) + 2 * padding;
+
+  // Any positive cell height gives the same ratio; use one that keeps the
+  // fixed terms from dominating so the result is numerically well behaved.
+  const cellHeight = Math.max(MIN_TILE_MM, fixedHeight);
+  const width = grid.cols * aspect * cellHeight + fixedWidth;
+  const height = grid.rows * cellHeight + fixedHeight;
+  if (!(height > 0) || !(width > 0)) return null;
+  return width / height;
+}
+
+/**
+ * Rows × columns for `count` tiles of a given aspect, filling a cell of the
+ * given aspect as fully as possible.
+ *
+ * `suggestGrid` answers the same question for *panels on a page*, where every
+ * panel is roughly square and near-square grids are right. A montage of wide
+ * micrographs wants fewer, wider columns; a montage of tall ones the reverse.
+ * This is the honest lever behind "use the page space well": the panel then
+ * claims the largest rect of that shape in the cell auto-layout gives it,
+ * rather than letterboxing inside it.
+ *
+ * `cellAspect` <= 0 (an unknown or degenerate target) falls back to
+ * `suggestGrid`, so a caller with no cell to aim at behaves exactly as before.
+ */
+export function suggestMontageGrid(
+  count: number,
+  tileAspectRatio: number,
+  cellAspect: number,
+): { rows: number; cols: number } {
+  if (count <= 0) return { rows: 1, cols: 1 };
+  if (!(tileAspectRatio > 0) || !(cellAspect > 0)) {
+    const fallback = suggestGrid(Math.max(1, count));
+    return { rows: fallback.rows, cols: fallback.columns };
+  }
+
+  let best = { rows: 1, cols: count };
+  let bestScore = Infinity;
+  for (let cols = 1; cols <= count; cols++) {
+    const rows = Math.ceil(count / cols);
+    const holes = rows * cols - count;
+
+    /*
+     * Only "tight" grids: at most a partly-filled last row, never a wholly
+     * empty row or column. Without this, four images in a wide panel scored
+     * best as 2 × 3 — a better *shape*, but with two empty cells, and an empty
+     * cell in a published montage is a hole in the figure, not a saving. The
+     * shape is a preference; leaving cells unfilled is a defect.
+     */
+    if (holes >= Math.min(rows, cols)) continue;
+
+    // The grid's own aspect, ignoring gutters and labels: they are a small,
+    // roughly symmetric correction, and including them here would make this
+    // depend on the very layout it is choosing.
+    const gridAspect = (cols * tileAspectRatio) / rows;
+    /*
+     * Compare in log space so "twice as wide" and "half as wide" score equally
+     * badly — a plain difference would always prefer the narrower option.
+     *
+     * The balance term breaks the ties that leaves. Four 2:1 tiles in a square
+     * cell score identically as 4 × 1 (aspect 0.5) and 2 × 2 (aspect 2.0) —
+     * equally far off in opposite directions — and without this the first one
+     * tried won, turning a montage of wide images into a tall single column.
+     * A squarer arrangement is the conventional montage shape, so it takes the
+     * tie; the weight is small enough never to outvote the shape itself.
+     */
+    const balance = Math.abs(Math.log(cols / rows)) * 0.01;
+    const score = Math.abs(Math.log(gridAspect / cellAspect)) + holes * 0.15 + balance;
+    if (score < bestScore) {
+      bestScore = score;
+      best = { rows, cols };
+    }
+  }
+  return best;
+}
+
+/**
+ * Re-shape a montage so its pictures fill their cells.
+ *
+ * Sets `aspectLock` to the fitted aspect, which `autoLayout` already honours
+ * (`fitAspect(inner, panel.aspectLock)`) — so the next layout pass gives the
+ * panel the largest correctly-shaped rect inside its page cell, and
+ * `fillPanelChildren` then fills every cell edge to edge. `addPanelWithImages`
+ * set `aspectLock: null` for the stated reason that differently-shaped
+ * micrographs have "no one honest ratio"; the fitted aspect is that ratio.
+ *
+ * A no-op unless `contentGrid.autoFit` is on, which is off for every figure
+ * saved before this existed.
+ */
+export function fitMontageToImages(draft: FigureDocument, panelId: NodeId): void {
+  const panel = draft.nodes[panelId];
+  if (panel?.type !== 'panel' || !panel.contentGrid?.autoFit) return;
+
+  const aspect = montagePanelAspect(draft, panelId);
+  if (aspect === null) return;
+
+  panel.aspectLock = aspect;
+  // Re-tile immediately so the frames on the children match the new shape
+  // even if the caller never runs a full layout pass.
+  fillPanelChildren(draft, panelId, panel.frame);
+}
+
+/**
+ * Choose the grid for an auto-fitting montage from its tile count and shape.
+ *
+ * Kept separate from `fitMontageToImages` because the two answer different
+ * questions and a caller may want only one: this decides how many rows and
+ * columns, that decides what shape the panel should be. Respects a grid the
+ * author set by hand — `autoFit` fits the *shape*, it does not overrule a
+ * declared arrangement.
+ */
+export function autoGridForMontage(draft: FigureDocument, panelId: NodeId): void {
+  const panel = draft.nodes[panelId];
+  if (panel?.type !== 'panel' || !panel.contentGrid?.autoFit) return;
+
+  const tiles = montageTiles(draft.nodes, panelId);
+  if (tiles.length === 0) return;
+  const aspect = montageTileAspect(draft.nodes, panelId);
+  if (aspect === null) return;
+
+  const cellAspect = panel.frame.height > 0 ? panel.frame.width / panel.frame.height : 0;
+  const next = suggestMontageGrid(tiles.length, aspect, cellAspect);
+  panel.contentGrid = { ...panel.contentGrid, rows: next.rows, cols: next.cols };
 }
 
 /**
@@ -812,6 +1121,8 @@ export interface AddImageOptions {
   parentId?: NodeId | null;
   crop?: Partial<Crop01>;
   preserveAspect?: boolean;
+  alignX?: FitAlign;
+  alignY?: FitAlign;
 }
 
 /**
@@ -854,6 +1165,8 @@ export function addImage(
     // A stretched micrograph misstates distances measured on it, which is a
     // data problem rather than a cosmetic one. Opt out, never opt in.
     preserveAspect: options.preserveAspect ?? true,
+    ...(options.alignX ? { alignX: options.alignX } : {}),
+    ...(options.alignY ? { alignY: options.alignY } : {}),
   };
   draft.nodes[id] = node;
   return node;
@@ -890,10 +1203,12 @@ export function addPanelWithImage(
  * annotations, and `selectionTarget`'s double-click-to-enter already reaches
  * one. Pooling them into a single image would throw all of that away.
  *
- * `aspectLock` is deliberately null: it is derived from a single image's ratio,
- * and a montage of differently shaped micrographs has no one honest ratio. The
- * tiles letterbox inside their own cells instead, which is where the
- * `preserveAspect` rule already puts them.
+ * `aspectLock` starts null — it is derived from a single image's ratio, and a
+ * montage of differently shaped micrographs has no one honest ratio to take
+ * from any one of them. `fitMontageToImages` then computes the ratio that
+ * *does* exist for the set: the one at which every cell matches the tiles'
+ * median aspect, so nothing letterboxes. New montages fit automatically;
+ * existing figures, which carry no `autoFit`, are untouched.
  */
 export function addPanelWithImages(
   draft: FigureDocument,
@@ -908,11 +1223,23 @@ export function addPanelWithImages(
 
   const panel = addPanel(draft, newId, { ...options, aspectLock: null });
   if (count > 1) {
-    panel.contentGrid = { rows: grid.rows, cols: grid.columns, gutterMm: options.gutterMm ?? 1 };
+    panel.contentGrid = {
+      rows: grid.rows,
+      cols: grid.columns,
+      gutterMm: options.gutterMm ?? 1,
+      autoFit: true,
+    };
   }
 
   const images = options.images.map((image) =>
     addImage(draft, newId, {
+      // A tile's frame comes from `gridCells` and has nothing to do with the
+      // micrograph's own shape, so an aspect-preserved image genuinely has
+      // spare room in its cell. Top-align it: a row of differently-shaped
+      // micrographs only reads as a row when their tops line up, where
+      // centring leaves each one floating at its own height. Only for a real
+      // montage — a lone image fills its panel and has nothing to align.
+      ...(count > 1 ? { alignY: 'start' as const } : {}),
       ...image,
       parentId: panel.id,
       // Provisional: `fillPanelChildren` assigns the real cells immediately
@@ -921,8 +1248,130 @@ export function addPanelWithImages(
     }),
   );
 
+  // Pick the grid from the images' own shape, then shape the panel so they
+  // fill it. Order matters: the aspect is computed from the grid.
+  autoGridForMontage(draft, panel.id);
+  fitMontageToImages(draft, panel.id);
   fillPanelChildren(draft, panel.id, panel.frame);
   return { panel, images };
+}
+
+/**
+ * A montage panel with no images yet — a thin sibling of `addPanelWithImages`
+ * with zero children, so a cell can be filled in one at a time afterward via
+ * `setMontageCellImage` rather than only ever arriving in one bulk import.
+ *
+ * `fillPanelChildren` already tolerates a `contentGrid` with more cells than
+ * children (the extras stay unused, invisible, exactly the "more children
+ * than cells" case documented on it already, just at the opposite extreme —
+ * zero children), so nothing about "an empty cell" is a new concept here.
+ */
+export function addEmptyMontagePanel(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddPanelOptions & {
+    rows: number;
+    cols: number;
+    gutterMm?: number;
+    /** Off only where a caller wants the grid it asked for held exactly. */
+    autoFit?: boolean;
+  },
+): PanelNode {
+  const panel = addPanel(draft, newId, { ...options, aspectLock: null });
+  panel.contentGrid = {
+    rows: Math.max(1, options.rows),
+    cols: Math.max(1, options.cols),
+    gutterMm: options.gutterMm ?? 1,
+    autoFit: options.autoFit ?? true,
+  };
+  return panel;
+}
+
+/**
+ * Put an image into a specific cell of a montage panel, replacing whatever
+ * was there or inserting a new tile if the cell was empty.
+ *
+ * Cells are addressed by their z-order index — the same order
+ * `fillPanelChildren` already tiles children into — so this needs an
+ * explicit z-insert/renumber for the empty-cell case rather than the plain
+ * append `nextZ` gives every other new child, or the new image would land in
+ * the *last* cell regardless of which one the author clicked.
+ *
+ * A previously-filled cell is retargeted **in place** — the existing
+ * `ImageNode`'s `assetId`/`naturalPx`/`crop` are overwritten rather than the
+ * node being deleted and a fresh one inserted — because its `id` is what a
+ * scale bar's `parentId` and a group-label's `memberIds` are still pointing
+ * at. Deleting it would either orphan those references or, via `deleteNode`'s
+ * cascade, take an unrelated caption down with it; retargeting keeps both
+ * intact, the same way changing an image's *crop* already does not disturb
+ * what points at the node. `resyncScaleBars` (already run globally on
+ * layout) is what invalidates the scale bar's calibration for the new
+ * pixels, rather than a second reset rule being invented for it.
+ */
+export function setMontageCellImage(
+  draft: FigureDocument,
+  newId: () => string,
+  panelId: NodeId,
+  cellIndex: number,
+  image: Omit<AddImageOptions, 'parentId' | 'frame'>,
+): ImageNode | null {
+  const panel = draft.nodes[panelId];
+  if (!panel || panel.type !== 'panel' || !panel.contentGrid) return null;
+  if (cellIndex < 0 || cellIndex >= panel.contentGrid.rows * panel.contentGrid.cols) return null;
+
+  const asset = draft.assets.find((a) => a.id === image.assetId);
+  if (!asset) return null;
+
+  const children = Object.values(draft.nodes)
+    .filter((c) => c.parentId === panelId && (c.type === 'plot' || c.type === 'image'))
+    .sort((a, b) => a.z - b.z);
+
+  const existing = children[cellIndex];
+  if (existing && existing.type === 'image') {
+    existing.assetId = image.assetId;
+    existing.naturalPx = image.naturalPx;
+    existing.crop = normaliseCrop(image.crop);
+    existing.preserveAspect = image.preserveAspect ?? existing.preserveAspect;
+    existing.name = image.name ?? asset.filename;
+    // A replacement keeps whatever alignment the author had already chosen
+    // for this cell; only a genuinely new tile takes the top-aligned default.
+    if (image.alignX) existing.alignX = image.alignX;
+    if (image.alignY) existing.alignY = image.alignY;
+    // A different picture can change the set's median aspect, so re-fit before
+    // re-tiling. `fitMontageToImages` calls `fillPanelChildren` itself.
+    fitMontageToImages(draft, panelId);
+    fillPanelChildren(draft, panelId, panel.frame);
+    resyncScaleBars(draft);
+    return existing;
+  }
+
+  const node = addImage(draft, newId, {
+    // Tops line up across a row of differently-shaped micrographs — see
+    // `addPanelWithImages`, which takes the same default for the same reason.
+    alignY: 'start',
+    ...image,
+    parentId: panelId,
+    frame: { x: 0, y: 0, width: panel.frame.width, height: panel.frame.height },
+  });
+
+  // Inserting into a previously-empty cell must place the new node's z
+  // between its neighbours rather than after all of them, or it would tile
+  // into the *last* cell regardless of which empty one was targeted.
+  const ordered = [...children];
+  ordered.splice(cellIndex, 0, node);
+  ordered.forEach((child, index) => {
+    const target = draft.nodes[child.id];
+    if (target) target.z = index;
+  });
+
+  // The grid is deliberately *not* re-chosen here: the author declared these
+  // rows and columns when they made the montage, and silently rearranging them
+  // the moment a picture lands would overrule that. `autoFit` fits the panel's
+  // shape to the tiles; it does not overrule a declared arrangement.
+  fitMontageToImages(draft, panelId);
+  fillPanelChildren(draft, panelId, panel.frame);
+  resyncScaleBars(draft);
+  return node;
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,6 +1978,424 @@ export function recordBracketOffset(
 
 const formatBracketP = (p: number): string =>
   p < 0.001 ? 'P < 0.001' : `P = ${p < 0.01 ? p.toFixed(3) : p.toFixed(2)}`;
+
+// ---------------------------------------------------------------------------
+// Group labels
+// ---------------------------------------------------------------------------
+
+const DEFAULT_GROUP_LABEL_STROKE: Stroke = { color: '#000000', widthMm: 0.35, cap: 'butt' };
+
+/**
+ * Where the picture is actually drawn inside an image node's frame, in the
+ * node's own local coordinates.
+ *
+ * A montage tile's frame comes from `gridCells` and has nothing to do with the
+ * micrograph's shape, so an aspect-preserved picture letterboxes inside it and
+ * the frame is emphatically *not* where the ink is. Anything positioning
+ * itself against the picture — a heading's rule, which was overshooting to the
+ * cell edge, or the heading itself, which was floating a letterbox's worth too
+ * high — has to read this instead.
+ *
+ * One formula covers both branches of `renderImage`: uncropped is simply the
+ * crop-1 case, and `renderImage`'s cropped path calls this rather than
+ * repeating it, so the drawing and the geometry cannot disagree.
+ */
+export function imageContentRect(node: ImageNode): RectMm {
+  const local: RectMm = { x: 0, y: 0, width: node.frame.width, height: node.frame.height };
+  const aspect = node.naturalPx.height > 0 ? node.naturalPx.width / node.naturalPx.height : 0;
+  // A stretched image fills its frame exactly; a vector asset carries {0, 0}
+  // and has no intrinsic proportions to letterbox against.
+  if (!node.preserveAspect || aspect <= 0) return local;
+  return fitAspectAligned(
+    local,
+    (aspect * node.crop.width) / node.crop.height,
+    node.alignX ?? 'middle',
+    node.alignY ?? 'middle',
+  );
+}
+
+/**
+ * The page-space rectangle a group-label should measure itself against: the
+ * drawn picture for an image, and the plain frame for anything else.
+ */
+export function memberContentRect(nodes: NodeMap, id: NodeId): RectMm | null {
+  const frame = absoluteFrame(nodes, id);
+  if (!frame) return null;
+  const node = nodes[id];
+  if (node?.type !== 'image') return frame;
+  const content = imageContentRect(node);
+  return {
+    x: frame.x + content.x,
+    y: frame.y + content.y,
+    width: content.width,
+    height: content.height,
+  };
+}
+
+/** True when every member shares one parent panel that tiles them into a
+ *  `contentGrid` — the case `fillPanelChildren`'s own gutter growth already
+ *  covers live, on every resize, with no reflow of its own needed. */
+function isSameMontageGroup(nodes: NodeMap, memberIds: readonly NodeId[]): boolean {
+  if (memberIds.length === 0) return false;
+  const parents = new Set(memberIds.map((id) => nodes[id]?.parentId ?? null));
+  if (parents.size !== 1) return false;
+  const parentId = [...parents][0]!;
+  if (parentId === null) return false;
+  const parent = nodes[parentId];
+  return parent?.type === 'panel' && parent.contentGrid !== undefined;
+}
+
+/** The top-level ancestor of a node — itself, if it has no parent. */
+function topLevelOwner(nodes: NodeMap, id: NodeId): NodeId | null {
+  let current: NodeId | null = id;
+  const seen = new Set<NodeId>();
+  while (current !== null) {
+    if (seen.has(current)) return null; // a cyclic parentId chain; give up rather than loop forever
+    seen.add(current);
+    const node: FigureNode | undefined = nodes[current];
+    if (!node) return null;
+    if (node.parentId === null) return current;
+    current = node.parentId;
+  }
+  return null;
+}
+
+/**
+ * Page-space frame for a group-label, from the current union of its members'
+ * absolute frames plus its own manual nudge — the same "auto base + stored
+ * delta" shape `BracketNode.userOffsetMm` already uses.
+ *
+ * Returns null when no member still resolves (every member gone is
+ * `deleteNode`'s job to catch first, so this is a defensive fallback, not the
+ * normal path).
+ */
+function groupLabelBounds(nodes: NodeMap, node: GroupLabelNode): RectMm | null {
+  // The drawn picture, not the cell it sits in — see `memberContentRect`.
+  const memberRects = node.memberIds
+    .map((id) => memberContentRect(nodes, id))
+    .filter((r): r is RectMm => r !== null);
+  if (memberRects.length === 0) return null;
+  return union(memberRects)!;
+}
+
+/** Which coordinate a heading's own side of its members sits on. */
+function groupLabelBoundary(edge: GroupLabelNode['edge'], bounds: RectMm): number {
+  if (edge === 'top') return bounds.y;
+  if (edge === 'left') return bounds.x;
+  return bounds.x + bounds.width;
+}
+
+const GROUP_LABEL_EPS = 1e-6;
+
+/**
+ * How far *beyond* its own clearance a heading has to sit, because wider
+ * headings on the same line take the space nearer the content.
+ *
+ * This is what makes "a per-tile caption sits under the group heading"
+ * true — the requested behaviour, and the only thing that stops the two
+ * from being drawn in the same millimetres. The narrower heading is the
+ * inner one: a caption belongs against the tile it names, and the heading
+ * spanning the whole row belongs above it. So the rule is simply: anything
+ * on this same edge, on this same line, overlapping this heading's span,
+ * and covering strictly *fewer* members, takes the space nearer the content
+ * and pushes this one further out by its own clearance.
+ *
+ * Labels covering the *same* number of members share one level — three
+ * captions across a row of three tiles sit side by side, not in a
+ * staircase — so a level costs the widest clearance among its members once,
+ * not once per label.
+ *
+ * The alternative, a stored explicit "row" or z-level per heading, was not
+ * built: it is a second source of truth for something the member sets
+ * already say unambiguously, and it would go stale the moment a heading's
+ * members changed.
+ */
+function groupLabelStackOffsetMm(nodes: NodeMap, node: GroupLabelNode): number {
+  // An overlaid label is drawn on the picture and reserves nothing, so it
+  // neither stacks nor is stacked against.
+  if (node.placement === 'overlay') return 0;
+  const bounds = groupLabelBounds(nodes, node);
+  if (!bounds) return 0;
+  const boundary = groupLabelBoundary(node.edge, bounds);
+  // 'top' stacks along y and the span runs along x; 'left'/'right' the reverse.
+  const spanStart = node.edge === 'top' ? bounds.x : bounds.y;
+  const spanEnd = node.edge === 'top' ? bounds.x + bounds.width : bounds.y + bounds.height;
+
+  // Widest clearance at each distinct member count *below* this one's — the
+  // levels that sit between this heading and the content it labels.
+  const byCount = new Map<number, number>();
+  for (const other of Object.values(nodes)) {
+    if (other.type !== 'group-label' || other.id === node.id) continue;
+    if (other.edge !== node.edge) continue;
+    if (other.placement === 'overlay') continue; // takes no space to stack over
+    if (other.memberIds.length >= node.memberIds.length) continue;
+
+    const otherBounds = groupLabelBounds(nodes, other);
+    if (!otherBounds) continue;
+    if (Math.abs(groupLabelBoundary(other.edge, otherBounds) - boundary) > GROUP_LABEL_EPS) continue;
+
+    const oStart = node.edge === 'top' ? otherBounds.x : otherBounds.y;
+    const oEnd =
+      node.edge === 'top' ? otherBounds.x + otherBounds.width : otherBounds.y + otherBounds.height;
+    if (oEnd <= spanStart + GROUP_LABEL_EPS || oStart >= spanEnd - GROUP_LABEL_EPS) continue;
+
+    const clearance = clearanceForLabel(other);
+    byCount.set(
+      other.memberIds.length,
+      Math.max(byCount.get(other.memberIds.length) ?? 0, clearance),
+    );
+  }
+
+  let offset = 0;
+  for (const clearance of byCount.values()) offset += clearance;
+  return offset;
+}
+
+/**
+ * Total extent a heading occupies measured out from its members — its own
+ * clearance plus the room taken by any wider heading stacked outside it.
+ *
+ * Composed once here and read by `groupLabelFrame`, by
+ * `groupLabelGutterExtras` (the same-panel gutter) and by
+ * `reserveSpaceForGroupLabels` (the cross-panel push), so the space a
+ * heading is *given* and the space it is *drawn in* cannot disagree.
+ */
+export function groupLabelExtentMm(nodes: NodeMap, node: GroupLabelNode): number {
+  return clearanceForLabel(node) + groupLabelStackOffsetMm(nodes, node);
+}
+
+export function groupLabelFrame(nodes: NodeMap, node: GroupLabelNode): RectMm | null {
+  const bounds = groupLabelBounds(nodes, node);
+  if (!bounds) return null;
+
+  /*
+   * An overlaid label sits *inside* the picture, inset from its top-left — the
+   * convention the csLFM and VSCyto reference figures use for channel names
+   * and timestamps. Its frame is a band across the top of the content rather
+   * than a reserved strip beside it, so nothing on the page moves to make room
+   * and `clearanceForLabel` returns 0 for it.
+   */
+  if (node.placement === 'overlay') {
+    const pad = GROUP_LABEL_OVERLAY_PAD_MM;
+    const lineMm = ptToMm(node.style?.fontSizePt ?? DEFAULT_GROUP_LABEL_PT) * 1.2;
+    const overlay: RectMm = {
+      x: bounds.x + pad,
+      y: bounds.y + pad,
+      width: Math.max(0, bounds.width - 2 * pad),
+      height: Math.min(lineMm, Math.max(0, bounds.height - 2 * pad)),
+    };
+    const nudge = node.userOffsetMm;
+    return nudge ? { ...overlay, x: overlay.x + nudge.x, y: overlay.y + nudge.y } : overlay;
+  }
+
+  const clearance = clearanceForLabel(node);
+  // Sit outside anything wider on the same line, so a caption tucks under
+  // the heading that spans it rather than colliding with it.
+  const stack = groupLabelStackOffsetMm(nodes, node);
+
+  const base: RectMm =
+    node.edge === 'top'
+      ? {
+          x: bounds.x,
+          y: bounds.y - clearance - stack,
+          width: bounds.width,
+          height: clearance,
+        }
+      : node.edge === 'left'
+        ? {
+            x: bounds.x - clearance - stack,
+            y: bounds.y,
+            width: clearance,
+            height: bounds.height,
+          }
+        : {
+            x: bounds.x + bounds.width + stack,
+            y: bounds.y,
+            width: clearance,
+            height: bounds.height,
+          };
+
+  const offset = node.userOffsetMm;
+  return offset ? { ...base, x: base.x + offset.x, y: base.y + offset.y } : base;
+}
+
+/**
+ * Reposition every group-label from its members' current positions.
+ *
+ * Never touches any other node's frame — the direct parallel to
+ * `repositionBrackets`, and wired into the same call sites: anything that
+ * moves a panel or an image already needs to follow up with this, the same
+ * way it already follows up with `reflowBrackets`.
+ */
+export function reflowGroupLabels(draft: FigureDocument): void {
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type !== 'group-label') continue;
+    const frame = groupLabelFrame(draft.nodes, node);
+    if (frame) node.frame = frame;
+  }
+}
+
+/**
+ * Grow the gap on one side of a group-label's members so the heading has
+ * room to draw, by translating whatever panel sits beyond it.
+ *
+ * Deliberately **not** live during a manual drag, resize, align or
+ * distribute — this codebase's manual-layout contract leaves frames alone
+ * except for snapping, and fighting that live would read as the editor
+ * overriding the user (see `GroupLabelNode`'s own doc comment). Called only
+ * from creating/editing a heading, and from the handful of places that
+ * already run `applyAutoLayout` from scratch.
+ *
+ * Same-panel headings (`isSameMontageGroup`) need none of this: their
+ * clearance is already a live grid gutter, folded into `fillPanelChildren`.
+ * This function only ever moves top-level `panel` nodes — a heading's own
+ * frame is corrected afterwards by `reflowGroupLabels`, which every caller
+ * of this function also calls.
+ */
+export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
+  const EPS = 1e-6;
+
+  for (const label of Object.values(draft.nodes)) {
+    if (label.type !== 'group-label') continue;
+    if (isSameMontageGroup(draft.nodes, label.memberIds)) continue;
+
+    const ownerIds = new Set<NodeId>();
+    for (const memberId of label.memberIds) {
+      const owner = topLevelOwner(draft.nodes, memberId);
+      if (owner) ownerIds.add(owner);
+    }
+    const ownerRects = [...ownerIds]
+      .map((id) => absoluteFrame(draft.nodes, id))
+      .filter((r): r is RectMm => r !== null);
+    if (ownerRects.length === 0) continue;
+    const bounds = union(ownerRects)!;
+
+    const clearance = groupLabelExtentMm(draft.nodes, label);
+
+    const axis: 'x' | 'y' = label.edge === 'top' ? 'y' : 'x';
+    const boundary =
+      label.edge === 'top' ? bounds.y : label.edge === 'left' ? bounds.x : bounds.x + bounds.width;
+    const spanStart = axis === 'y' ? bounds.x : bounds.y;
+    const spanEnd = axis === 'y' ? bounds.x + bounds.width : bounds.y + bounds.height;
+
+    const panels = Object.values(draft.nodes).filter(
+      (n): n is PanelNode => n.type === 'panel' && n.parentId === null,
+    );
+
+    const overlaps = (rect: RectMm): boolean => {
+      const rStart = axis === 'y' ? rect.x : rect.y;
+      const rEnd = axis === 'y' ? rect.x + rect.width : rect.y + rect.height;
+      return rEnd > spanStart + EPS && rStart < spanEnd - EPS;
+    };
+
+    // The nearest neighbour on the side the heading actually draws into: for
+    // 'top'/'left', the panel immediately before the members; for 'right',
+    // the panel immediately after them (the heading's own space is beyond
+    // the members either way, so "before"/"after" flips with `boundary`).
+    let neighborEdge: number | null = null;
+    for (const panel of panels) {
+      if (ownerIds.has(panel.id)) continue;
+      const rect = absoluteFrame(draft.nodes, panel.id);
+      if (!rect || !overlaps(rect)) continue;
+      const near = axis === 'y' ? rect.y : rect.x;
+      const far = axis === 'y' ? rect.y + rect.height : rect.x + rect.width;
+
+      if (label.edge === 'right') {
+        if (near < boundary - EPS) continue;
+        if (neighborEdge === null || near < neighborEdge) neighborEdge = near;
+      } else {
+        if (far > boundary + EPS) continue;
+        if (neighborEdge === null || far > neighborEdge) neighborEdge = far;
+      }
+    }
+    if (neighborEdge === null) continue; // nothing to measure a gap against
+
+    const currentGap = label.edge === 'right' ? neighborEdge - boundary : boundary - neighborEdge;
+    const shortfall = clearance - currentGap;
+    if (shortfall <= EPS) continue;
+
+    for (const panel of panels) {
+      const rect = absoluteFrame(draft.nodes, panel.id);
+      if (!rect) continue;
+      const coord = axis === 'y' ? rect.y : rect.x;
+      if (coord < boundary - EPS) continue;
+
+      const before = snapshotPanelAbsolutePositions(draft.nodes, panel.id);
+      panel.frame =
+        axis === 'y'
+          ? { ...panel.frame, y: panel.frame.y + shortfall }
+          : { ...panel.frame, x: panel.frame.x + shortfall };
+      syncPanelLabelsFromSnapshot(draft, before);
+    }
+  }
+}
+
+export interface AddGroupLabelOptions {
+  memberIds: readonly NodeId[];
+  edge: GroupLabelNode['edge'];
+  title?: string;
+  fontSizePt?: number;
+}
+
+/**
+ * Create a heading over a row/column of panels or images, or a caption on a
+ * single one — the same mechanism at both granularities, since a caption is
+ * simply a group of one member.
+ *
+ * Positioned once against the members' *current* frames; the caller runs
+ * `reserveSpaceForGroupLabels` (cross-panel case) or relies on the next
+ * `fillPanelChildren` re-tile (same-panel case) to make room, then
+ * `reflowGroupLabels` to land the heading in its final spot.
+ */
+export function addGroupLabel(
+  draft: FigureDocument,
+  newId: () => string,
+  options: AddGroupLabelOptions,
+): GroupLabelNode | null {
+  if (options.memberIds.length === 0) return null;
+  const memberRects = options.memberIds
+    .map((id) => absoluteFrame(draft.nodes, id))
+    .filter((r): r is RectMm => r !== null);
+  if (memberRects.length === 0) return null;
+  const bounds = union(memberRects)!;
+
+  const id = newId();
+  const title = options.title ?? '';
+  /*
+   * No `fontWeight` and no `showRule`: both are left absent so the *defaults*
+   * apply — 6 pt non-bold text with no rule, matching the type around it.
+   * Writing them here is what made every heading arrive bold-and-ruled no
+   * matter what the defaults said, since an explicit value always wins.
+   * `stroke` is still stored so turning the rule on later has something
+   * sensible to draw with.
+   */
+  const style: TextStyle = {
+    ...(options.fontSizePt !== undefined ? { fontSizePt: options.fontSizePt } : {}),
+  };
+
+  const node: GroupLabelNode = {
+    ...baseNode(
+      id,
+      title || 'Group title',
+      layerId(draft, 'Labels'),
+      bounds, // provisional; reflowGroupLabels below settles the real frame
+      null,
+      nextZ(draft.nodes, null),
+    ),
+    type: 'group-label',
+    memberIds: options.memberIds,
+    edge: options.edge,
+    title,
+    stroke: DEFAULT_GROUP_LABEL_STROKE,
+    style,
+  };
+  draft.nodes[id] = node;
+
+  const frame = groupLabelFrame(draft.nodes, node);
+  if (frame) node.frame = frame;
+
+  return node;
+}
 
 // ---------------------------------------------------------------------------
 // Text, datasets and deletion
@@ -2150,6 +3017,17 @@ export function deleteNode(draft: FigureDocument, id: NodeId): void {
         doomed.add(node.id);
         grew = true;
       }
+      // A group-label breaks the instant any one member is gone — a heading
+      // over a partial row it no longer fully spans would misdescribe what
+      // remains, which is worse than no heading at all.
+      if (
+        node.type === 'group-label' &&
+        !doomed.has(node.id) &&
+        node.memberIds.some((memberId) => doomed.has(memberId))
+      ) {
+        doomed.add(node.id);
+        grew = true;
+      }
     }
   }
 
@@ -2165,7 +3043,7 @@ export function deleteNode(draft: FigureDocument, id: NodeId): void {
  * never produced it — so they are copied only as part of the thing they
  * annotate, with their references remapped.
  */
-const DERIVED_NODE_TYPES = new Set(['bracket', 'panel-label', 'scale-bar']);
+const DERIVED_NODE_TYPES = new Set(['bracket', 'panel-label', 'scale-bar', 'group-label']);
 
 export const isDerivedNode = (node: FigureNode): boolean => DERIVED_NODE_TYPES.has(node.type);
 
@@ -2200,7 +3078,12 @@ export function duplicateNode(
       const belongs =
         (node.parentId !== null && members.has(node.parentId)) ||
         (node.type === 'panel-label' && members.has(node.panelId)) ||
-        (node.type === 'bracket' && node.plotId != null && members.has(node.plotId));
+        (node.type === 'bracket' && node.plotId != null && members.has(node.plotId)) ||
+        // A group-label copies only when EVERY one of its own members is
+        // already being copied — duplicating a lone panel out of a headed
+        // row leaves the duplicate un-captioned rather than either silently
+        // joining the original heading or refusing the duplicate outright.
+        (node.type === 'group-label' && node.memberIds.every((memberId) => members.has(memberId)));
       if (belongs) {
         members.add(node.id);
         grew = true;
@@ -2230,6 +3113,9 @@ export function duplicateNode(
     if (copy.type === 'panel-label') copy.panelId = remap.get(copy.panelId) ?? copy.panelId;
     if (copy.type === 'bracket' && copy.plotId != null) {
       copy.plotId = remap.get(copy.plotId) ?? copy.plotId;
+    }
+    if (copy.type === 'group-label') {
+      copy.memberIds = copy.memberIds.map((memberId) => remap.get(memberId) ?? memberId);
     }
 
     draft.nodes[copy.id] = copy;

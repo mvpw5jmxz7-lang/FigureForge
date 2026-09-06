@@ -9,7 +9,7 @@
  * page, for top-level nodes).
  */
 
-import type { PointMm, RectMm } from './geometry.js';
+import type { FitAlign, PointMm, RectMm } from './geometry.js';
 
 export type NodeId = string;
 export type LayerId = string;
@@ -95,8 +95,14 @@ export interface PanelNode extends NodeBase {
    *
    * Children take cells in `z` order, which is the order the Layers list shows
    * and the order `reorderNode` already lets an author change.
+   *
+   * `autoFit` keeps the panel shaped so its cells match the tiles' own aspect,
+   * so pictures fill their cells instead of letterboxing inside them. Absent
+   * is off, which is what every figure saved before round 33 gets — turning it
+   * on retroactively would resize montages an author had already placed by
+   * hand.
    */
-  contentGrid?: { rows: number; cols: number; gutterMm: number };
+  contentGrid?: { rows: number; cols: number; gutterMm: number; autoFit?: boolean };
 }
 
 export type PlotType =
@@ -787,6 +793,20 @@ export interface ImageNode extends NodeBase {
   /** Crop in normalised source coordinates (0–1). */
   crop: { x: number; y: number; width: number; height: number };
   preserveAspect: boolean;
+  /**
+   * Where the picture sits inside its frame when `preserveAspect` letterboxes
+   * it — a montage tile's frame comes from `gridCells` and has nothing to do
+   * with the micrograph's own shape, so the spare space is real and has to go
+   * somewhere. Absent is `'middle'` on both axes, which is exactly the
+   * centring every image had before these existed, so no saved figure moves.
+   *
+   * A tile uploaded into a montage is written `alignY: 'start'` explicitly:
+   * a row of differently-proportioned micrographs reads as a row only when
+   * their tops line up, and centring leaves each one floating at its own
+   * height.
+   */
+  alignX?: FitAlign;
+  alignY?: FitAlign;
 }
 
 /**
@@ -922,6 +942,66 @@ export interface GroupNode extends NodeBase {
   type: 'group';
 }
 
+/**
+ * A heading over a row/column of panels or images, or a caption on a single
+ * one — the same mechanism at both granularities, since a caption is simply
+ * a group of one member. Top-level (`parentId: null`, absolute page
+ * position), the same family as `PanelLabelNode`/`BracketNode`: its own frame
+ * is recomputed from its members' positions rather than authored directly.
+ *
+ * `memberIds` may name `panel` or `image` nodes belonging to different parent
+ * panels — a heading is not confined to one montage's own grid — but every
+ * member must resolve and the array must be non-empty (`schema.ts`'s
+ * referential-integrity check); a member that is later deleted breaks the
+ * whole group rather than leaving a heading over a partial row, the same
+ * `deleteNode` fixed-point sweep already applied to `bracket`/`panel-label`.
+ */
+export interface GroupLabelNode extends NodeBase {
+  type: 'group-label';
+  memberIds: readonly NodeId[];
+  /** Which side of the members' combined bounds the heading sits on. */
+  edge: 'top' | 'left' | 'right';
+  /**
+   * Kept in sync with `richText` (when present) by `plainTextOfRuns`, the
+   * same discipline `TextNode.text` is held to.
+   */
+  title: string;
+  /** Same sibling-array shape as `AxisSpec.title`/`richText`. */
+  richText?: readonly TextRun[];
+  /**
+   * Absent/false is text alone — the published convention, and the default
+   * since round 33. `true` adds the rule.
+   */
+  showRule?: boolean;
+  /**
+   * `'overlay'` draws the title *on* the picture instead of in a reserved band
+   * above or beside it — how the csLFM and VSCyto reference figures caption
+   * channels and timestamps. An overlaid label reserves no space at all, so it
+   * cannot move a panel or widen a grid gutter. Absent is `'outside'`.
+   */
+  placement?: 'outside' | 'overlay';
+  /**
+   * Title colour. Absent is the theme foreground outside, and white on an
+   * overlay — deliberately a stated choice rather than a measured one: reading
+   * the image's own brightness would need pixel access, which `packages/render`
+   * must not have, and a value sampled once in the app would go stale the
+   * moment the crop changed.
+   */
+  labelColor?: string;
+  /**
+   * Clear space between the heading's own ink — its rule, or its text where
+   * there is no rule — and the content it labels. Absent is
+   * `GROUP_LABEL_GAP_MM`. Exposed because how much air a heading needs
+   * depends on what sits under it: a rule sitting a hair above a micrograph
+   * reads as part of the picture, while the same gap over a plot is fine.
+   */
+  gapMm?: number;
+  stroke?: Stroke;
+  style?: TextStyle;
+  /** Manual nudge, the same "auto base + stored delta" shape as `BracketNode.userOffsetMm`. */
+  userOffsetMm?: PointMm;
+}
+
 export type FigureNode =
   | PanelNode
   | PlotNode
@@ -932,7 +1012,8 @@ export type FigureNode =
   | ArrowNode
   | BracketNode
   | ScaleBarNode
-  | GroupNode;
+  | GroupNode
+  | GroupLabelNode;
 
 export type FigureNodeType = FigureNode['type'];
 

@@ -194,7 +194,7 @@ const checkTextSize: Rule = ({ scene, theme, document }) => {
    * `style` at all for `checkTextSize`'s other roles to read.
    */
   const ownFontSizePt = (owner: FigureDocument['nodes'][string], role: string): number | undefined => {
-    if ('style' in owner) return owner.style.fontSizePt;
+    if ('style' in owner) return owner.style?.fontSizePt;
     if (role === 'point-label' && owner.type === 'plot') return owner.pointLabelSizePt;
     return undefined;
   };
@@ -314,7 +314,7 @@ const checkFontConsistency: Rule = ({ scene, theme, document }) => {
   // is not — a family set in `themeOverrides` — clearing them fixes nothing, so
   // no fix is offered rather than a button that appears to do nothing.
   const overridden = Object.values(document.nodes)
-    .filter((node) => 'style' in node && node.style.fontFamily !== undefined)
+    .filter((node) => 'style' in node && node.style?.fontFamily !== undefined)
     .map((node) => node.id);
 
   return [

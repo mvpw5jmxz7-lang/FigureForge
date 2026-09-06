@@ -8,15 +8,21 @@
  * just plots.
  */
 
-import { useRef, useState } from 'react';
+import { useRef, useState, type ChangeEvent } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
+  GROUP_LABEL_GAP_MM,
+  GROUP_LABEL_GAP_NO_RULE_MM,
   GRIDLINE_STYLES,
   LINE_STYLES,
   POINT_SHAPES,
+  addAsset,
+  addGroupLabel,
   childrenOf,
   effectiveDpi,
+  fillPanelChildren,
+  fitMontageToImages,
   findAsset,
   findDataset,
   formatMm,
@@ -26,10 +32,14 @@ import {
   normaliseArrowFrame,
   plainTextOfRuns,
   reconcileTextEdit,
+  reflowGroupLabels,
   resizePanel,
+  montageTiles,
+  reserveSpaceForGroupLabels,
   resyncScaleBars,
   scaleBarWidthMm,
   setImageCrop,
+  setMontageCellImage,
   setScaleBarCalibration,
   toggleRunFormat,
   toSeries,
@@ -86,7 +96,9 @@ function ColorConflictWarning({ conflict }: { conflict: ColorConflict }) {
   );
 }
 import { deleteNodesWithLayout } from '../deleteNodes.js';
+import { ACCEPTED_IMAGE_TYPES, importImage } from '../imageImport.js';
 import { insertAtCaret } from '../textEditing.js';
+import type { AssetsApi } from '../assets.js';
 import type { DocumentApi } from '../useDocument.js';
 
 /** Every plot type. All ten render distinctly since round 7. */
@@ -559,6 +571,9 @@ export interface InspectorProps {
   /** Volcano plot whose points are being picked directly on the canvas. */
   labelPickNodeId: NodeId | null;
   onLabelPickNodeChange: (id: NodeId | null) => void;
+  /** For per-cell montage image upload/replace — registering a new asset
+   *  needs the same store `DataTab`'s own image import already uses. */
+  assets: AssetsApi;
 }
 
 export function InspectorTab({
@@ -573,6 +588,7 @@ export function InspectorTab({
   onMeasureNodeChange,
   labelPickNodeId,
   onLabelPickNodeChange,
+  assets,
 }: InspectorProps) {
   const { document: doc, commit } = api;
 
@@ -644,6 +660,7 @@ export function InspectorTab({
       {(node.type === 'text' || node.type === 'panel-label') && (
         <TextFields api={api} node={node} />
       )}
+      {node.type === 'group-label' && <GroupLabelFields api={api} node={node} theme={theme} />}
       {node.type === 'bracket' && (
         <label className="field block">
           Label
@@ -655,7 +672,7 @@ export function InspectorTab({
       )}
       {node.type === 'panel' && (
         <>
-          <PanelFields api={api} node={node} />
+          <PanelFields api={api} node={node} theme={theme} assets={assets} onSelectionChange={onSelectionChange} />
           {/* A click on the canvas selects the panel, so the plot or micrograph
               inside it needs a way in that is not "double-click and hope".
               Named, because a montage has several and "Edit the image inside"
@@ -733,6 +750,7 @@ export function InspectorTab({
                   // alone would leave the plot at its old size inside it.
                   if (node.type === 'panel') resizePanel(draft, node.id, frame);
                   else updateNode(draft, node.id, { frame });
+                  reflowGroupLabels(draft);
                   reflowBrackets(draft, theme);
                 });
               }}
@@ -2292,6 +2310,244 @@ function TextFields({
   );
 }
 
+/**
+ * A heading over a row/column of panels/images, or a caption on one.
+ *
+ * Rich-text title editing mirrors `TextFields`'s free-standing `TextNode`
+ * branch exactly — same `useRichTextToggle`/`FormatToggleRow`/
+ * `reconcileTextEdit` pipeline — since a heading's title is the same kind of
+ * short, formattable string. Every write that could change how much room the
+ * heading needs (its edge, its rule, its font size) re-derives that room the
+ * same way `Toolbar.tsx`'s own `addGroupTitle` does when the heading is
+ * first created: a same-panel heading forces an immediate re-tile of the one
+ * montage panel that owns it; a cross-panel heading calls
+ * `reserveSpaceForGroupLabels`, safe here because editing a heading in the
+ * Inspector is a deliberate action, never the manual drag/resize this
+ * codebase otherwise never runs it after.
+ */
+function GroupLabelFields({
+  api,
+  node,
+  theme,
+}: {
+  api: DocumentApi;
+  node: Extract<FigureNode, { type: 'group-label' }>;
+  theme: Theme;
+}) {
+  const { commit } = api;
+
+  const applyAndReflow = (label: string, mutate: (target: Extract<FigureNode, { type: 'group-label' }>) => void): void => {
+    commit(label, (draft) => {
+      const target = draft.nodes[node.id];
+      if (!target || target.type !== 'group-label') return;
+      mutate(target);
+
+      const parentIds = new Set(target.memberIds.map((id) => draft.nodes[id]?.parentId ?? null));
+      const soleParentId = parentIds.size === 1 ? [...parentIds][0] : null;
+      const soleParent = soleParentId ? draft.nodes[soleParentId] : null;
+      if (soleParent?.type === 'panel' && soleParent.contentGrid) {
+        fillPanelChildren(draft, soleParent.id, soleParent.frame);
+      } else {
+        reserveSpaceForGroupLabels(draft);
+      }
+      reflowGroupLabels(draft);
+    });
+  };
+
+  const runs: readonly TextRun[] = node.richText ?? [{ text: node.title }];
+  const commitRuns = (nextRuns: readonly TextRun[]): void => {
+    applyAndReflow('Format group title', (target) => {
+      target.richText = nextRuns.length > 0 ? nextRuns : undefined;
+      target.title = plainTextOfRuns(nextRuns);
+    });
+  };
+  const { textareaRef, onSelect, toggle, isActive } = useRichTextToggle(runs, false, false, commitRuns);
+
+  return (
+    <>
+      <label className="field block">
+        Title
+        <textarea
+          ref={textareaRef}
+          value={node.title}
+          onChange={(e) => commitRuns(reconcileTextEdit(runs, e.target.value))}
+          onSelect={onSelect}
+        />
+      </label>
+      <FormatToggleRow
+        isActive={isActive}
+        onToggle={toggle}
+        onInsertSymbol={(char) => {
+          const el = textareaRef.current;
+          if (!el) return;
+          insertAtCaret(el, char, node.title, (next) => commitRuns(reconcileTextEdit(runs, next)));
+        }}
+      />
+
+      <div className="field-row">
+        <label className="field">
+          Position
+          <select
+            value={node.edge}
+            onChange={(e) => applyAndReflow('Change heading position', (target) => {
+              target.edge = e.target.value as 'top' | 'left' | 'right';
+            })}
+          >
+            <option value="top">Above (row heading)</option>
+            <option value="left">Left (column heading)</option>
+            <option value="right">Right (column heading)</option>
+          </select>
+        </label>
+        <label className="field">
+          Size (pt)
+          <input
+            type="number"
+            min={4}
+            max={24}
+            step={0.5}
+            value={node.style?.fontSizePt ?? theme.type.annotationPt}
+            onChange={(e) => {
+              const value = Number(e.target.value);
+              if (Number.isFinite(value) && value > 0) {
+                applyAndReflow('Change heading size', (target) => {
+                  target.style = { ...target.style, fontSizePt: value };
+                });
+              }
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="field-row">
+        <label className="field">
+          Placement
+          <select
+            value={node.placement ?? 'outside'}
+            onChange={(e) =>
+              applyAndReflow('Change heading placement', (target) => {
+                target.placement = e.target.value === 'overlay' ? 'overlay' : undefined;
+              })
+            }
+          >
+            <option value="outside">Beside the image</option>
+            <option value="overlay">On the image</option>
+          </select>
+        </label>
+        <label className="field">
+          Colour
+          <input
+            type="color"
+            value={node.labelColor ?? (node.placement === 'overlay' ? '#ffffff' : theme.foreground)}
+            onChange={(e) =>
+              applyAndReflow('Change heading colour', (target) => {
+                target.labelColor = e.target.value;
+              })
+            }
+          />
+        </label>
+      </div>
+      {node.placement === 'overlay' && (
+        <p className="hint">
+          Drawn on the picture, so it takes no space of its own and nothing on
+          the page moves to make room. White with a dark outline by default, which
+          reads on most micrographs; set a colour if it does not.
+        </p>
+      )}
+
+      {/* A rule is never drawn over a picture and an overlay reserves no gap,
+          so both controls would adjust nothing there — the standing "a control
+          that visibly does nothing is a defect" rule. */}
+      {node.placement !== 'overlay' && (
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={node.showRule ?? false}
+          onChange={(e) =>
+            applyAndReflow('Toggle heading rule', (target) => {
+              target.showRule = e.target.checked;
+            })
+          }
+        />
+        Show rule
+      </label>
+      )}
+
+      {node.placement !== 'overlay' && (node.showRule ?? false) && (
+        <div className="field-row">
+          <label className="field">
+            Rule colour
+            <input
+              type="color"
+              value={node.stroke?.color ?? '#000000'}
+              onChange={(e) =>
+                applyAndReflow('Change rule colour', (target) => {
+                  target.stroke = { widthMm: 0.35, ...target.stroke, color: e.target.value };
+                })
+              }
+            />
+          </label>
+          <label className="field">
+            Rule width
+            <input
+              type="number"
+              min={0.05}
+              step={0.05}
+              value={node.stroke?.widthMm ?? 0.35}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value > 0) {
+                  applyAndReflow('Change rule width', (target) => {
+                    target.stroke = { color: '#000000', ...target.stroke, widthMm: value };
+                  });
+                }
+              }}
+            />
+          </label>
+        </div>
+      )}
+
+      {node.placement !== 'overlay' && (
+        <>
+          <label className="field">
+            Gap to content
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={
+                node.gapMm ??
+                ((node.showRule ?? false) ? GROUP_LABEL_GAP_MM : GROUP_LABEL_GAP_NO_RULE_MM)
+              }
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value >= 0) {
+                  applyAndReflow('Change heading gap', (target) => {
+                    target.gapMm = value;
+                  });
+                }
+              }}
+            />
+          </label>
+          <p className="hint">
+            Clear space in millimetres between this heading and what it labels.
+            The row or column it sits against grows to hold it, so raising this
+            pushes the content down rather than printing over it. Bare text
+            starts tighter than a rule does, which needs room not to read as a
+            border on the picture.
+          </p>
+        </>
+      )}
+
+      <p className="hint">
+        Captions {node.memberIds.length === 1 ? 'one panel/image' : `${node.memberIds.length} panels/images`}.
+        Deleting any one of them removes this heading too.
+        {node.memberIds.length > 1 &&
+          ' A heading over fewer of the same panels — a caption on just one — sits underneath this one rather than on top of it.'}
+      </p>
+    </>
+  );
+}
+
 /** Crop is stored 0–1; nobody thinks in 0.317, so the UI works in percent. */
 const CROP_KEYS = ['x', 'y', 'width', 'height'] as const;
 
@@ -2310,9 +2566,41 @@ function ImageFields({
   cropping: boolean;
   onCropNodeChange: (id: NodeId | null) => void;
 }) {
-  const { commit } = api;
+  const { commit, newId } = api;
   const asset = findAsset(doc, node.assetId);
   const isVector = asset?.mimeType === 'image/svg+xml';
+
+  /*
+   * The caption on this pane, if it has one. Editing a pane's own label from
+   * the pane is what was asked for — reaching it previously meant selecting
+   * the label itself, which on a tightly packed montage is a small target.
+   * A caption is a `GroupLabelNode` of one member, so this is a lookup rather
+   * than a second kind of label.
+   */
+  const ownLabel = Object.values(doc.nodes).find(
+    (n): n is Extract<FigureNode, { type: 'group-label' }> =>
+      n.type === 'group-label' && n.memberIds.length === 1 && n.memberIds[0] === node.id,
+  );
+
+  const addOwnLabel = (): void => {
+    commit('Label image', (draft) => {
+      const label = addGroupLabel(draft, newId, {
+        memberIds: [node.id],
+        edge: 'top',
+        title: node.name,
+        fontSizePt: theme.type.annotationPt,
+      });
+      if (!label) return;
+      const parent = node.parentId ? draft.nodes[node.parentId] : null;
+      if (parent?.type === 'panel' && parent.contentGrid) {
+        fillPanelChildren(draft, parent.id, parent.frame);
+      } else {
+        reserveSpaceForGroupLabels(draft);
+      }
+      reflowGroupLabels(draft);
+      reflowBrackets(draft, theme);
+    });
+  };
 
   const visiblePx = node.naturalPx.width * (node.crop.width || 1);
   const dpi = node.frame.width > 0 ? effectiveDpi(visiblePx, node.frame.width) : 0;
@@ -2333,6 +2621,25 @@ function ImageFields({
         </p>
       )}
 
+      {/* This pane's own caption, edited here rather than only by selecting
+          the label itself — the same `GroupLabelFields` the label's own
+          Inspector shows, so the two cannot drift apart. */}
+      <h4>Label</h4>
+      {ownLabel ? (
+        <GroupLabelFields api={api} node={ownLabel} theme={theme} />
+      ) : (
+        <>
+          <button type="button" onClick={addOwnLabel}>
+            Add label
+          </button>
+          <p className="hint">
+            A title above this image. Its size, colour and placement are edited
+            here once it exists.
+          </p>
+        </>
+      )}
+
+      <h4>Image</h4>
       <label className="check">
         <input
           type="checkbox"
@@ -2345,6 +2652,57 @@ function ImageFields({
         />
         Keep aspect ratio
       </label>
+
+      {/* Only meaningful while the picture is letterboxed: a stretched image
+          fills its frame exactly, so there is no spare space to place it in
+          and a control for it would adjust nothing. The same "a control that
+          visibly does nothing is a defect" rule the plot Inspector already
+          follows. */}
+      {node.preserveAspect && (
+        <>
+          <div className="field-row">
+            <label className="field">
+              Align across
+              <select
+                value={node.alignX ?? 'middle'}
+                onChange={(e) =>
+                  commit('Change image alignment', (draft) =>
+                    updateNode<typeof node>(draft, node.id, {
+                      alignX: e.target.value as 'start' | 'middle' | 'end',
+                    }),
+                  )
+                }
+              >
+                <option value="start">Left</option>
+                <option value="middle">Centre</option>
+                <option value="end">Right</option>
+              </select>
+            </label>
+            <label className="field">
+              Align down
+              <select
+                value={node.alignY ?? 'middle'}
+                onChange={(e) =>
+                  commit('Change image alignment', (draft) =>
+                    updateNode<typeof node>(draft, node.id, {
+                      alignY: e.target.value as 'start' | 'middle' | 'end',
+                    }),
+                  )
+                }
+              >
+                <option value="start">Top</option>
+                <option value="middle">Middle</option>
+                <option value="end">Bottom</option>
+              </select>
+            </label>
+          </div>
+          <p className="hint">
+            Where the picture sits in its frame when it does not fill it. A tile
+            uploaded into a montage starts at the top, so a row of
+            differently-shaped images lines up along its top edge.
+          </p>
+        </>
+      )}
 
       <h4>Crop</h4>
       <button
@@ -2405,6 +2763,7 @@ function ImageFields({
                 (target.naturalPx.height * target.crop.height);
               target.frame = { ...target.frame, height: target.frame.width / aspect };
               resyncScaleBars(draft);
+              reflowGroupLabels(draft);
               reflowBrackets(draft, theme);
             })
           }
@@ -2843,29 +3202,186 @@ function ShapeFields({
 function PanelFields({
   api,
   node,
+  theme,
+  assets,
+  onSelectionChange,
 }: {
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'panel' }>;
+  theme: Theme;
+  assets: AssetsApi;
+  onSelectionChange: (ids: NodeId[]) => void;
 }) {
-  const { commit, document: doc } = api;
+  const { commit, document: doc, newId } = api;
+  const cellFileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingCellIndex, setPendingCellIndex] = useState<number | null>(null);
+  const [cellUploadError, setCellUploadError] = useState<string | null>(null);
 
   // Only plots and images take cells; a scale bar or an arrow is parented to
   // the tile it annotates, not to the panel, so it is not one of them.
-  const tileCount = childrenOf(doc.nodes, node.id).filter(
-    (c) => c.type === 'plot' || c.type === 'image',
-  ).length;
+  const tiles = childrenOf(doc.nodes, node.id).filter((c) => c.type === 'plot' || c.type === 'image');
+  const tileCount = tiles.length;
   const grid = node.contentGrid ?? { rows: 1, cols: Math.max(1, tileCount), gutterMm: 1 };
+  // A montage can be created empty (Stage 2's "Add empty montage") and filled
+  // in one cell at a time, so the tile controls must show for a declared grid
+  // even before it has any children — not only once there is "something to
+  // tile" in the usual multi-image-import sense.
+  const isMontage = tileCount > 1 || node.contentGrid !== undefined;
 
   const setGrid = (patch: Partial<typeof grid>): void => {
     commit('Change tile grid', (draft) => {
       const target = draft.nodes[node.id];
       if (target?.type !== 'panel') return;
       target.contentGrid = { ...grid, ...patch };
+      // Changing the grid changes the shape the tiles want, so re-fit before
+      // re-tiling. A hand-set rows/cols is respected — `fitMontageToImages`
+      // fits the panel's *shape* and never rewrites the arrangement.
+      fitMontageToImages(draft, node.id);
       // Re-tile immediately: the frames are stored on the children, so an
       // unapplied grid is a setting that claims an arrangement the figure does
       // not have.
       resizePanel(draft, node.id, target.frame);
+      reflowGroupLabels(draft);
     });
+  };
+
+  /**
+   * Turn auto-fitting on or off for this montage.
+   *
+   * Off clears `aspectLock` back to null, which is what restores free manual
+   * resize — leaving the lock behind would keep constraining a drag the author
+   * has just said they want to do by hand.
+   */
+  const setAutoFit = (on: boolean): void => {
+    commit(on ? 'Fit montage to images' : 'Stop fitting montage', (draft) => {
+      const target = draft.nodes[node.id];
+      if (target?.type !== 'panel' || !target.contentGrid) return;
+      target.contentGrid = { ...target.contentGrid, autoFit: on };
+      if (on) {
+        fitMontageToImages(draft, node.id);
+      } else {
+        target.aspectLock = null;
+      }
+      resizePanel(draft, node.id, target.frame);
+      reflowGroupLabels(draft);
+    });
+  };
+
+  /**
+   * One size for every label in this montage — the requested single edit.
+   *
+   * Covers each tile's own caption *and* any heading spanning the panel, since
+   * a montage whose row heading is a different size from its pane captions is
+   * exactly the inconsistency this exists to remove.
+   */
+  const setAllLabelSizes = (sizePt: number): void => {
+    commit('Set montage label size', (draft) => {
+      const tileIds = new Set(montageTiles(draft.nodes, node.id).map((t) => t.id));
+      for (const candidate of Object.values(draft.nodes)) {
+        if (candidate.type !== 'group-label') continue;
+        const labelsThisMontage = candidate.memberIds.every(
+          (id) => tileIds.has(id) || id === node.id,
+        );
+        if (!labelsThisMontage) continue;
+        candidate.style = { ...candidate.style, fontSizePt: sizePt };
+      }
+      const target = draft.nodes[node.id];
+      if (target?.type === 'panel') {
+        fitMontageToImages(draft, node.id);
+        resizePanel(draft, node.id, target.frame);
+      }
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+  };
+
+  /** Sizes currently in use across this montage's labels, for the readout. */
+  const montageLabelSizes = (() => {
+    const tileIds = new Set(childrenOf(doc.nodes, node.id).map((t) => t.id));
+    const sizes = new Set<number>();
+    for (const candidate of Object.values(doc.nodes)) {
+      if (candidate.type !== 'group-label') continue;
+      if (!candidate.memberIds.every((id) => tileIds.has(id) || id === node.id)) continue;
+      sizes.add(candidate.style?.fontSizePt ?? theme.type.annotationPt);
+    }
+    return [...sizes];
+  })();
+
+  const requestCellUpload = (index: number): void => {
+    setPendingCellIndex(index);
+    setCellUploadError(null);
+    cellFileInputRef.current?.click();
+  };
+
+  // Tiles that already carry a caption of their own, so the button offering
+  // to add one disappears rather than silently making a second heading over
+  // the same tile — two captions in one place, stacked, is never wanted.
+  const labelledTileIds = new Set(
+    Object.values(doc.nodes)
+      .filter((n) => n.type === 'group-label' && n.memberIds.length === 1)
+      .map((n) => (n as Extract<FigureNode, { type: 'group-label' }>).memberIds[0]!),
+  );
+
+  /**
+   * Caption one tile, through the same `addGroupLabel` the Toolbar's own
+   * "Add group title" uses — a caption is a group of one member, so this
+   * needs no second mechanism. The same-panel branch re-tiles rather than
+   * pushing siblings: the clearance is a grid gutter here, which
+   * `fillPanelChildren` recomputes live.
+   */
+  const addTileLabel = (tileId: NodeId): void => {
+    commit('Label montage cell', (draft) => {
+      const label = addGroupLabel(draft, newId, {
+        memberIds: [tileId],
+        edge: 'top',
+        title: 'Cell title',
+        // Matches the tick labels and annotations around it — see the
+        // Toolbar's own "Add group title".
+        fontSizePt: theme.type.annotationPt,
+      });
+      if (!label) return;
+      const target = draft.nodes[node.id];
+      if (target?.type === 'panel') fillPanelChildren(draft, target.id, target.frame);
+      reflowGroupLabels(draft);
+      reflowBrackets(draft, theme);
+      // Select it, as the Toolbar's own "Add group title" does: the very next
+      // thing an author wants is to replace the placeholder title.
+      onSelectionChange([label.id]);
+    });
+  };
+
+  const onCellFileChosen = async (e: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0] ?? null;
+    e.target.value = '';
+    const cellIndex = pendingCellIndex;
+    setPendingCellIndex(null);
+    if (!file || cellIndex === null) return;
+
+    try {
+      const imported = await importImage(file);
+      const assetId = newId();
+      // Bytes before the commit, the same order `importImageFiles` uses: a
+      // document referencing an asset the store has never seen renders a
+      // placeholder.
+      assets.store.add(assetId, imported.bytes);
+      commit(`Set montage cell ${cellIndex + 1}`, (draft) => {
+        addAsset(draft, {
+          id: assetId,
+          filename: imported.filename,
+          mimeType: imported.bytes.mimeType,
+          byteLength: imported.bytes.original.length,
+          naturalPx: imported.naturalPx,
+        });
+        setMontageCellImage(draft, newId, node.id, cellIndex, {
+          assetId,
+          naturalPx: imported.naturalPx ?? { width: 0, height: 0 },
+        });
+        reflowGroupLabels(draft);
+        reflowBrackets(draft, theme);
+      });
+    } catch (error) {
+      setCellUploadError(String(error));
+    }
   };
 
   return (
@@ -2914,10 +3430,11 @@ function PanelFields({
         </button>
       )}
 
-      {/* Only where there is something to tile. A one-child panel has no grid
-          to speak of, and offering rows and columns for it would suggest the
+      {/* Only where there is something to tile, or a declared grid waiting to
+          be filled. A one-child panel with no grid at all has nothing to
+          speak of, and offering rows and columns for it would suggest the
           single image is being placed in a cell rather than filling the panel. */}
-      {tileCount > 1 && (
+      {isMontage && (
         <>
           <h4>Tiles</h4>
           <div className="field-row">
@@ -2926,7 +3443,7 @@ function PanelFields({
               <input
                 type="number"
                 min={1}
-                max={tileCount}
+                max={Math.max(tileCount, grid.rows, 12)}
                 value={grid.rows}
                 onChange={(e) => setGrid({ rows: Math.max(1, Number(e.target.value) || 1) })}
               />
@@ -2936,7 +3453,7 @@ function PanelFields({
               <input
                 type="number"
                 min={1}
-                max={tileCount}
+                max={Math.max(tileCount, grid.cols, 12)}
                 value={grid.cols}
                 onChange={(e) => setGrid({ cols: Math.max(1, Number(e.target.value) || 1) })}
               />
@@ -2958,6 +3475,96 @@ function PanelFields({
               ? ' — too few cells, so the extra tiles keep their current size rather than stacking invisibly at the origin.'
               : '. Tiles fill cells in stacking order; use the Layers list to reorder them. Each keeps its own crop, scale bar and annotations.'}
           </p>
+
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={grid.autoFit ?? false}
+              onChange={(e) => setAutoFit(e.target.checked)}
+            />
+            Fit panel shape to the images
+          </label>
+          <p className="hint">
+            {grid.autoFit ?? false
+              ? 'The panel is kept at the shape that lets every picture fill its cell, so no space is wasted letterboxing. Resizing by hand keeps that shape; turn this off to reshape freely.'
+              : 'Off: tiles letterbox inside whatever shape the panel happens to be. Turning it on sizes the panel to the pictures.'}
+          </p>
+
+          {/* One size for every label in the montage — the pane captions and
+              any heading spanning the panel — so they cannot drift apart. */}
+          <div className="field-row">
+            <label className="field">
+              Label size (pt)
+              <input
+                type="number"
+                min={4}
+                max={24}
+                step={0.5}
+                value={montageLabelSizes.length === 1 ? montageLabelSizes[0] : theme.type.annotationPt}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  if (Number.isFinite(value) && value > 0) setAllLabelSizes(value);
+                }}
+              />
+            </label>
+          </div>
+          <p className="hint">
+            {montageLabelSizes.length === 0
+              ? 'No labels on this montage yet. Add one from a tile, or from “Label cell” below.'
+              : montageLabelSizes.length === 1
+                ? 'Every label in this montage is this size. Changing it here changes all of them at once.'
+                : `Labels here are currently ${[...montageLabelSizes].sort((a, b) => a - b).join(', ')} pt — set a value to make them all match.`}
+          </p>
+
+          {/* One button per declared cell, addressed by the same z-order index
+              `fillPanelChildren` tiles into — so an author can fill an empty
+              montage one cell at a time, or replace a tile in place, without
+              leaving the Inspector. A cell beyond the current tile count is
+              always "the next empty slot": there is no way to leave a gap in
+              the middle of a z-ordered grid, so every still-empty button
+              really does add to the same place. */}
+          <div className="field-row" style={{ flexWrap: 'wrap' }}>
+            {Array.from({ length: grid.rows * grid.cols }, (_, index) => {
+              const occupant = tiles[index];
+              return (
+                <button key={index} type="button" onClick={() => requestCellUpload(index)}>
+                  {occupant ? `Replace cell ${index + 1} (${occupant.name})` : `Upload to cell ${index + 1}`}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* A label over one tile is the same `GroupLabelNode` mechanism a
+              heading over several uses — a caption is a group of one — so this
+              is a shortcut to the Toolbar's own action rather than a second
+              kind of label. Offered per cell because that is how it is
+              wanted: each pane titled, under whatever heading spans the row.
+              `groupLabelExtentMm` is what keeps the two from colliding. */}
+          {tiles.length > 0 && (
+            <>
+              <div className="field-row" style={{ flexWrap: 'wrap' }}>
+                {tiles.map((tile, index) =>
+                  labelledTileIds.has(tile.id) ? null : (
+                    <button key={tile.id} type="button" onClick={() => addTileLabel(tile.id)}>
+                      Label cell {index + 1}
+                    </button>
+                  ),
+                )}
+              </div>
+              <p className="hint">
+                A cell&rsquo;s own label sits directly above it, under any heading
+                spanning the whole row. The row grows to hold both.
+              </p>
+            </>
+          )}
+          <input
+            ref={cellFileInputRef}
+            type="file"
+            accept={ACCEPTED_IMAGE_TYPES}
+            style={{ display: 'none' }}
+            onChange={(e) => void onCellFileChosen(e)}
+          />
+          {cellUploadError && <p className="hint error">{cellUploadError}</p>}
         </>
       )}
     </>

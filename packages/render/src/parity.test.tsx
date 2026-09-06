@@ -12,6 +12,8 @@ import {
   absoluteFrame,
   addArrow,
   addAsset,
+  addEmptyMontagePanel,
+  addGroupLabel,
   addPanelWithImage,
   addPanelWithPlot,
   addScaleBar,
@@ -22,9 +24,12 @@ import {
   createIdFactory,
   editDocument,
   inferFormat,
+  montageCellRects,
   parseDelimited,
+  reflowGroupLabels,
   relabelPanels,
   setImageCrop,
+  setMontageCellImage,
   type Dataset,
   type FigureDocument,
   type TextRun,
@@ -1480,6 +1485,134 @@ function makeImageDocument(): FigureDocument {
   });
 }
 
+describe('group labels', () => {
+  function makeGroupLabelDocument(): FigureDocument {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 100,
+      presetId: 'nature-double',
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    return editDocument(base, (draft) => {
+      const dataset = makeDataset(newId());
+      draft.datasets = [dataset];
+
+      const { panel: panelA } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 20, width: 80, height: 60 },
+        name: 'One',
+        datasetId: dataset.id,
+        plotType: 'bar-dot',
+      });
+      const { panel: panelB } = addPanelWithPlot(draft, newId, {
+        frame: { x: 90, y: 20, width: 80, height: 60 },
+        name: 'Two',
+        datasetId: dataset.id,
+        plotType: 'dot',
+      });
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+
+      // A heading spanning two independent panels.
+      addGroupLabel(draft, newId, {
+        memberIds: [panelA.id, panelB.id],
+        edge: 'top',
+        title: 'Cohort A vs Cohort B',
+      });
+      // A caption on a single panel, to the left, reading bottom-to-top.
+      addGroupLabel(draft, newId, {
+        memberIds: [panelA.id],
+        edge: 'left',
+        title: 'Baseline',
+      });
+    });
+  }
+
+  const doc = makeGroupLabelDocument();
+  const scene = renderDocument(doc, { theme: NATURE_THEME });
+
+  it('produces the same markup from both adapters', () => {
+    const fromString = normalise(toSvgString(scene));
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(fromString);
+  });
+
+  it('draws one bare title per heading — no rule unless asked for', () => {
+    expect(collectByRole(scene, 'group-label')).toHaveLength(2);
+    // A published column heading is bare text; the rule is the exception, so
+    // it has to be opted into. This is what a fresh heading looks like.
+    expect(collectByRole(scene, 'group-label-rule')).toEqual([]);
+    // Kept distinct from the ordinary panel letters and axis titles.
+    expect(collectByRole(scene, 'panel-label')).toHaveLength(2);
+  });
+
+  it('draws the rule when a heading opts in, at the picture\'s own width', () => {
+    const ruled = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'group-label') node.showRule = true;
+      }
+    });
+    const ruledScene = renderDocument(ruled, { theme: NATURE_THEME });
+    const rules = collectByRole(ruledScene, 'group-label-rule');
+    expect(rules).toHaveLength(2);
+
+    // The top heading's rule spans exactly its own frame, which
+    // `groupLabelFrame` measures from the members' drawn content.
+    const topLabel = Object.values(ruled.nodes).find(
+      (n) => n.type === 'group-label' && n.edge === 'top',
+    )!;
+    const horizontal = rules.find((r) => r.attrs?.y1 === r.attrs?.y2)!;
+    expect(Number(horizontal.attrs?.x2) - Number(horizontal.attrs?.x1)).toBeCloseTo(
+      topLabel.frame.width,
+      3,
+    );
+  });
+
+  it('sets headings at the annotation size, non-bold', () => {
+    // The same size and weight as the tick labels around them — a caption, not
+    // a panel identifier. `font-size` is emitted in millimetres, like every
+    // other length this renderer writes.
+    const expectedMm = (NATURE_THEME.type.annotationPt * 25.4) / 72;
+    for (const label of collectByRole(scene, 'group-label')) {
+      expect(Number(label.attrs?.['font-size'])).toBeCloseTo(expectedMm, 6);
+      // `textAttrs` omits `font-weight` for anything but bold, so its absence
+      // is the non-bold claim — asserting the absence is what would catch the
+      // old `fontWeight: 'bold'` default coming back.
+      expect(label.attrs?.['font-weight']).toBeUndefined();
+    }
+  });
+
+  it('the cross-panel heading spans both panels\' combined width', () => {
+    const groupLabelNode = Object.values(doc.nodes).find(
+      (n) => n.type === 'group-label' && n.edge === 'top',
+    )!;
+    const panelA = Object.values(doc.nodes).find((n) => n.name === 'One')!;
+    const panelB = Object.values(doc.nodes).find((n) => n.name === 'Two')!;
+    expect(groupLabelNode.frame.x).toBeCloseTo(Math.min(panelA.frame.x, panelB.frame.x), 6);
+    expect(groupLabelNode.frame.width).toBeCloseTo(
+      Math.max(panelA.frame.x + panelA.frame.width, panelB.frame.x + panelB.frame.width) -
+        Math.min(panelA.frame.x, panelB.frame.x),
+      6,
+    );
+    // It sits above both panels — never overlapping either.
+    expect(groupLabelNode.frame.y + groupLabelNode.frame.height).toBeLessThanOrEqual(
+      Math.min(panelA.frame.y, panelB.frame.y) + 1e-6,
+    );
+  });
+
+  it('is not offered as an axis-title-style edit target — it has its own', () => {
+    const labels = collectByRole(scene, 'group-label');
+    for (const label of labels) {
+      expect(label.editTarget).toBe('title');
+      expect(label.tag).toBe('text');
+    }
+  });
+});
+
 const resolveAsset = (): string => PNG_DATA_URI;
 
 describe('image and annotation nodes', () => {
@@ -1877,5 +2010,324 @@ describe('escaping', () => {
     expect(svg).toContain('p &lt; 0.05 &amp; &quot;significant&quot;');
     // A raw < inside the document would produce invalid XML.
     expect(svg).not.toContain('p < 0.05');
+  });
+});
+
+describe('montage editor chrome', () => {
+  const MONTAGE_ASSET = 'montage-asset';
+
+  /** A 2×2 montage with one tile filled, so three cells are still empty. */
+  function makeMontageDocument(): FigureDocument {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      presetId: 'nature-double',
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    return editDocument(base, (draft) => {
+      addAsset(draft, {
+        id: MONTAGE_ASSET,
+        filename: 'tile.png',
+        mimeType: 'image/png',
+        byteLength: 128,
+        naturalPx: NATURAL_PX,
+      });
+      const panel = addEmptyMontagePanel(draft, newId, {
+        frame: { x: 4, y: 4, width: 60, height: 50 },
+        name: 'Montage',
+        rows: 2,
+        cols: 2,
+        gutterMm: 2,
+      });
+      setMontageCellImage(draft, newId, panel.id, 0, {
+        assetId: MONTAGE_ASSET,
+        naturalPx: NATURAL_PX,
+      });
+    });
+  }
+
+  const doc = makeMontageDocument();
+  const panelId = Object.values(doc.nodes).find((n) => n.type === 'panel')!.id;
+  const clean = renderDocument(doc, { theme: NATURE_THEME, resolveAsset });
+  const withChrome = renderDocument(doc, {
+    theme: NATURE_THEME,
+    resolveAsset,
+    chrome: { selectedIds: [] },
+  });
+
+  it('draws no montage chrome at all on the export path', () => {
+    // The whole guarantee: an exported figure must carry neither the invisible
+    // hit target nor the dashed cell outlines, whatever the montage's state.
+    expect(collectByRole(clean, 'montage-hit-area')).toEqual([]);
+    expect(collectByRole(clean, 'montage-cell-placeholder')).toEqual([]);
+    expect(toSvgString(clean)).not.toContain('montage');
+  });
+
+  it('gives a montage panel a hit target covering its whole frame', () => {
+    // Without this a montage draws nothing of its own, so its gutters and
+    // empty cells have no pixels for a click to land on and the panel cannot
+    // be selected at all — the reported bug.
+    const hits = collectByRole(withChrome, 'montage-hit-area');
+    expect(hits).toHaveLength(1);
+    const panel = doc.nodes[panelId]!;
+    expect(hits[0]!.attrs?.width).toBe(panel.frame.width);
+    expect(hits[0]!.attrs?.height).toBe(panel.frame.height);
+    // `fill: none` is not painted and would receive no pointer events, which
+    // would leave the panel exactly as unclickable as it was.
+    expect(hits[0]!.attrs?.fill).toBe('transparent');
+  });
+
+  it('outlines exactly the cells no tile has reached yet', () => {
+    const placeholders = collectByRole(withChrome, 'montage-cell-placeholder');
+    // One tile of four is filled.
+    expect(placeholders).toHaveLength(3);
+    for (const placeholder of placeholders) {
+      expect(placeholder.attrs?.['stroke-dasharray']).toBeDefined();
+      expect(placeholder.attrs?.fill).toBe('none');
+    }
+  });
+
+  it('places those outlines exactly where the tiles will land', () => {
+    const cells = montageCellRects(doc, panelId, doc.nodes[panelId]!.frame)!;
+    const placeholders = collectByRole(withChrome, 'montage-cell-placeholder');
+    // Cells 1..3 — cell 0 holds the one real tile.
+    placeholders.forEach((placeholder, index) => {
+      const cell = cells[index + 1]!;
+      expect(placeholder.attrs?.x).toBeCloseTo(cell.x, 3);
+      expect(placeholder.attrs?.y).toBeCloseTo(cell.y, 3);
+      expect(placeholder.attrs?.width).toBeCloseTo(cell.width, 3);
+    });
+  });
+
+  it('stops drawing a cell placeholder once that cell is filled', () => {
+    const newId = createIdFactory();
+    const filled = editDocument(doc, (draft) => {
+      setMontageCellImage(draft, newId, panelId, 1, {
+        assetId: MONTAGE_ASSET,
+        naturalPx: NATURAL_PX,
+      });
+    });
+    const scene = renderDocument(filled, {
+      theme: NATURE_THEME,
+      resolveAsset,
+      chrome: { selectedIds: [] },
+    });
+    expect(collectByRole(scene, 'montage-cell-placeholder')).toHaveLength(2);
+  });
+
+  it('draws four placeholders for a montage with nothing in it at all', () => {
+    const newId = createIdFactory();
+    const empty = editDocument(
+      createDocument({
+        widthMm: 183,
+        heightMm: 75,
+        presetId: 'nature-double',
+        idFactory: newId,
+        now: () => '2026-01-01T00:00:00.000Z',
+      }),
+      (draft) => {
+        addEmptyMontagePanel(draft, newId, {
+          frame: { x: 4, y: 4, width: 60, height: 50 },
+          name: 'Montage',
+          rows: 2,
+          cols: 2,
+          gutterMm: 2,
+        });
+      },
+    );
+    const scene = renderDocument(empty, { theme: NATURE_THEME, chrome: { selectedIds: [] } });
+    // The empty case is the one the report actually hit: a montage that drew
+    // nothing was indistinguishable from one that had failed to be created.
+    expect(collectByRole(scene, 'montage-cell-placeholder')).toHaveLength(4);
+    expect(collectByRole(scene, 'montage-hit-area')).toHaveLength(1);
+  });
+
+  it('survives the React adapter, and both adapters agree on the chrome-free scene', () => {
+    expect(() => renderToStaticMarkup(toReact(withChrome))).not.toThrow();
+    const fromReact = normalise(renderToStaticMarkup(toReact(clean)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(clean)));
+  });
+});
+
+describe('image alignment', () => {
+  const ALIGN_ASSET = 'align-asset';
+
+  function alignedImage(
+    align: { alignX?: 'start' | 'middle' | 'end'; alignY?: 'start' | 'middle' | 'end' },
+    crop?: { x: number; y: number; width: number; height: number },
+  ): FigureDocument {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      presetId: 'nature-double',
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    return editDocument(base, (draft) => {
+      addAsset(draft, {
+        id: ALIGN_ASSET,
+        filename: 'wide.png',
+        mimeType: 'image/png',
+        byteLength: 128,
+        // 2:1, so in a 50 × 40 mm frame it letterboxes vertically and the
+        // spare height is real.
+        naturalPx: { width: 1000, height: 500 },
+      });
+      const { image } = addPanelWithImage(draft, newId, {
+        frame: { x: 4, y: 4, width: 50, height: 40 },
+        name: 'Wide',
+        assetId: ALIGN_ASSET,
+        naturalPx: { width: 1000, height: 500 },
+      });
+      const target = draft.nodes[image.id];
+      if (target?.type === 'image') {
+        if (align.alignX) target.alignX = align.alignX;
+        if (align.alignY) target.alignY = align.alignY;
+        if (crop) target.crop = crop;
+      }
+    });
+  }
+
+  function imageAttrs(doc: FigureDocument): Record<string, string | number | undefined> {
+    const scene = renderDocument(doc, { theme: NATURE_THEME, resolveAsset });
+    return collectByRole(scene, 'image')[0]!.attrs!;
+  }
+
+  it('emits xMidYMid by default, so every existing figure is byte-identical', () => {
+    expect(imageAttrs(alignedImage({}))['preserveAspectRatio']).toBe('xMidYMid meet');
+  });
+
+  it('emits the matching preserveAspectRatio token for each alignment', () => {
+    expect(imageAttrs(alignedImage({ alignY: 'start' }))['preserveAspectRatio']).toBe('xMidYMin meet');
+    expect(imageAttrs(alignedImage({ alignY: 'end' }))['preserveAspectRatio']).toBe('xMidYMax meet');
+    expect(imageAttrs(alignedImage({ alignX: 'start' }))['preserveAspectRatio']).toBe('xMinYMid meet');
+    expect(imageAttrs(alignedImage({ alignX: 'end', alignY: 'end' }))['preserveAspectRatio']).toBe(
+      'xMaxYMax meet',
+    );
+  });
+
+  it('places a cropped image by the same alignment, in millimetres', () => {
+    /*
+     * The cropped path fits the kept region itself rather than handing the job
+     * to SVG, so it is a genuinely separate implementation from the one above —
+     * and the one round 6 already had to fix once for measuring against the
+     * wrong rectangle. It has to agree with it.
+     *
+     * Cropping this 2:1 source to half its width leaves a 1:1 region, which in
+     * a 50 × 40 mm frame fits as a 40 mm square: 10 mm of spare *width*, and
+     * none to spare vertically. So alignX is what moves here.
+     */
+    const crop = { x: 0, y: 0, width: 0.5, height: 1 };
+    const centred = imageAttrs(alignedImage({}, crop));
+    const left = imageAttrs(alignedImage({ alignX: 'start' }, crop));
+    const right = imageAttrs(alignedImage({ alignX: 'end' }, crop));
+
+    expect(Number(centred['x'])).toBeCloseTo(5, 6);
+    expect(Number(left['x'])).toBeCloseTo(0, 6);
+    expect(Number(right['x'])).toBeCloseTo(10, 6);
+    // The kept region is the same size however it is placed — alignment moves
+    // the picture, it never rescales it.
+    expect(left['width']).toBe(centred['width']);
+    expect(left['height']).toBe(centred['height']);
+  });
+
+  it('ignores alignment entirely when the picture is stretched to fill', () => {
+    const stretched = editDocument(alignedImage({ alignY: 'start' }), (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image');
+      if (image?.type === 'image') image.preserveAspect = false;
+    });
+    // Nothing letterboxes, so there is no spare space for an alignment to
+    // place — the attribute must stay 'none' rather than silently re-fitting.
+    expect(imageAttrs(stretched)['preserveAspectRatio']).toBe('none');
+  });
+});
+
+describe('overlay group labels', () => {
+  const OVERLAY_ASSET = 'overlay-asset';
+
+  function overlayDocument(labelColor?: string): FigureDocument {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      presetId: 'nature-double',
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    return editDocument(base, (draft) => {
+      addAsset(draft, {
+        id: OVERLAY_ASSET,
+        filename: 'cells.png',
+        mimeType: 'image/png',
+        byteLength: 128,
+        naturalPx: NATURAL_PX,
+      });
+      const { image } = addPanelWithImage(draft, newId, {
+        frame: { x: 4, y: 10, width: 50, height: 40 },
+        name: 'Cells',
+        assetId: OVERLAY_ASSET,
+        naturalPx: NATURAL_PX,
+      });
+      const label = addGroupLabel(draft, newId, {
+        memberIds: [image.id],
+        edge: 'top',
+        title: 'GFP',
+      });
+      const target = label ? draft.nodes[label.id] : undefined;
+      if (target?.type === 'group-label') {
+        target.placement = 'overlay';
+        if (labelColor) target.labelColor = labelColor;
+      }
+      reflowGroupLabels(draft);
+    });
+  }
+
+  const doc = overlayDocument();
+  const scene = renderDocument(doc, { theme: NATURE_THEME, resolveAsset });
+
+  it('produces the same markup from both adapters', () => {
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('draws the title and never a rule', () => {
+    expect(collectByRole(scene, 'group-label')).toHaveLength(1);
+    // A rule across a photograph reads as damage to the picture.
+    expect(collectByRole(scene, 'group-label-rule')).toEqual([]);
+  });
+
+  it('draws it white with a dark outline, so it survives a pale patch', () => {
+    const label = collectByRole(scene, 'group-label')[0]!;
+    expect(label.attrs?.fill).toBe('#ffffff');
+    expect(label.attrs?.stroke).toBe('#000000');
+    expect(label.attrs?.['paint-order']).toBe('stroke fill');
+    // Left-aligned at the inset origin, the convention the reference figures
+    // use for channel names — not centred like a heading above a panel.
+    expect(label.attrs?.['text-anchor']).toBe('start');
+  });
+
+  it('honours an explicit colour', () => {
+    const coloured = renderDocument(overlayDocument('#ffcc00'), {
+      theme: NATURE_THEME,
+      resolveAsset,
+    });
+    expect(collectByRole(coloured, 'group-label')[0]!.attrs?.fill).toBe('#ffcc00');
+  });
+
+  it('survives the React adapter', () => {
+    // `paint-order`, `stroke-opacity` and `stroke-linejoin` are attributes this
+    // renderer had not emitted on a <text> before — parity compares two strings
+    // and cannot catch one React rejects outright.
+    expect(() => renderToStaticMarkup(toReact(scene))).not.toThrow();
   });
 });

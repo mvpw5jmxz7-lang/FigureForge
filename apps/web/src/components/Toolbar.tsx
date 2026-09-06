@@ -1,7 +1,9 @@
 import {
   absoluteFrame,
   addArrow,
+  addEmptyMontagePanel,
   addGroup,
+  addGroupLabel,
   addScaleBar,
   addShape,
   addText,
@@ -9,10 +11,14 @@ import {
   alignSelection,
   applyAutoLayout,
   distributeSelection,
+  fillPanelChildren,
   formatMm,
   isLocked,
+  nextPanelFrame,
+  reflowGroupLabels,
   relabelPanels,
   reorderNode,
+  reserveSpaceForGroupLabels,
   suggestGrid,
   templatesForPanelCount,
   findLayoutTemplate,
@@ -89,6 +95,14 @@ export function Toolbar({
   const selectedGroup =
     selectedIds.length === 1 && doc.nodes[selectedIds[0]!]?.type === 'group' ? selectedIds[0]! : null;
 
+  // A group-label's members are panels or images — a caption on one, or a
+  // heading over several, through the same mechanism (round 26's own
+  // multi-select, reused rather than a new selection UI being invented).
+  const groupLabelMembers = selectedIds.filter((id) => {
+    const node = doc.nodes[id];
+    return node !== undefined && (node.type === 'panel' || node.type === 'image') && !isLocked(doc, id);
+  });
+
   const insertFrame = (width: number, height: number): RectMm => {
     const origin = annotationOrigin(doc, selectedIds);
     return { ...origin, width, height };
@@ -159,6 +173,70 @@ export function Toolbar({
     });
   };
 
+  /**
+   * A caption on one selected panel/image, or a heading over several.
+   *
+   * Whether this needs to grow a gap, and how, differs by scope: members
+   * sharing one montage panel already have a live grid gutter
+   * (`fillPanelChildren`) that only needs a fresh tiling pass to show it;
+   * members spread across independent panels need `reserveSpaceForGroupLabels`
+   * instead — safe here specifically because creating a heading is a
+   * deliberate action, not the manual drag/resize/align/distribute that
+   * function is otherwise never run after.
+   */
+  const addGroupTitle = (): void => {
+    if (groupLabelMembers.length === 0) return;
+    commit('Add group title', (draft) => {
+      const label = addGroupLabel(draft, newId, {
+        memberIds: groupLabelMembers,
+        edge: 'top',
+        title: 'Group title',
+        // The size the rest of the figure's type is set in, not a panel
+        // letter's — a heading is a caption, not a panel identifier.
+        fontSizePt: theme.type.annotationPt,
+      });
+      if (!label) return;
+
+      const parentIds = new Set(groupLabelMembers.map((id) => draft.nodes[id]?.parentId ?? null));
+      const soleParentId = parentIds.size === 1 ? [...parentIds][0] : null;
+      const soleParent = soleParentId ? draft.nodes[soleParentId] : null;
+      if (soleParent?.type === 'panel' && soleParent.contentGrid) {
+        fillPanelChildren(draft, soleParent.id, soleParent.frame);
+      } else {
+        reserveSpaceForGroupLabels(draft);
+      }
+      reflowGroupLabels(draft);
+      onSelectionChange([label.id]);
+    });
+  };
+
+  /**
+   * A montage panel with a declared grid and zero children — the starting
+   * point for filling cells in one at a time from the Inspector
+   * (`setMontageCellImage`), rather than only ever arriving from a bulk
+   * multi-file import.
+   */
+  const addEmptyMontage = (rows: number, cols: number): void =>
+    commit('Add empty montage', (draft) => {
+      const panel = addEmptyMontagePanel(draft, newId, {
+        frame: nextPanelFrame(draft, { width: 60, height: 50 }),
+        name: `Montage ${rows}×${cols}`,
+        rows,
+        cols,
+        gutterMm: 2,
+      });
+      applyAutoLayout(draft, layoutOptions);
+      reserveSpaceForGroupLabels(draft);
+      relabelPanels(draft, newId, {
+        uppercase: theme.panelLabelCase === 'upper',
+        fontSizePt: theme.type.panelLabelPt,
+        offsetMm: 4,
+      });
+      reflowGroupLabels(draft);
+      reflowBrackets(draft, theme);
+      onSelectionChange([panel.id]);
+    });
+
   // Same predicate `alignSelection`/`distributeSelection` themselves filter
   // by, read here only to gate and label the dropdown — not a second,
   // independently-typed-out copy of which types are alignable.
@@ -173,14 +251,25 @@ export function Toolbar({
   const runAlign = (mode: AlignMode): void => {
     api.transaction(`Align ${mode}`, () => {
       commit('Align', (draft) => alignSelection(draft, selectedIds, mode));
-      commit('Reposition brackets', (draft) => reflowBrackets(draft, theme));
+      commit('Reposition brackets', (draft) => {
+        // Never `reserveSpaceForGroupLabels` here: a manual align/distribute
+        // leaves frames alone except for snapping, and growing a gap on top
+        // of it would read as the editor overriding the drag. A heading
+        // still needs to follow wherever its members just landed, though —
+        // the same "always follow" contract `reflowBrackets` already has.
+        reflowGroupLabels(draft);
+        reflowBrackets(draft, theme);
+      });
     });
   };
 
   const runDistribute = (axis: GuideAxis): void => {
     api.transaction(`Distribute ${axis}`, () => {
       commit('Distribute', (draft) => distributeSelection(draft, selectedIds, axis));
-      commit('Reposition brackets', (draft) => reflowBrackets(draft, theme));
+      commit('Reposition brackets', (draft) => {
+        reflowGroupLabels(draft);
+        reflowBrackets(draft, theme);
+      });
     });
   };
 
@@ -210,8 +299,12 @@ export function Toolbar({
       });
       commit('Re-layout', (draft) => {
         applyAutoLayout(draft, layoutOptions);
+        // A from-scratch grid recompute, so — unlike a manual align/resize —
+        // it is safe to grow a gap for a cross-panel heading here.
+        reserveSpaceForGroupLabels(draft);
         // Brackets sit in absolute page space, so nothing else moves them with
         // the panels they annotate.
+        reflowGroupLabels(draft);
         reflowBrackets(draft, theme);
       });
     });
@@ -224,6 +317,7 @@ export function Toolbar({
     api.transaction(label, () => {
       commit('Arrange panels', (draft) => {
         applyAutoLayout(draft, { ...layoutOptions, template });
+        reserveSpaceForGroupLabels(draft);
       });
       // Panels may have changed order, so the letters must follow.
       commit('Reletter panels', (draft) => {
@@ -234,6 +328,7 @@ export function Toolbar({
         });
       });
       commit('Reposition brackets', (draft) => {
+        reflowGroupLabels(draft);
         reflowBrackets(draft, theme);
       });
     });
@@ -419,6 +514,36 @@ export function Toolbar({
         >
           Ungroup
         </button>
+        <button
+          onClick={addGroupTitle}
+          disabled={groupLabelMembers.length === 0}
+          title={
+            groupLabelMembers.length === 0
+              ? 'Select one or more panels/images — one member captions it, several get a shared heading'
+              : groupLabelMembers.length === 1
+                ? 'Add a caption above the selected panel or image'
+                : `Add a heading over the selected ${groupLabelMembers.length} panels/images`
+          }
+        >
+          Add group title
+        </button>
+        <select
+          value=""
+          title="Add an empty montage panel, then fill its cells from the Inspector"
+          onChange={(e) => {
+            const value = e.target.value;
+            e.target.value = '';
+            if (!value) return;
+            const [rows, cols] = value.split('x').map(Number) as [number, number];
+            addEmptyMontage(rows, cols);
+          }}
+        >
+          <option value="">Add empty montage…</option>
+          <option value="1x2">1 × 2</option>
+          <option value="2x1">2 × 1</option>
+          <option value="2x2">2 × 2</option>
+          <option value="1x3">1 × 3</option>
+        </select>
       </div>
 
       {/* Align/distribute whatever is selected — panels, images, shapes,

@@ -71,8 +71,37 @@ export function inset(r: RectMm, i: InsetsMm): RectMm {
   };
 }
 
-/** Largest rect of the given aspect ratio (w/h) that fits inside `r`, centred. */
-export function fitAspect(r: RectMm, aspect: number): RectMm {
+/**
+ * Where content sits along one axis of a box it does not fill.
+ *
+ * Named for the SVG `preserveAspectRatio` alignments the renderer emits in
+ * the uncropped case (`xMinYMin`/`xMidYMid`/`xMaxYMax`), so the stored value
+ * and the attribute it becomes cannot drift apart in meaning.
+ */
+export type FitAlign = 'start' | 'middle' | 'end';
+
+/** How much of the free space sits *ahead* of the content, for one axis. */
+function alignOffset(free: number, align: FitAlign): number {
+  if (align === 'start') return 0;
+  if (align === 'end') return free;
+  return free / 2;
+}
+
+/**
+ * Largest rect of the given aspect ratio (w/h) that fits inside `r`, placed
+ * by `alignX`/`alignY` rather than always centred.
+ *
+ * The single implementation of "where does a letterboxed image sit inside
+ * its frame", read by the renderer *and* by the canvas's crop overlay. Two
+ * copies of this arithmetic is precisely how round 6's crop bug happened —
+ * the window outlined was not the region drawn.
+ */
+export function fitAspectAligned(
+  r: RectMm,
+  aspect: number,
+  alignX: FitAlign,
+  alignY: FitAlign,
+): RectMm {
   if (aspect <= 0) return r;
   let width = r.width;
   let height = width / aspect;
@@ -81,11 +110,16 @@ export function fitAspect(r: RectMm, aspect: number): RectMm {
     width = height * aspect;
   }
   return {
-    x: r.x + (r.width - width) / 2,
-    y: r.y + (r.height - height) / 2,
+    x: r.x + alignOffset(r.width - width, alignX),
+    y: r.y + alignOffset(r.height - height, alignY),
     width,
     height,
   };
+}
+
+/** Largest rect of the given aspect ratio (w/h) that fits inside `r`, centred. */
+export function fitAspect(r: RectMm, aspect: number): RectMm {
+  return fitAspectAligned(r, aspect, 'middle', 'middle');
 }
 
 export const translate = (r: RectMm, dx: number, dy: number): RectMm => ({

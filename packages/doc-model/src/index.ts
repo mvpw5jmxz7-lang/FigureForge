@@ -1,6 +1,7 @@
 export * from './units.js';
 export * from './geometry.js';
 export * from './nodes.js';
+export * from './grouplabel.js';
 export * from './richtext.js';
 export * from './layout.js';
 export * from './templates.js';

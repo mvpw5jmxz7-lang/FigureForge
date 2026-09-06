@@ -38,6 +38,17 @@ export interface LayoutOptions {
   gutterMm: number;
   /** Extra left inset per panel for its label, so labels never overlap axes. */
   labelGutterMm?: number;
+  /**
+   * Extra clearance at specific column/row boundaries, on top of the uniform
+   * `gutterMm` — the room a group-label heading needs. Indexed by boundary,
+   * not track: index 0 is *before* the first column/row, index `columns`/
+   * `rows` is *after* the last, so a heading over the very first or very
+   * last row/column still has a boundary to grow. Absent, or a boundary past
+   * the array's length, means 0 — additive, so every caller that never sets
+   * these produces byte-identical frames to before this existed.
+   */
+  columnGutterExtraMm?: readonly number[];
+  rowGutterExtraMm?: readonly number[];
 }
 
 /**
@@ -70,13 +81,30 @@ function tracks(count: number, total: number, weights: readonly number[] | undef
   return weights.map((w) => (usable * w) / sum);
 }
 
-/** Start offset of each track, given the sizes and the gutter between them. */
-function offsets(sizes: readonly number[], start: number, gutterMm: number): number[] {
+/** Sum of a boundary-extras array over boundaries 0..count inclusive. */
+function extraSum(extra: readonly number[] | undefined, count: number): number {
+  if (!extra) return 0;
+  let sum = 0;
+  for (let i = 0; i <= count; i++) sum += extra[i] ?? 0;
+  return sum;
+}
+
+/**
+ * Start offset of each track, given the sizes, the uniform gutter between
+ * them, and any per-boundary extra clearance (index 0 before the first
+ * track, index `sizes.length` after the last).
+ */
+function offsets(
+  sizes: readonly number[],
+  start: number,
+  gutterMm: number,
+  extra?: readonly number[],
+): number[] {
   const out: number[] = [];
-  let cursor = start;
-  for (const size of sizes) {
+  let cursor = start + (extra?.[0] ?? 0);
+  for (let i = 0; i < sizes.length; i++) {
     out.push(cursor);
-    cursor += size + gutterMm;
+    cursor += sizes[i]! + gutterMm + (extra?.[i + 1] ?? 0);
   }
   return out;
 }
@@ -93,14 +121,18 @@ export function gridCells(spec: GridSpec, options: LayoutOptions): RectMm[] {
   if (rows <= 0 || columns <= 0) return [];
 
   const { pageWidthMm, pageHeightMm, marginMm, gutterMm } = options;
+  const columnExtra = options.columnGutterExtraMm;
+  const rowExtra = options.rowGutterExtraMm;
 
-  const usableWidth = pageWidthMm - 2 * marginMm - gutterMm * (columns - 1);
-  const usableHeight = pageHeightMm - 2 * marginMm - gutterMm * (rows - 1);
+  const usableWidth =
+    pageWidthMm - 2 * marginMm - gutterMm * (columns - 1) - extraSum(columnExtra, columns);
+  const usableHeight =
+    pageHeightMm - 2 * marginMm - gutterMm * (rows - 1) - extraSum(rowExtra, rows);
 
   const widths = tracks(columns, usableWidth, spec.columnWeights);
   const heights = tracks(rows, usableHeight, spec.rowWeights);
-  const xs = offsets(widths, marginMm, gutterMm);
-  const ys = offsets(heights, marginMm, gutterMm);
+  const xs = offsets(widths, marginMm, gutterMm, columnExtra);
+  const ys = offsets(heights, marginMm, gutterMm, rowExtra);
 
   const cells: RectMm[] = [];
   for (let r = 0; r < rows; r++) {
