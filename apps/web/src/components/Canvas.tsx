@@ -263,16 +263,20 @@ interface TextEdit {
  *
  * Only freeform strings the author owns. Tick labels are deliberately absent:
  * they are computed from the data, and an editable one would let a figure
- * display a number its data does not support.
+ * display a number its data does not support. `'title'` is a group-label
+ * heading — the renderer stamps every one of `renderGroupLabel`'s three
+ * layouts (top, left/right, overlay) with exactly this target, the same DOM
+ * hook the axis-title cases already use.
  */
-const EDIT_TARGETS = ['x.title', 'y.title', 'y2.title', 'cascadeAxisTitle'] as const;
+const EDIT_TARGETS = ['x.title', 'y.title', 'y2.title', 'cascadeAxisTitle', 'title'] as const;
 type EditTarget = (typeof EDIT_TARGETS)[number];
 
 const isEditTarget = (value: string): value is EditTarget =>
   (EDIT_TARGETS as readonly string[]).includes(value);
 
-/** Read the string an `EditTarget` names off a plot node. */
+/** Read the string an `EditTarget` names off the node that owns it. */
 function readEditTarget(node: FigureNode, target: EditTarget): string | null {
+  if (target === 'title') return node.type === 'group-label' ? node.title : null;
   if (node.type !== 'plot') return null;
   if (target === 'cascadeAxisTitle') return node.cascadeAxisTitle ?? '';
   if (target === 'x.title') return node.x.title;
@@ -927,42 +931,60 @@ export function Canvas({
     setTextEdit(null);
     if (!edit) return;
 
-    api.commit(edit.target ? 'Edit axis title' : 'Edit text', (draft) => {
-      const node = draft.nodes[edit.nodeId];
-      if (!node) return;
+    api.commit(
+      edit.target === 'title' ? 'Edit group title' : edit.target ? 'Edit axis title' : 'Edit text',
+      (draft) => {
+        const node = draft.nodes[edit.nodeId];
+        if (!node) return;
 
-      // An axis title writes exactly the field `AxisFields` writes in the
-      // Inspector, so the two surfaces cannot disagree about what was edited.
-      if (edit.target) {
-        if (node.type !== 'plot') return;
-        if (edit.target === 'cascadeAxisTitle') node.cascadeAxisTitle = edit.value;
-        else if (edit.target === 'x.title') node.x = { ...node.x, title: edit.value };
-        else if (edit.target === 'y.title') node.y = { ...node.y, title: edit.value };
-        else if (node.y2) node.y2 = { ...node.y2, title: edit.value };
-        return;
-      }
-
-      // A TextNode that already carries richText reconciles through it
-      // rather than overwriting `text` directly, so a canvas-side edit can
-      // never silently discard formatting the Inspector's own textarea
-      // would have preserved — one algorithm, two call sites. Absent
-      // richText, a plain overwrite (only when the value actually changed)
-      // stays exactly today's behaviour rather than bootstrapping a
-      // richText array for an edit with nothing to format.
-      if (node.type === 'text') {
-        if (node.richText && node.richText.length > 0) {
-          const nextRuns = reconcileTextEdit(node.richText, edit.value);
-          node.richText = nextRuns.length > 0 ? nextRuns : undefined;
-          node.text = plainTextOfRuns(nextRuns);
-        } else if (edit.value !== node.text) {
-          node.text = edit.value;
+        // A group-label heading, reconciled through richText exactly like a
+        // TextNode's own body a few lines below — so a canvas-side edit can't
+        // silently discard formatting the Inspector's toolbar applied.
+        if (edit.target === 'title') {
+          if (node.type !== 'group-label') return;
+          if (node.richText && node.richText.length > 0) {
+            const nextRuns = reconcileTextEdit(node.richText, edit.value);
+            node.richText = nextRuns.length > 0 ? nextRuns : undefined;
+            node.title = plainTextOfRuns(nextRuns);
+          } else if (edit.value !== node.title) {
+            node.title = edit.value;
+          }
+          return;
         }
-      } else if (node.type === 'panel-label') {
-        node.text = edit.value;
-      } else if (node.type === 'bracket') {
-        node.label = edit.value;
-      }
-    });
+
+        // An axis title writes exactly the field `AxisFields` writes in the
+        // Inspector, so the two surfaces cannot disagree about what was edited.
+        if (edit.target) {
+          if (node.type !== 'plot') return;
+          if (edit.target === 'cascadeAxisTitle') node.cascadeAxisTitle = edit.value;
+          else if (edit.target === 'x.title') node.x = { ...node.x, title: edit.value };
+          else if (edit.target === 'y.title') node.y = { ...node.y, title: edit.value };
+          else if (node.y2) node.y2 = { ...node.y2, title: edit.value };
+          return;
+        }
+
+        // A TextNode that already carries richText reconciles through it
+        // rather than overwriting `text` directly, so a canvas-side edit can
+        // never silently discard formatting the Inspector's own textarea
+        // would have preserved — one algorithm, two call sites. Absent
+        // richText, a plain overwrite (only when the value actually changed)
+        // stays exactly today's behaviour rather than bootstrapping a
+        // richText array for an edit with nothing to format.
+        if (node.type === 'text') {
+          if (node.richText && node.richText.length > 0) {
+            const nextRuns = reconcileTextEdit(node.richText, edit.value);
+            node.richText = nextRuns.length > 0 ? nextRuns : undefined;
+            node.text = plainTextOfRuns(nextRuns);
+          } else if (edit.value !== node.text) {
+            node.text = edit.value;
+          }
+        } else if (node.type === 'panel-label') {
+          node.text = edit.value;
+        } else if (node.type === 'bracket') {
+          node.label = edit.value;
+        }
+      },
+    );
   }, [api, textEdit]);
 
   // --- rendering ----------------------------------------------------------

@@ -256,6 +256,25 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 34 (group-title double-click editing):** 1001
+TypeScript tests unchanged (a React event-handling fix with no pure function
+to unit-test, matching this codebase's standing convention that canvas
+pointer interaction is verified live rather than through a component test),
+190 Python tests unchanged (nothing here touches `services/api`), `tsc
+--build --force` and `eslint .` clean, 46-check acceptance run unaffected,
+and **46 live-browser checks across light and dark**. **Measured, not
+assumed**: before the fix, double-clicking a group title opened no editor at
+all — confirmed by reading the DOM for `.text-edit-overlay` after the
+double-click and finding none; after the fix the identical double-click
+opened a `<textarea>` overlay, committed a new title read back off the
+scene's own `<text>` content, and survived Ctrl+Z; the same editor opened
+correctly positioned over a rotated left-edge heading and over an
+overlay-placed caption; a heading bolded via the Inspector kept its bold
+`tspan` after a canvas-side edit that only appended a character, proving the
+edit reconciled through `richText` rather than overwriting it blind; a
+locked heading opened no editor; and panel-label double-click editing, which
+already worked, was re-confirmed unaffected. See "Round 34" below.
+
 **Verified after round 33 (montage typography, image-edge rules, overlay
 labels, auto-fit):** 1001 TypeScript tests (973 + 28 new: 21 in
 `doc-model.test.ts` covering `imageContentRect` across the cropped, aligned,
@@ -5259,6 +5278,80 @@ neighbouring panel is a different mechanism with its own staleness rules. There
 is no automatic light/dark contrast detection for overlay labels, for the
 reason given above. `autoFit` is not turned on retroactively for existing
 figures.
+
+### Round 34 — group titles couldn't be edited by double-clicking them
+
+Reported: panel labels and group titles should both be editable directly by
+clicking on them. Investigation found panel labels already fully worked —
+single click selects, double-click opens an inline editor, matching the
+app-wide convention used everywhere else in FigureForge. Confirmed with the
+user before changing anything: keep that convention (click selects,
+double-click edits) rather than introduce single-click-to-edit just for these
+two node types. What was actually broken is narrower: double-clicking a
+group title (`GroupLabelNode`, added in round 31) opened **nothing at all**.
+
+- **A dead code path, not a missing feature.** The renderer already stamps
+  every group-label heading's `<text>` element with
+  `data-edit-target="title"` — the identical DOM hook axis titles use to open
+  their own canvas editor (`packages/render/src/render-document.ts:677, 695,
+  726`, all three of `renderGroupLabel`'s layouts: top, left/right, and the
+  overlay placement). But `Canvas.tsx`'s `EDIT_TARGETS` allow-list only ever
+  recognized `'x.title' | 'y.title' | 'y2.title' | 'cascadeAxisTitle'` — never
+  the literal `'title'` string the renderer emits for a group-label — so the
+  double-click handler's `data-edit-target` branch's guard failed, and the
+  click fell through every other branch: a group-label isn't a container type
+  (nothing to step into) and isn't in the own-string-edit type check either
+  (that branch only reads `text`/`panel-label`/`bracket`). The function
+  returned having opened no editor. The renderer's half of this had been
+  correct since round 31; only the canvas side needed wiring.
+- **`EDIT_TARGETS` gained `'title'`, and `readEditTarget` reads it off a
+  `group-label` node's own `title`** rather than assuming every recognized
+  target lives on a `plot`. No change was needed to the branch that measures
+  and positions the editor — it already uses
+  `titleEl.getBoundingClientRect()` rather than `absoluteFrame`, which is
+  exactly what a group-label needs: `edge: 'left'`/`'right'` headings render
+  with a `rotate(-90)` transform, and `absoluteFrame` ignores rotation
+  entirely (the same reason rotation itself is restricted to leaf annotation
+  types). Using the DOM-measured rect is what makes the rotated case correct
+  for free.
+- **`commitTextEdit` gained a `'title'` branch, ahead of the axis-title one**,
+  writing to the group-label's own `title`/`richText` — reconciled through
+  `reconcileTextEdit`/`plainTextOfRuns` exactly the way the `TextNode` branch
+  a few lines below already does, so a canvas-side edit can't silently
+  discard formatting applied through the Inspector's `GroupLabelFields`
+  toolbar. This is deliberately **more careful** than the precedent it sits
+  beside: tracing this surfaced that the existing axis-title branch writes
+  `title`/`cascadeAxisTitle` on a canvas edit but never reconciles or clears
+  the matching `richText`/`cascadeAxisTitleRichText`, so a title bolded via
+  the Inspector and then plain-text-edited on the canvas leaves stale,
+  mismatched `richText` behind. Left alone — it affects axis titles, not
+  group titles, and fixing it wasn't asked for — but recorded here so it
+  isn't mistaken for something this round was supposed to cover.
+- **The commit's undo label distinguishes the new case**: `'Edit group
+  title'` rather than the generic `'Edit axis title'` a `'title'` target
+  would otherwise have shared.
+
+No schema change, no `render-document.ts` change — the `editTarget: 'title'`
+stamp already existed at all three call sites — and no change to panel-label
+behaviour, which needed none.
+
+Driven in a real browser, light **and** dark, **46 checks total**: a single
+click on a group title selected it with no editor opening; a double-click
+opened a `<textarea>` overlay (multiline, matching the axis-title precedent),
+committed a new title on Ctrl+Enter, and the Inspector's own title field read
+back the same text; Ctrl+Z reverted it in one step; switching the heading's
+Position to Left rendered it rotated, and a double-click there still opened
+the editor correctly positioned over the rotated text (not at the origin, the
+failure mode `absoluteFrame` would have produced); switching Placement to
+Overlay and double-clicking the on-picture caption worked identically;
+bolding part of the title via the Inspector's format toolbar, then
+double-clicking on the canvas and only *appending* a character, left the bold
+`tspan` intact in the rendered scene — proving the edit went through
+`reconcileTextEdit` rather than a blind overwrite; locking the group-label
+made the double-click open nothing, matching every other locked node; and
+panel-label double-click editing (already working) was re-confirmed
+unaffected, still opening a single-line `<input>`. No console errors in
+either theme.
 
 ## What's next
 
