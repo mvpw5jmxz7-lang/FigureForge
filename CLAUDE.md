@@ -256,6 +256,29 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 45 ("Send to back" reaches the back of the page):** 1129
+TypeScript tests (1122 + 7 new: 4 in `doc-model.test.ts` — the reported
+rectangle, the one-press-at-a-time crossing, the hidden/locked stop and a
+regression guard that a parent's children still order on `z` alone — plus a new
+`draw-order.test.ts` in `packages/render` asserting the property from the
+rendered scene rather than from `z`; one existing test rewritten because it was
+written against the sibling list that ignored layers, which was the bug), 190
+Python tests unchanged (nothing here touches `services/api`), `tsc --build
+--force` and `eslint .` clean, 46-check acceptance run unaffected, and **14
+live-browser checks in each of light and dark** plus a PDF/SVG export.
+**No schema change**; `SCHEMA_VERSION` stays 1, and no field was added — this
+is the first code in the app that rewrites a node's `layerId`. **Measured, not
+assumed**: before the fix a rectangle sent to back sat at `z = 0` of 18
+top-level nodes and was still the 18th thing painted, because layer z leads the
+sort; after it the bar chart paints over the rectangle at a point where the two
+genuinely overlap, the rectangle is the first node drawn, one Ctrl+Z restores
+it, and the exported SVG writes it before the plot's marks. **Six of the seven
+new guards were confirmed to fail against the unfixed code** rather than assumed
+to be regression guards. **A live-test trap of my own, caught before it shipped
+a false pass**: probing `elementsFromPoint` at the rectangle's own centre finds
+no panel ink there — a bar chart paints nothing between its bars — so the check
+would have passed whichever way the fix went. See "Round 45" below.
+
 **Verified after round 44 (the Stats tab shows one panel's result):** 1122
 TypeScript tests (1114 + 8 new in the `statistical annotation lifecycle` suite
 in `doc-model.test.ts`), 190 Python tests unchanged (nothing here touches
@@ -6705,6 +6728,89 @@ a backstop for any other route a plot can vanish by. Nothing collects an
 analysis already orphaned in an existing project — but such a record was
 undisplayable *and* unre-runnable before this round too, so no capability is
 lost, and any delete from now on cannot create one.
+
+### Round 45 — "Send to back" stopped at the floor of its own layer
+
+Reported: a filled rectangle drawn over a graph will not go under it when Send
+to back is pressed. Reproduced against the real app before anything was
+changed, and the cause is one term in a sort.
+
+**A top-level node's draw order is `(layer.z, node.z)`, and `reorderNode` only
+ever permuted `z`.** `addShape` creates a rectangle in **Annotations** (layer z
+2) while `addPanel` puts a graph in **Graphs** (z 1), so the layer comparison
+decides the outcome before `z` is ever read: the button moved the rectangle
+correctly to the bottom of its own layer, where it was still drawn over every
+graph and image on the page. Sending it back put it *behind the other
+annotations* and nothing else, which reads as a button that does nothing.
+Measured on the sample: after the press the rectangle was at `z = 0` of 18
+top-level nodes and still the 18th thing painted.
+
+- **`compareDrawOrder` (`document.ts`) is now the one statement of that
+  order**, read by the renderer's `rootNodesInDrawOrder` and by `reorderNode`.
+  Two copies is exactly how they came to disagree about which end "the back"
+  is — the same one-place discipline `scaleBarWidthMm`, `y2WidthMm` and
+  `analysisInputHash` are each held to. It also states the half that is easy to
+  miss: **a parent's children carry no layer term at all**, so a montage tile
+  or a plot inside a panel orders on plain `z`, and `reorderNode` was already
+  right for them. Only the top level was wrong.
+- **A top-level node therefore changes layer when it passes a boundary**,
+  adopting the layer of whatever it comes to rest against — the node above it
+  when moving up, below it when moving down. That is what the button says it
+  does and what every editor does at a layer boundary, and it leaves the
+  Illustrator-style grouping intact: layers still stack globally, the object
+  has simply moved to a different one. A figure whose top-level nodes all share
+  one layer is byte-identical to before.
+- **It stops rather than stepping into a hidden or locked layer.** A
+  draw-order command must not make an object invisible or unselectable as a
+  side effect, and both are reachable from the Layers tab's own chip strip. The
+  node lands in the last layer it may legally reach, which may be the one it
+  started in — and because the renumbering runs over the *whole* top level
+  regardless, it still ends up as far back as it can legally go rather than
+  refusing the press.
+- **It rests against a node, not an empty layer.** Sent to back on the sample
+  the rectangle lands in **Graphs**, not the empty Images layer beneath it:
+  what it must get under is the bottom-most thing *drawn*, and an empty layer
+  is nothing to rest against.
+- **Renumbering still runs `0..n-1` across the whole top level**, unchanged.
+  Safe across layers because each layer's nodes are contiguous under the
+  `(layer, z)` sort, so no other node moves relative to its own layer-mates —
+  asserted directly (every other node's painted position is unchanged) rather
+  than argued.
+- `forward`/`backward` cross a boundary the same way, one node per press.
+  Stopping them at the layer floor would be the same defect in slower motion,
+  and the Layers tab's row tooltip — which said the layer is what ▲/▼ reorder
+  *within* — was corrected with it.
+
+**No schema change, no new field, no `SCHEMA_VERSION` bump** — `layerId` has
+been required on every node since phase 1 and this is the first code that
+rewrites one.
+
+Driven in a real browser, light **and** dark, **14 checks each**. **Measured
+the way a reader sees it, not off a model field**: the probe is
+`elementsFromPoint` at a point where the rectangle and a drawn bar genuinely
+overlap, so it reports what is actually painted on top. Before the press the
+rectangle was topmost and 18th in document order against the panel's 1st;
+after it the *bar* is topmost, the rectangle is the first node drawn on the
+page, and one Ctrl+Z puts it back over the graph. Bring to front returns it;
+stepping backward with the ▼ button reaches the same place in 14 presses, one
+node at a time. The export agrees: a single-page 151 KB PDF, and the exported
+SVG writes the rectangle before the plot's marks, so the file matches the
+screen. Readiness stays 96 with no console errors in either theme.
+
+**A live-test trap of my own, worth recording.** The first run probed
+`elementsFromPoint` at the *rectangle's own centre* and reported the rectangle
+on top even after the fix — a bar chart paints nothing between its bars, so
+there was no panel ink at that point to be on top of it, and every check would
+have passed either way once the direction was reversed. The probe now searches
+for a mark whose box actually intersects the rectangle's, and asserts it found
+one.
+
+**Not done, deliberately:** there is still no way to author a layer, rename
+one, or move a node to a named layer directly — this changes `layerId` only as
+a consequence of a draw-order press. The Layers tab keeps its own display
+comparator: its rows under a panel banner can come from *different parents*, a
+mixed list `compareDrawOrder` deliberately does not answer, since a child and a
+top-level node are not in one draw order to begin with.
 
 ## What's next
 

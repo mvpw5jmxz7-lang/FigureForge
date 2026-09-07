@@ -17,6 +17,7 @@ import {
   absoluteFrame,
   isLocked,
   childrenOf,
+  compareDrawOrder,
   findAsset,
   findDataset,
   findLayer,
@@ -198,14 +199,11 @@ export function renderDocument(doc: FigureDocument, options: RenderOptions): Sce
 /**
  * Top-level nodes ordered by layer first, then by their own z. Layers give the
  * Illustrator-style global stacking (all labels above all graphs); z orders
- * siblings within that.
+ * siblings within that. `compareDrawOrder` is shared with `reorderNode`, which
+ * has to move a node through exactly the order drawn here.
  */
 function rootNodesInDrawOrder(doc: FigureDocument): FigureNode[] {
-  return childrenOf(doc.nodes, null).sort((a, b) => {
-    const za = findLayer(doc, a.layerId)?.z ?? 0;
-    const zb = findLayer(doc, b.layerId)?.z ?? 0;
-    return za - zb || a.z - b.z;
-  });
+  return childrenOf(doc.nodes, null).sort((a, b) => compareDrawOrder(doc, a, b));
 }
 
 function renderNode(node: FigureNode, doc: FigureDocument, options: RenderOptions): SceneNode | null {

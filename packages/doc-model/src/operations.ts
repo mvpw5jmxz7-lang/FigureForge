@@ -15,7 +15,7 @@ import { significanceStars } from './analysis.js';
 import type { DataFormat, Dataset } from './data.js';
 import { isTwoFactor, toSeries } from './data.js';
 import type { Asset, FigureDocument } from './document.js';
-import { layerByName, nextZ } from './document.js';
+import { compareDrawOrder, layerByName, nextZ } from './document.js';
 import type { FitAlign, PointMm, RectMm } from './geometry.js';
 import { aspectShape, fitAspectAligned, fitShape, union } from './geometry.js';
 import type { ShapeMm } from './geometry.js';
@@ -63,6 +63,7 @@ import type {
   GroupLabelNode,
   GroupNode,
   ImageNode,
+  LayerId,
   NodeId,
   NodeMap,
   PanelLabelNode,
@@ -3834,13 +3835,56 @@ export function duplicateNode(
 // ---------------------------------------------------------------------------
 
 /**
+ * The layer a reordered top-level node lands in: the one belonging to whatever
+ * it now sits against, so "send to back" can take an annotation past a graph.
+ *
+ * It stops at the last visible, unlocked layer on the way rather than stepping
+ * into a hidden or locked one — a draw-order command must not make an object
+ * invisible or unselectable as a side effect. Stopping short leaves the node in
+ * the lowest (or highest) layer it may legally reach, which is as far as the
+ * request can honestly be taken; where nothing is in the way that is the
+ * neighbour's own layer.
+ */
+function destinationLayer(draft: FigureDocument, fromId: LayerId, toId: LayerId): LayerId {
+  if (toId === fromId) return fromId;
+
+  const byZ = [...draft.layers].sort((a, b) => a.z - b.z);
+  const start = byZ.findIndex((l) => l.id === fromId);
+  const end = byZ.findIndex((l) => l.id === toId);
+  if (start < 0 || end < 0) return fromId;
+
+  const step = end > start ? 1 : -1;
+  let landed = fromId;
+  for (let i = start + step; i !== end + step; i += step) {
+    const layer = byZ[i]!;
+    if (layer.hidden || layer.locked) break;
+    landed = layer.id;
+  }
+  return landed;
+}
+
+/**
  * Move a node within its siblings' draw order.
  *
- * Draw order is `layer.z` then node `z` among siblings sharing a `parentId`.
- * `nextZ` only ever appends, so until now the only way to change what covered
- * what was to delete a node and add it again. Every sibling is renumbered
- * `0..n-1` on each call, which keeps the values readable and means repeated
- * "forward" steps cannot drift apart.
+ * Draw order is `layer.z` then node `z` among top-level nodes, and plain `z`
+ * among a parent's children — `rootNodesInDrawOrder` in the renderer is the
+ * authority and this sorts the same way, or "send to back" moves a node
+ * somewhere other than the back of the page the author is looking at.
+ *
+ * That layer term is why a top-level node may also **change layer** here.
+ * Layer z leads the sort, so no amount of renumbering `z` can put a rectangle
+ * (created in Annotations) under a graph (in Graphs): a shape sent to the back
+ * reached the bottom of its own layer and stopped, still covering the figure.
+ * It now adopts the layer of whatever it comes to rest against, which is what
+ * the button says it does and what every other editor does at a layer
+ * boundary. A figure whose top-level nodes all share one layer is unaffected.
+ *
+ * `nextZ` only ever appends, so before this existed the only way to change what
+ * covered what was to delete a node and add it again. Every sibling is
+ * renumbered `0..n-1` on each call, which keeps the values readable and means
+ * repeated "forward" steps cannot drift apart. Renumbering across layers is
+ * safe because each layer's nodes are contiguous under the `(layer, z)` sort,
+ * so no other node's position relative to its own layer-mates changes.
  */
 export function reorderNode(
   draft: FigureDocument,
@@ -3850,9 +3894,10 @@ export function reorderNode(
   const node = draft.nodes[id];
   if (!node) return;
 
+  const topLevel = node.parentId === null;
   const siblings = Object.values(draft.nodes)
     .filter((n) => n.parentId === node.parentId)
-    .sort((a, b) => a.z - b.z);
+    .sort((a, b) => compareDrawOrder(draft, a, b));
   if (siblings.length < 2) return;
 
   const from = siblings.findIndex((n) => n.id === id);
@@ -3866,6 +3911,15 @@ export function reorderNode(
 
   const ordered = [...siblings];
   ordered.splice(to, 0, ...ordered.splice(from, 1));
+
+  if (topLevel) {
+    // Moving up, the node comes to rest immediately above `to - 1`; moving
+    // down, immediately below `to + 1`. Both exist: the node moved, and there
+    // are at least two siblings.
+    const neighbour = to > from ? ordered[to - 1]! : ordered[to + 1]!;
+    draft.nodes[id]!.layerId = destinationLayer(draft, node.layerId, neighbour.layerId);
+  }
+
   ordered.forEach((sibling, index) => {
     draft.nodes[sibling.id]!.z = index;
   });

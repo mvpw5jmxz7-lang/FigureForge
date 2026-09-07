@@ -8,6 +8,8 @@ import {
   ArchiveError,
   buildArchiveContents,
   checkReferentialIntegrity,
+  compareDrawOrder,
+  findLayer,
   LEGACY_ARCHIVE_EXTENSION,
   createDocument,
   createIdFactory,
@@ -1729,7 +1731,7 @@ describe('duplicate and draw order', () => {
     expect(isDerivedNode({ ...panel, type: 'group-label', memberIds: [panel.id], edge: 'top', title: '' } as unknown as Parameters<typeof isDerivedNode>[0])).toBe(true);
   });
 
-  it('reorders siblings and renumbers z with no gaps', () => {
+  it('reorders siblings through the real draw order and renumbers z with no gaps', () => {
     const { doc, newId } = sampleDocument();
     const withText = editDocument(doc, (draft) => {
       for (const text of ['one', 'two', 'three']) {
@@ -1737,27 +1739,193 @@ describe('duplicate and draw order', () => {
       }
     });
 
+    // The order the renderer paints in, named so the assertions read as the
+    // page does. The sample's panels are in the Graphs layer, the texts land in
+    // Annotations and the panel letters in Labels, so this list spans three.
     const order = (d: typeof withText): string[] =>
       Object.values(d.nodes)
-        .filter((n) => n.type === 'text')
-        .sort((a, b) => a.z - b.z)
-        .map((n) => (n.type === 'text' ? n.text : ''));
+        .filter((n) => n.parentId === null)
+        .sort((a, b) => compareDrawOrder(d, a, b))
+        .map((n) => (n.type === 'text' ? n.text : n.type));
 
-    expect(order(withText)).toEqual(['one', 'two', 'three']);
+    expect(order(withText)).toEqual([
+      'panel',
+      'panel',
+      'one',
+      'two',
+      'three',
+      'panel-label',
+      'panel-label',
+    ]);
 
+    // "Bring to front" means the front of the *page*: it passes the panel
+    // letters standing above it in the Labels layer rather than stopping at the
+    // top of its own.
     const first = Object.values(withText.nodes).find((n) => n.type === 'text' && n.text === 'one')!;
     const front = editDocument(withText, (draft) => reorderNode(draft, first.id, 'front'));
-    expect(order(front)).toEqual(['two', 'three', 'one']);
+    expect(order(front)).toEqual([
+      'panel',
+      'panel',
+      'two',
+      'three',
+      'panel-label',
+      'panel-label',
+      'one',
+    ]);
 
+    // One step back is one node back, whichever layer that node is in.
     const back = editDocument(front, (draft) => reorderNode(draft, first.id, 'backward'));
-    expect(order(back)).toEqual(['two', 'one', 'three']);
+    expect(order(back)).toEqual([
+      'panel',
+      'panel',
+      'two',
+      'three',
+      'panel-label',
+      'one',
+      'panel-label',
+    ]);
 
-    // Renumbered 0..n-1 every time, so repeated steps cannot drift apart.
+    // Renumbered 0..n-1 every time, so repeated steps cannot drift apart. Each
+    // layer's nodes stay contiguous under the (layer, z) sort, so numbering the
+    // whole top level in one run reorders nothing across a boundary.
     const zs = Object.values(back.nodes)
       .filter((n) => n.parentId === null)
       .map((n) => n.z)
       .sort((a, b) => a - b);
     expect(zs).toEqual(zs.map((_, i) => i));
+  });
+
+  it('sends a shape under a graph, which needs its layer to change', () => {
+    const { doc, newId } = sampleDocument();
+    const withRect = editDocument(doc, (draft) => {
+      addShape(draft, newId, {
+        shape: 'rect',
+        frame: { x: 10, y: 10, width: 30, height: 20 },
+        fill: { color: '#ff0000', opacity: 1 },
+      });
+    });
+
+    const rect = Object.values(withRect.nodes).find((n) => n.type === 'shape')!;
+    const panel = Object.values(withRect.nodes).find((n) => n.type === 'panel')!;
+    const graphs = findLayer(withRect, panel.layerId)!;
+
+    // Created in Annotations, which sorts above Graphs however z is numbered —
+    // the reported bug: "send to back" left the rectangle covering the figure.
+    expect(findLayer(withRect, rect.layerId)!.name).toBe('Annotations');
+    expect(compareDrawOrder(withRect, rect, panel)).toBeGreaterThan(0);
+
+    const sent = editDocument(withRect, (draft) => reorderNode(draft, rect.id, 'back'));
+    const moved = sent.nodes[rect.id]!;
+
+    // Both read out of `sent`: every sibling is renumbered, so comparing
+    // against the pre-move panel would compare two different documents.
+    expect(compareDrawOrder(sent, moved, sent.nodes[panel.id]!)).toBeLessThan(0);
+    expect(findLayer(sent, moved.layerId)!.z).toBeLessThanOrEqual(graphs.z);
+    // Behind every other top-level node, not merely behind the panel.
+    for (const other of Object.values(sent.nodes).filter(
+      (n) => n.parentId === null && n.id !== moved.id,
+    )) {
+      expect(compareDrawOrder(sent, moved, other)).toBeLessThan(0);
+    }
+
+    // And back to the front again, so the move is not one-way.
+    const returned = editDocument(sent, (draft) => reorderNode(draft, rect.id, 'front'));
+    for (const other of Object.values(returned.nodes).filter(
+      (n) => n.parentId === null && n.id !== rect.id,
+    )) {
+      expect(compareDrawOrder(returned, returned.nodes[rect.id]!, other)).toBeGreaterThan(0);
+    }
+  });
+
+  it('steps a shape across a layer boundary one press at a time', () => {
+    const { doc, newId } = sampleDocument();
+    const withRect = editDocument(doc, (draft) => {
+      addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } });
+    });
+    const rect = Object.values(withRect.nodes).find((n) => n.type === 'shape')!;
+
+    // Two panels sit below it, so two presses put it under both — the second is
+    // the one that has to leave the Annotations layer.
+    const once = editDocument(withRect, (draft) => reorderNode(draft, rect.id, 'backward'));
+    const twice = editDocument(once, (draft) => reorderNode(draft, rect.id, 'backward'));
+
+    const panels = Object.values(twice.nodes).filter((n) => n.type === 'panel');
+    expect(panels).toHaveLength(2);
+    for (const panel of panels) {
+      expect(compareDrawOrder(twice, twice.nodes[rect.id]!, panel)).toBeLessThan(0);
+    }
+    expect(findLayer(twice, twice.nodes[rect.id]!.layerId)!.name).toBe('Graphs');
+  });
+
+  it('stops rather than moving a node into a hidden or locked layer', () => {
+    const { doc, newId } = sampleDocument();
+    const withRect = editDocument(doc, (draft) => {
+      addShape(draft, newId, { shape: 'rect', frame: { x: 0, y: 0, width: 10, height: 10 } });
+    });
+    const rect = Object.values(withRect.nodes).find((n) => n.type === 'shape')!;
+
+    const landsIn = (
+      where: 'front' | 'back',
+      prepare: (draft: typeof withRect) => void = () => undefined,
+    ): string => {
+      const prepared = editDocument(withRect, prepare);
+      const sent = editDocument(prepared, (draft) => reorderNode(draft, rect.id, where));
+      return findLayer(sent, sent.nodes[rect.id]!.layerId)!.name;
+    };
+
+    // Untouched, the rectangle reaches the layer of the node it comes to rest
+    // against — the panels it was reported as covering. (Not `Images`: the
+    // sample has no node there, and an empty layer is nothing to rest against.)
+    expect(landsIn('back')).toBe('Graphs');
+    expect(landsIn('front')).toBe('Labels');
+
+    // Hidden or locked, that layer is out of bounds: a draw-order command must
+    // not make an object disappear or become unselectable, so the node goes as
+    // far as it legally may — here, no further than the bottom of its own.
+    expect(
+      landsIn('back', (draft) => {
+        draft.layers.find((l) => l.name === 'Graphs')!.hidden = true;
+      }),
+    ).toBe('Annotations');
+    expect(
+      landsIn('back', (draft) => {
+        draft.layers.find((l) => l.name === 'Graphs')!.locked = true;
+      }),
+    ).toBe('Annotations');
+
+    // Stopping short is per layer, not all-or-nothing: with the panel letters'
+    // own layer locked the rectangle still climbs through the one below it.
+    expect(
+      landsIn('front', (draft) => {
+        draft.layers.find((l) => l.name === 'Labels')!.locked = true;
+      }),
+    ).toBe('Statistics');
+  });
+
+  it('orders the children of a parent by z alone, with no layer term', () => {
+    const { doc, newId } = sampleDocument();
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const withChildren = editDocument(doc, (draft) => {
+      // A shape parented into the panel: created in Annotations, drawn among the
+      // panel's own children, where the layer never enters the comparison.
+      addShape(draft, newId, {
+        shape: 'rect',
+        frame: { x: 0, y: 0, width: 5, height: 5 },
+        parentId: panel.id,
+      });
+    });
+
+    const child = Object.values(withChildren.nodes).find(
+      (n) => n.type === 'shape' && n.parentId === panel.id,
+    )!;
+    const plot = Object.values(withChildren.nodes).find((n) => n.parentId === panel.id && n.type === 'plot')!;
+    expect(child.z).toBeGreaterThan(plot.z);
+
+    const sent = editDocument(withChildren, (draft) => reorderNode(draft, child.id, 'back'));
+    expect(sent.nodes[child.id]!.z).toBeLessThan(sent.nodes[plot.id]!.z);
+    // No layer change: among children the layer is not what decides the order,
+    // so moving one would be a side effect nobody asked for.
+    expect(sent.nodes[child.id]!.layerId).toBe(child.layerId);
   });
 });
 

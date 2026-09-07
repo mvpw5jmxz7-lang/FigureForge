@@ -601,7 +601,11 @@ export function Toolbar({
       </div>
 
       {/* Draw order for whatever is selected. Layers has the same two steps per
-          row; this is the version that works while you are looking at the page. */}
+          row; this is the version that works while you are looking at the page.
+          Front/back mean the front and back of the *page*: for a top-level node
+          `reorderNode` moves it across layer boundaries, since layer z leads the
+          draw order and a shape that stopped at the floor of its own layer was
+          still drawn over every graph. */}
       <div className="toolbar-group">
         {(
           [

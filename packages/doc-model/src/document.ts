@@ -177,6 +177,27 @@ export function isLocked(doc: FigureDocument, id: NodeId): boolean {
   return isEffectivelyLocked(doc.nodes, id);
 }
 
+/**
+ * Compare two siblings by the order they are drawn in.
+ *
+ * Top-level nodes are ordered by `layer.z` and then their own `z`: layers give
+ * the Illustrator-style global stacking (all labels above all graphs), and `z`
+ * orders siblings within that. A parent's children carry no layer term at all —
+ * they are drawn in plain `z` order inside their parent's group.
+ *
+ * Exported because two places need this one answer: the renderer draws in it and
+ * `reorderNode` moves a node through it. A second copy is how they came to
+ * disagree about where "the back" is — "send to back" renumbered `z` alone and
+ * left a rectangle at the floor of the Annotations layer, still drawn over every
+ * graph beneath it.
+ */
+export function compareDrawOrder(doc: FigureDocument, a: FigureNode, b: FigureNode): number {
+  if (a.parentId !== null || b.parentId !== null) return a.z - b.z;
+  const za = findLayer(doc, a.layerId)?.z ?? 0;
+  const zb = findLayer(doc, b.layerId)?.z ?? 0;
+  return za - zb || a.z - b.z;
+}
+
 /** All nodes assigned to a layer, in draw order. */
 export function nodesInLayer(doc: FigureDocument, layerId: LayerId): FigureNode[] {
   return Object.values(doc.nodes)

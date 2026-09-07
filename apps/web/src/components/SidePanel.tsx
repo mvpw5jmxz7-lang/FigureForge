@@ -2842,8 +2842,9 @@ function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProp
       ]
         .filter(Boolean)
         .join(' ')}
-      // The layer is what ▲/▼ reorder within, so naming it here is what makes
-      // a press that appears to do nothing legible.
+      // ▲/▼ step through the real draw order and carry the node across a layer
+      // boundary when it reaches one, so naming the layer here is what explains
+      // why a row's chip changes after enough presses.
       title={`${node.name} — ${layerName(node)} layer`}
       onClick={() => onSelectionChange([node.id])}
     >
