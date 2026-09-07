@@ -21,6 +21,7 @@ import {
   findDataset,
   findLayer,
   imageContentRect,
+  imageScaleBarBelowExtentMm,
   montageCellRects,
   montageTiles,
   isTwoFactor,
@@ -948,6 +949,19 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
   const letterboxed = kept.width < width - 0.0001 || kept.height < height - 0.0001;
 
   /*
+   * A scale bar placed below the picture is drawn outside the frame, so the
+   * clip below has to reach far enough down to keep it.
+   *
+   * Extended only by the band such a bar needs, and only when there is one:
+   * dropping the overlay clip altogether would also un-clip an annotation the
+   * author left outside the frame, which this clip deliberately hides. Worth
+   * being precise about because the uncropped branch emits no clip at all — a
+   * below-placed bar would have looked right until the author cropped the
+   * micrograph, and then silently vanished.
+   */
+  const belowBand = imageScaleBarBelowExtentMm(doc.nodes, node.id);
+
+  /*
    * The image is clipped to the kept region and the overlays to the frame.
    *
    * They differ only when the crop letterboxes, and there they must: clipping
@@ -961,9 +975,32 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
     ? group({ 'clip-path': `url(#${clipId}-kept)` }, [image])
     : image;
 
-  return group({ 'clip-path': `url(#${clipId})` }, [
+  /*
+   * The picture keeps the frame clip; the overlays get their own, taller by the
+   * band a below-placed bar needs.
+   *
+   * They cannot share one: on this branch the `<image>` is deliberately larger
+   * than the frame — that is how a crop is drawn — so a clip stretched to hold
+   * the bar would also reveal the source below the frame, showing exactly the
+   * region the author cropped away. Emitted only when there is such a bar, so
+   * every other cropped image keeps the markup it already had.
+   */
+  const clipped = group({ 'clip-path': `url(#${clipId})` }, [drawn]);
+  const chrome =
+    belowBand > 0
+      ? [group({ 'clip-path': `url(#${clipId}-overlay)` }, overlays)]
+      : [group({ 'clip-path': `url(#${clipId})` }, overlays)];
+
+  return group({}, [
     el('defs', {}, [
       el('clipPath', { id: clipId }, [el('rect', { x: 0, y: 0, width, height })]),
+      ...(belowBand > 0
+        ? [
+            el('clipPath', { id: `${clipId}-overlay` }, [
+              el('rect', { x: 0, y: 0, width, height: height + belowBand }),
+            ]),
+          ]
+        : []),
       ...(letterboxed
         ? [
             el('clipPath', { id: `${clipId}-kept` }, [
@@ -972,8 +1009,8 @@ function renderImage(node: ImageNode, doc: FigureDocument, options: RenderOption
           ]
         : []),
     ]),
-    drawn,
-    ...overlays,
+    clipped,
+    ...chrome,
   ]);
 }
 

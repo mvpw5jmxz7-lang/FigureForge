@@ -7,9 +7,10 @@
  * between them never destroys work.
  */
 
-import type { PointMm, RectMm } from './geometry.js';
+import type { PointMm, RectMm, ShapeMm } from './geometry.js';
 import {
-  fitAspectAligned,
+  aspectShape,
+  fitShape,
   right,
   bottom,
   centerX,
@@ -18,6 +19,7 @@ import {
   snapAngle,
 } from './geometry.js';
 import type { FigureNode, NodeId, NodeMap } from './nodes.js';
+import { absoluteFrame, descendantsOf } from './nodes.js';
 
 export interface GridSpec {
   rows: number;
@@ -183,10 +185,20 @@ export function spanCell(spec: GridSpec, slot: GridSlot, options: LayoutOptions)
   };
 }
 
-export interface PanelLayoutInput {
+export interface LayoutUnitInput {
   id: NodeId;
   /** Width/height the panel must keep, or null to fill its cell. */
   aspectLock: number | null;
+  /**
+   * The panel's full shape, where a stored ratio is not enough to express it.
+   *
+   * A montage's height is affine in its width — cells plus bands that do not
+   * scale — so `aspectLock` is exact only at the size it was written at. An
+   * auto-fitting montage passes its shape here and the lock stays as the
+   * manual-resize fallback; every other panel passes nothing and is laid out
+   * exactly as before.
+   */
+  shape?: ShapeMm | null;
   /** Explicit grid placement. Absent means "next cell in reading order". */
   slot?: GridSlot | null;
 }
@@ -213,7 +225,7 @@ export interface PanelLayoutInput {
  * proportioned micrographs lines up along its top edge.
  */
 export function autoLayout(
-  panels: readonly PanelLayoutInput[],
+  units: readonly LayoutUnitInput[],
   spec: GridSpec,
   options: LayoutOptions,
 ): Map<NodeId, RectMm> {
@@ -221,8 +233,8 @@ export function autoLayout(
   const frames = new Map<NodeId, RectMm>();
   const labelGutter = options.labelGutterMm ?? 0;
 
-  panels.forEach((panel, index) => {
-    const cell = panel.slot ? spanCell(spec, panel.slot, options) : cells[index];
+  units.forEach((unit, index) => {
+    const cell = unit.slot ? spanCell(spec, unit.slot, options) : cells[index];
     if (!cell) return;
 
     const inner: RectMm = {
@@ -233,8 +245,8 @@ export function autoLayout(
     };
 
     frames.set(
-      panel.id,
-      panel.aspectLock ? fitAspectAligned(inner, panel.aspectLock, 'start', 'start') : inner,
+      unit.id,
+      fitShape(inner, unit.shape ?? aspectShape(unit.aspectLock), 'start', 'start'),
     );
   });
 
@@ -701,12 +713,125 @@ export function distributeFrames(
   return out;
 }
 
-/** Panels in reading order, which is the order panel letters are assigned. */
-export function readingOrder(nodes: NodeMap, rowToleranceMm = 5): FigureNode[] {
-  const panels = Object.values(nodes).filter((n) => n.type === 'panel');
-  return panels.sort((a, b) => {
-    // Treat panels within a row band as the same row, then order left to right.
-    const sameRow = Math.abs(a.frame.y - b.frame.y) <= rowToleranceMm;
-    return sameRow ? a.frame.x - b.frame.x : a.frame.y - b.frame.y;
-  });
+/**
+ * The row tolerance `readingOrder` bands on: two panels whose tops are within
+ * this are the same row.
+ */
+export const ROW_TOLERANCE_MM = 5;
+
+/**
+ * Group items into rows by the same tolerance `readingOrder` uses to decide
+ * what a row is.
+ *
+ * Shared by `pushPanelsFrom`, which shrinks rows to claw back page overflow,
+ * and by the smart-layout score's dead-height term. Both need the *grouping*;
+ * `readingOrder`/`readsInOrder` need an ordering instead and share a comparator
+ * with each other, so they are deliberately not routed through here — the two
+ * are different algorithms over the same constant, not two copies of one.
+ */
+export function rowBands<T>(
+  items: readonly T[],
+  topOf: (item: T) => number,
+  rowToleranceMm = ROW_TOLERANCE_MM,
+): T[][] {
+  const rows: T[][] = [];
+  for (const item of [...items].sort((a, b) => topOf(a) - topOf(b))) {
+    const row = rows[rows.length - 1];
+    if (row && Math.abs(topOf(row[0]!) - topOf(item)) <= rowToleranceMm) row.push(item);
+    else rows.push([item]);
+  }
+  return rows;
+}
+
+/**
+ * Reading order between two frames: same row band, then left to right.
+ *
+ * The one spelling of the rule. `readingOrder`, `layoutUnits` and the solver's
+ * own `readsInOrder` all go through it — the last of those inlined a hard-coded
+ * tolerance, so "they share a comparator" was written down before it was true.
+ */
+export function compareReadingOrder(
+  a: RectMm,
+  b: RectMm,
+  rowToleranceMm = ROW_TOLERANCE_MM,
+): number {
+  const sameRow = Math.abs(a.y - b.y) <= rowToleranceMm;
+  return sameRow ? a.x - b.x : a.y - b.y;
+}
+
+/**
+ * Panels in reading order, which is the order panel letters are assigned.
+ *
+ * Sorted on **page** position, not on `frame`. A panel inside a group has a
+ * frame relative to that group, so comparing the two spaces put a grouped panel
+ * wherever its group-local origin happened to fall: measured on three panels
+ * with two of them grouped at the *bottom* of the page, this returned `A C B`
+ * where the page plainly reads `C A B`, and the figure was lettered to match.
+ *
+ * The key is computed once rather than inside the comparator, which would make
+ * the sort cost depend on nesting depth. With no groups `absoluteFrame` returns
+ * the node's own frame without executing its ancestor loop, so nothing about an
+ * ungrouped figure changes — not even a float addition.
+ */
+export function readingOrder(nodes: NodeMap, rowToleranceMm = ROW_TOLERANCE_MM): FigureNode[] {
+  return Object.values(nodes)
+    .filter((n) => n.type === 'panel')
+    .map((node) => ({ node, frame: absoluteFrame(nodes, node.id) ?? node.frame }))
+    .sort((a, b) => compareReadingOrder(a.frame, b.frame, rowToleranceMm))
+    .map((entry) => entry.node);
+}
+
+/**
+ * A thing the page layout positions as one: a top-level panel, or a top-level
+ * group carrying at least one panel.
+ *
+ * The unit, not the panel, is what a grid cell or an arrangement column holds.
+ * A group is kept together and its members scale with it — grouping panels is
+ * specifically for moving and resizing them as one, so a layout that pulled a
+ * group apart would be undoing what the author asked for. Same stance round 21
+ * took when it left `group` in `CONTAINER_TYPES`.
+ */
+export interface LayoutUnit {
+  /** The node the layout moves: the panel itself, or the group. */
+  id: NodeId;
+  kind: 'panel' | 'group';
+  /**
+   * Page-space frame. A unit is top-level by construction, so this *is*
+   * `node.frame` — which is the property that lets a panel unit keep being
+   * placed by plain assignment.
+   */
+  frame: RectMm;
+  /** Every panel this unit carries, at any depth. One entry for a panel unit. */
+  panelIds: readonly NodeId[];
+}
+
+/**
+ * The units on a page, in reading order.
+ *
+ * A group holding no panel at all — an annotation grouped with another
+ * annotation — is not a unit and is left exactly where it is, for the same
+ * reason a loose `shape` is: the layout arranges panels, and moving a
+ * decorative group would need a rule about what it belongs to that the document
+ * does not carry.
+ *
+ * Iterates raw `Object.values` rather than `childrenOf`, which sorts by `z`:
+ * that would change the tie-break between two exactly coincident panels, and
+ * an ungrouped figure has to come out of here in precisely the order it used
+ * to.
+ */
+export function layoutUnits(nodes: NodeMap, rowToleranceMm = ROW_TOLERANCE_MM): LayoutUnit[] {
+  const units: LayoutUnit[] = [];
+  for (const node of Object.values(nodes)) {
+    if (node.parentId !== null) continue;
+    if (node.type === 'panel') {
+      units.push({ id: node.id, kind: 'panel', frame: node.frame, panelIds: [node.id] });
+    } else if (node.type === 'group') {
+      const panelIds = descendantsOf(nodes, node.id)
+        .filter((n) => n.type === 'panel')
+        .map((n) => n.id);
+      if (panelIds.length === 0) continue;
+      units.push({ id: node.id, kind: 'group', frame: node.frame, panelIds });
+    }
+  }
+  return units.sort((a, b) => compareReadingOrder(a.frame, b.frame, rowToleranceMm));
 }

@@ -286,6 +286,7 @@ const panelLabelSchema = z.object({
   text: z.string(),
   style: textStyleSchema,
   panelId: z.string(),
+  liftMm: z.number().optional(),
 });
 
 const shapeSchema = z.object({
@@ -335,6 +336,8 @@ const scaleBarSchema = z.object({
   fill: fillSchema,
   barHeightMm: nonNeg,
   labelPosition: z.enum(['above', 'below', 'none']),
+  /** Optional: post-dates SCHEMA_VERSION 1. Absent reads as 'inside'. */
+  placement: z.enum(['inside', 'below']).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   calibrationSource: z.enum(['metadata', 'manual', 'measured', 'unknown']).optional(),
 });

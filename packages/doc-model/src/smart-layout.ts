@@ -31,13 +31,15 @@
  * exactly the same reason.
  */
 
-import type { RectMm } from './geometry.js';
+import type { RectMm, ShapeMm } from './geometry.js';
+import { FREE_SHAPE, heightForWidth } from './geometry.js';
 import type { NodeId, PanelNode } from './nodes.js';
 import type { FigureDocument } from './document.js';
-import { measureGutters, readingOrder } from './layout.js';
+import { compareReadingOrder, layoutUnits, measureGutters, rowBands } from './layout.js';
+import type { LayoutUnit } from './layout.js';
 import type { Arrangement, PanelSizeDemand } from './arrangement.js';
 import {
-  arrangementFrames,
+  arrangementLayout,
   arrangementHeightDemand,
   arrangementSignature,
   enumerateArrangements,
@@ -48,9 +50,11 @@ import {
 import {
   MIN_TILE_MM,
   imageContentRect,
+  imageScaleBarBelowExtentMm,
+  unitLayoutShape,
   montageFixedExtentMm,
-  montagePanelAspect,
-  placePanels,
+  montageShape,
+  placeUnits,
 } from './operations.js';
 import { MM_PER_INCH } from './units.js';
 
@@ -79,8 +83,20 @@ export interface PanelDemand {
   /** The size at which nothing is compromised. Never smaller than `min`. */
   comfortWidthMm: number;
   comfortHeightMm: number;
-  /** Width/height the panel should hold, or null to fill its cell. */
+  /**
+   * Width/height of the panel's *content block*, or null to fill its cell.
+   *
+   * Not the panel's own ratio once `fixedWidthMm`/`fixedHeightMm` are non-zero
+   * — those bands do not scale, so the panel's ratio differs at every size.
+   * `sizeDemand` composes all three into a `ShapeMm`.
+   */
   aspect: number | null;
+  /**
+   * The panel's extent that is *not* content: gutters, padding, a group-label
+   * band, a scale-bar band. Zero for a plot and for a lone uncaptioned image.
+   */
+  fixedWidthMm: number;
+  fixedHeightMm: number;
   /** True when `aspect` was measured from content and may be written to `aspectLock`. */
   aspectFromContent: boolean;
   /** 0..1. A measured claim on page area — see `imagePanelDemand`. */
@@ -130,8 +146,16 @@ export interface SmartLayoutOptions {
 }
 
 export interface SmartLayoutInput {
-  /** Panel ids in reading order — from `readingOrder`, never `Object.values`. */
-  order: readonly NodeId[];
+  /**
+   * What the layout positions, in reading order — from `layoutUnits`, never
+   * `Object.values`. A group is one unit, not one per member panel.
+   */
+  units: readonly LayoutUnit[];
+  /**
+   * The document, so a group's demand can be rolled up from its members and
+   * its shape constraint read off them.
+   */
+  doc: FigureDocument;
   scales: readonly SmartLayoutScaleInput[];
   options: SmartLayoutOptions;
   /**
@@ -147,6 +171,7 @@ export interface SmartLayoutTerms {
   unmetDemand: number;
   overResolution: number;
   whitespace: number;
+  bandWaste: number;
   pageHeight: number;
   fontReduction: number;
   gutterEvenness: number;
@@ -208,6 +233,25 @@ export const SMART_LAYOUT_WEIGHTS = {
   overResolution: 1.0,
   /** Usable page area no panel frame covers. */
   whitespace: 0.6,
+  /**
+   * Dead height *inside* a row: a panel that stops short of its neighbours'
+   * bottom edge, which is the strip under a picture that cannot be as tall as
+   * the plot beside it.
+   *
+   * Overlaps `whitespace` deliberately — a dead strip is also uncovered page —
+   * but measures a different thing. `whitespace` is a fraction of the *page*,
+   * so it is confounded with page height (both divide by `usableArea`) and a
+   * ragged row scored barely a point on it. This is a fraction of the *rows*,
+   * so it is the term that can tell a tight figure from a ragged one at the
+   * same page height, which is mostly how it earns its keep: a wide montage in
+   * a band of its own scores zero here, the same montage beside a plot does
+   * not, and that is a structural difference nothing could previously see.
+   *
+   * Below `unmetDemand` on purpose. The two can only conflict through the width
+   * a picture takes from a plot, and squeezing a plot to align a picture must
+   * lose while a small trade that buys alignment wins.
+   */
+  bandWaste: 0.5,
   /** Journals cap page height; using more of it is a real cost, not free. */
   pageHeight: 0.25,
   /** The author's type, spent to buy plot area. */
@@ -298,6 +342,8 @@ export function imagePanelDemand(
     comfortWidthMm: Math.max(MIN_TILE_MM, panel.frame.width),
     comfortHeightMm: Math.max(MIN_TILE_MM, panel.frame.height),
     aspect: null,
+    fixedWidthMm: 0,
+    fixedHeightMm: 0,
     aspectFromContent: false,
     priority: 0.3,
     rejectAboveWidthMm: Number.POSITIVE_INFINITY,
@@ -325,19 +371,36 @@ export function imagePanelDemand(
       ? perTilePx / ((exportDpi * DPI_ERROR_FRACTION) / MM_PER_INCH)
       : Number.POSITIVE_INFINITY;
 
-  // The panel's own shape. A montage solves it in closed form including its
-  // gutters and label bands; a single picture is just where its ink lands.
+  /*
+   * The panel's shape: the aspect of its *content*, plus the bands that do not
+   * scale with it. A montage solves both in closed form; a lone picture is
+   * where its ink lands, with a band under it only if it carries a
+   * below-placed scale bar.
+   *
+   * Keeping the bands separate is the whole point — a single ratio is wrong at
+   * every size but one, which is what left 21 mm of dead page under each
+   * picture of a captioned montage. See `ShapeMm`.
+   */
   let aspect: number | null = null;
+  let fixedWidthMm = 0;
+  let fixedHeightMm = 0;
   if (isMontage) {
-    aspect = montagePanelAspect(doc, panel.id);
+    const shape = montageShape(doc, panel.id);
+    if (shape) {
+      aspect = shape.contentAspect;
+      fixedWidthMm = shape.fixedWidthMm;
+      fixedHeightMm = shape.fixedHeightMm;
+    }
   } else {
     const only = images[0];
     if (only && only.type === 'image') {
       const content = imageContentRect(only);
       if (content.height > 0) aspect = content.width / content.height;
+      fixedHeightMm = imageScaleBarBelowExtentMm(doc.nodes, only.id);
     }
   }
   if (aspect !== null && (!Number.isFinite(aspect) || aspect <= 0)) aspect = null;
+  const shape: ShapeMm = aspect === null ? FREE_SHAPE : { contentAspect: aspect, fixedWidthMm, fixedHeightMm };
 
   /*
    * An author-set lock is a constraint, not a suggestion: only rewrite one the
@@ -355,16 +418,24 @@ export function imagePanelDemand(
     : Math.max(MIN_TILE_MM, IMAGE_LEGIBILITY_MM);
   const minHeightMm = isMontage && montage
     ? montage.rows * MIN_TILE_MM + montage.fixedHeightMm
-    : Math.max(MIN_TILE_MM, aspect ? IMAGE_LEGIBILITY_MM / aspect : IMAGE_LEGIBILITY_MM);
+    : Math.max(
+        MIN_TILE_MM,
+        (aspect ? IMAGE_LEGIBILITY_MM / aspect : IMAGE_LEGIBILITY_MM) + fixedHeightMm,
+      );
 
   const comfortWidthMm = Math.max(minWidthMm, Math.min(maxUsefulWidthMm, usableWidthMm));
-  const comfortHeightMm = Math.max(minHeightMm, aspect ? comfortWidthMm / aspect : comfortWidthMm);
+  const comfortHeightMm = Math.max(
+    minHeightMm,
+    aspect ? heightForWidth(shape, comfortWidthMm) : comfortWidthMm,
+  );
 
   return {
     ...base,
     kind: isMontage ? 'montage' : 'image',
     minWidthMm,
     minHeightMm,
+    fixedWidthMm,
+    fixedHeightMm,
     comfortWidthMm,
     comfortHeightMm,
     aspect,
@@ -375,27 +446,156 @@ export function imagePanelDemand(
   };
 }
 
+/**
+ * What one *layout unit* needs — structurally a `PanelDemand` keyed by the unit
+ * rather than by a panel, because that is exactly what a group's aggregate is:
+ * the same numbers, derived from its members' own.
+ *
+ * A separate type rather than a redefinition, so the measurement half stays
+ * per-panel and `packages/render` does not have to learn what a group is.
+ */
+export interface UnitDemand extends Omit<PanelDemand, 'panelId'> {
+  unitId: NodeId;
+  panelIds: readonly NodeId[];
+  /**
+   * The shape the layout must hold this unit to.
+   *
+   * On the demand rather than re-derived at the call site, because the two
+   * kinds answer it from different places: a panel's comes from its *measured*
+   * content — `imagePanelDemand` has already applied the "an author-set lock is
+   * a constraint" rule — while a group's comes from its members' locks.
+   */
+  shape: ShapeMm;
+}
+
+/**
+ * Roll each unit's members up into one demand.
+ *
+ * A panel unit is its own demand, re-keyed. A group is scaled by exactly one
+ * `(sx, sy)` at every depth — `resizeGroupGeometry` recurses with
+ * `sx' = target.width / old.width` and `target.width = child.frame.width * sx`,
+ * so `sx' === sx` — which means a member's realised width is exactly `sx·wᵢ`
+ * and these bounds are exact rather than estimates.
+ *
+ * `max` for comfort because comfort is "the size at which *nothing* is
+ * compromised", so the hungriest member sets it. `max` for priority and never a
+ * sum: priority is a measured claim on page area, and summing would let five
+ * plots outrank one 4000 px micrograph, inverting what the measurement says.
+ *
+ * Every ratio is dimensionless, so the aggregate is **scale-invariant** — for a
+ * group already resized by `s` both `G` and `wᵢ` carry the `s` and it cancels.
+ * That is what keeps `rescoreCandidate` reporting the same numbers the solve
+ * did, which is the property four document clones were spent on in round 35.
+ */
+export function unitDemands(
+  doc: FigureDocument,
+  units: readonly LayoutUnit[],
+  panelDemands: readonly PanelDemand[],
+): UnitDemand[] {
+  const byPanel = new Map(panelDemands.map((d) => [d.panelId, d]));
+
+  return units.map((unit) => {
+    const own = byPanel.get(unit.id);
+    if (unit.kind === 'panel' && own) {
+      const { panelId: _panelId, ...rest } = own;
+      return {
+        ...rest,
+        unitId: unit.id,
+        panelIds: unit.panelIds,
+        shape:
+          own.aspectFromContent && own.aspect
+            ? {
+                contentAspect: own.aspect,
+                fixedWidthMm: own.fixedWidthMm,
+                fixedHeightMm: own.fixedHeightMm,
+              }
+            : FREE_SHAPE,
+      };
+    }
+
+    const members = unit.panelIds
+      .map((id) => ({ demand: byPanel.get(id), frame: doc.nodes[id]?.frame }))
+      .filter((m): m is { demand: PanelDemand; frame: RectMm } => !!m.demand && !!m.frame);
+
+    const { width: gw, height: gh } = unit.frame;
+    // A member with no positive extent contributes no ratio: no finite scale
+    // satisfies it, and an Infinity here would reject every candidate.
+    const ratio = (
+      pick: (d: PanelDemand) => number,
+      size: (f: RectMm) => number,
+      extent: number,
+    ): number => {
+      let worst = 0;
+      for (const m of members) {
+        const s = size(m.frame);
+        if (s > 0) worst = Math.max(worst, pick(m.demand) / s);
+      }
+      return worst > 0 ? extent * worst : extent;
+    };
+
+    let rejectAboveWidthMm = Number.POSITIVE_INFINITY;
+    for (const m of members) {
+      if (m.frame.width > 0 && Number.isFinite(m.demand.rejectAboveWidthMm)) {
+        rejectAboveWidthMm = Math.min(
+          rejectAboveWidthMm,
+          gw * (m.demand.rejectAboveWidthMm / m.frame.width),
+        );
+      }
+    }
+
+    return {
+      unitId: unit.id,
+      panelIds: unit.panelIds,
+      kind: 'other',
+      minWidthMm: ratio((d) => d.minWidthMm, (f) => f.width, gw),
+      minHeightMm: ratio((d) => d.minHeightMm, (f) => f.height, gh),
+      comfortWidthMm: ratio((d) => d.comfortWidthMm, (f) => f.width, gw),
+      comfortHeightMm: ratio((d) => d.comfortHeightMm, (f) => f.height, gh),
+      // A group has no `aspectLock` field to write, and writing one onto a
+      // member the solver never sized individually would be a fabricated
+      // number — exactly what round 41 removed. Its shape constraint is decided
+      // by `unitLayoutShape` from the members instead.
+      aspect: null,
+      fixedWidthMm: 0,
+      fixedHeightMm: 0,
+      aspectFromContent: false,
+      priority: members.reduce((worst, m) => Math.max(worst, m.demand.priority), 0.3),
+      rejectAboveWidthMm,
+      cappedByPage: members.some((m) => m.demand.cappedByPage),
+      fontScale: members[0]?.demand.fontScale ?? 1,
+      shape: unitLayoutShape(doc, unit).shape ?? FREE_SHAPE,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Candidate generation
 // ---------------------------------------------------------------------------
 
 /** What a panel wants along each axis: comfort, but never below the wall. */
-const wantWidth = (d: PanelDemand): number => Math.max(d.minWidthMm, d.comfortWidthMm);
-const wantHeight = (d: PanelDemand): number => Math.max(d.minHeightMm, d.comfortHeightMm);
+const wantWidth = (d: { minWidthMm: number; comfortWidthMm: number }): number =>
+  Math.max(d.minWidthMm, d.comfortWidthMm);
+const wantHeight = (d: { minHeightMm: number; comfortHeightMm: number }): number =>
+  Math.max(d.minHeightMm, d.comfortHeightMm);
 
 /**
- * A `PanelDemand` reduced to the four numbers `arrangement.ts` needs.
+ * A `PanelDemand` reduced to what `arrangement.ts` needs.
  *
  * That module is pure geometry with no notion of priority, resolution limits or
  * where a demand came from, which is what lets it be tested against exact
  * millimetres with no document behind it.
+ *
+ * The shape is emitted whole or not at all. `contentAspect` without its bands
+ * is meaningless — it would describe a panel with no gutters, no padding and no
+ * caption — so a half-applied constraint is made unrepresentable rather than
+ * merely avoided.
  */
-const sizeDemand = (d: PanelDemand): PanelSizeDemand => ({
+const sizeDemand = (d: UnitDemand): PanelSizeDemand => ({
   minWidthMm: Math.max(MIN_TILE_MM, d.minWidthMm),
   minHeightMm: Math.max(MIN_TILE_MM, d.minHeightMm),
   wantWidthMm: wantWidth(d),
   wantHeightMm: wantHeight(d),
-  aspect: d.aspectFromContent ? d.aspect : null,
+  shape: d.shape,
 });
 
 // ---------------------------------------------------------------------------
@@ -410,6 +610,47 @@ function stdev(values: readonly number[]): number {
 }
 
 /**
+ * How much of each row's own box no panel covers, averaged over the rows.
+ *
+ * Derived from the frames rather than from the band structure, deliberately:
+ * the finalists are re-scored against a document each candidate was actually
+ * applied to — after `reserveLayoutSpace` has moved panels for a group heading
+ * — and a term computed from the arrangement could not be recomputed there. The
+ * property the re-scoring pass exists to buy, that the score beside a candidate
+ * is the score of the figure the author gets, has to hold for every term. It is
+ * also what lets the current layout be scored as a baseline at all, since that
+ * has no arrangement behind it.
+ *
+ * Width-weighted inside a row, because a 3 mm strip under a 170 mm montage is a
+ * visible dead band and the same strip under a 20 mm inset is nothing; and
+ * height-weighted across rows, so a tall ragged row counts for more than a short
+ * one. Already 0..1 by construction.
+ *
+ * The obvious `wastedArea / usableArea` was tried on paper first and is too
+ * blunt: the reported figure's 8.6 mm strip under a 126 mm montage comes to
+ * 0.043 of the page, well under one point of score, where arrangements here are
+ * separated by a couple of points. As a fraction of its own row it is 0.165 —
+ * and that is also the quantity an author is actually looking at.
+ */
+function bandWaste(frames: ReadonlyMap<NodeId, RectMm>): number {
+  let weighted = 0;
+  let heightSum = 0;
+
+  for (const row of rowBands([...frames.values()], (f) => f.y)) {
+    const top = Math.min(...row.map((f) => f.y));
+    const bottom = Math.max(...row.map((f) => f.y + f.height));
+    const rowHeight = bottom - top;
+    const box = row.reduce((sum, f) => sum + f.width, 0) * rowHeight;
+    if (box <= 1e-6) continue;
+    const ink = row.reduce((sum, f) => sum + f.width * f.height, 0);
+    weighted += rowHeight * (1 - ink / box);
+    heightSum += rowHeight;
+  }
+
+  return heightSum > 0 ? clamp(weighted / heightSum, 0, 1) : 0;
+}
+
+/**
  * Score a set of frames against what the panels wanted, 0..100, higher better.
  *
  * `whitespace` counts each panel's **fitted** frame, not its cell. `autoLayout`
@@ -420,7 +661,7 @@ function stdev(values: readonly number[]): number {
  */
 export function scoreCandidate(
   frames: ReadonlyMap<NodeId, RectMm>,
-  demands: readonly PanelDemand[],
+  demands: readonly UnitDemand[],
   pageHeightMm: number,
   fontScale: number,
   options: SmartLayoutOptions,
@@ -431,7 +672,7 @@ export function scoreCandidate(
   let coveredArea = 0;
 
   for (const demand of demands) {
-    const frame = frames.get(demand.panelId);
+    const frame = frames.get(demand.unitId);
     if (!frame) continue;
     const satisfaction = Math.min(
       1,
@@ -469,6 +710,7 @@ export function scoreCandidate(
     unmetDemand: prioritySum > 0 ? clamp(unmetSum / prioritySum, 0, 1) : 0,
     overResolution: prioritySum > 0 ? clamp(overSum / prioritySum, 0, 1) : 0,
     whitespace: usableArea > 0 ? clamp(1 - coveredArea / usableArea, 0, 1) : 1,
+    bandWaste: bandWaste(frames),
     pageHeight: clamp((pageHeightMm - options.minPageHeightMm) / heightSpan, 0, 1),
     fontReduction: clamp((1 - fontScale) / Math.max(1e-6, 1 - smallestScale), 0, 1),
     gutterEvenness: clamp(stdev(all) / Math.max(1e-6, options.gutterMm), 0, 1),
@@ -479,6 +721,7 @@ export function scoreCandidate(
     (SMART_LAYOUT_WEIGHTS.unmetDemand * terms.unmetDemand +
       SMART_LAYOUT_WEIGHTS.overResolution * terms.overResolution +
       SMART_LAYOUT_WEIGHTS.whitespace * terms.whitespace +
+      SMART_LAYOUT_WEIGHTS.bandWaste * terms.bandWaste +
       SMART_LAYOUT_WEIGHTS.pageHeight * terms.pageHeight +
       SMART_LAYOUT_WEIGHTS.fontReduction * terms.fontReduction +
       SMART_LAYOUT_WEIGHTS.gutterEvenness * terms.gutterEvenness) /
@@ -501,20 +744,20 @@ export function scoreCandidate(
  */
 function rejectionFor(
   frames: ReadonlyMap<NodeId, RectMm>,
-  demands: readonly PanelDemand[],
+  demands: readonly UnitDemand[],
   nameOf: (id: NodeId) => string,
 ): string | null {
   for (const demand of demands) {
-    const frame = frames.get(demand.panelId);
-    if (!frame) return `${nameOf(demand.panelId)} was given no cell`;
+    const frame = frames.get(demand.unitId);
+    if (!frame) return `${nameOf(demand.unitId)} was given no cell`;
     if (frame.width < MIN_TILE_MM || frame.height < MIN_TILE_MM) {
-      return `${nameOf(demand.panelId)} collapses below ${MIN_TILE_MM} mm`;
+      return `${nameOf(demand.unitId)} collapses below ${MIN_TILE_MM} mm`;
     }
     if (frame.width + 0.01 < demand.minWidthMm) {
-      return `${nameOf(demand.panelId)} needs ${demand.minWidthMm.toFixed(1)} mm of width and this arrangement offers ${frame.width.toFixed(1)} mm`;
+      return `${nameOf(demand.unitId)} needs ${demand.minWidthMm.toFixed(1)} mm of width and this arrangement offers ${frame.width.toFixed(1)} mm`;
     }
     if (frame.height + 0.01 < demand.minHeightMm) {
-      return `${nameOf(demand.panelId)} needs ${demand.minHeightMm.toFixed(1)} mm of height and this arrangement offers ${frame.height.toFixed(1)} mm`;
+      return `${nameOf(demand.unitId)} needs ${demand.minHeightMm.toFixed(1)} mm of height and this arrangement offers ${frame.height.toFixed(1)} mm`;
     }
   }
   return null;
@@ -598,9 +841,7 @@ function readsInOrder(order: readonly NodeId[], frames: ReadonlyMap<NodeId, Rect
     const fa = frames.get(a);
     const fb = frames.get(b);
     if (!fa || !fb) return 0;
-    // `readingOrder`'s own comparator, including its 5 mm row band.
-    const sameRow = Math.abs(fa.y - fb.y) <= 5;
-    return sameRow ? fa.x - fb.x : fa.y - fb.y;
+    return compareReadingOrder(fa, fb);
   });
   return sorted.every((id, index) => id === order[index]);
 }
@@ -613,7 +854,8 @@ function readsInOrder(order: readonly NodeId[], frames: ReadonlyMap<NodeId, Rect
  * measured once. Nothing here re-measures a plot.
  */
 export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
-  const { order, scales, options } = input;
+  const { units, doc, scales, options } = input;
+  const order = units.map((u) => u.id);
   const n = order.length;
   if (n === 0 || scales.length === 0) {
     return { candidates: [], baseline: null, candidatesEvaluated: 0, blockedBy: null };
@@ -623,14 +865,15 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
 
   const usableWidth = options.pageWidthMm - 2 * options.marginMm;
   const scored: SmartLayoutCandidate[] = [];
+  const seenIds = new Set<string>();
   let evaluated = 0;
   let firstRejection: string | null = null;
 
   for (const scale of scales) {
-    // Demands must arrive in the panel order the slots are indexed by, so a
-    // mismatched measurement can never be silently paired with the wrong panel.
-    const byId = new Map(scale.demands.map((d) => [d.panelId, d]));
-    const demands = order.map((id) => byId.get(id)).filter((d): d is PanelDemand => d !== undefined);
+    // Demands must arrive in the unit order the slots are indexed by, so a
+    // mismatched measurement can never be silently paired with the wrong unit.
+    const byId = new Map(unitDemands(doc, units, scale.demands).map((d) => [d.unitId, d]));
+    const demands = order.map((id) => byId.get(id)).filter((d): d is UnitDemand => d !== undefined);
     if (demands.length !== n) continue;
 
     /*
@@ -641,7 +884,7 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
      */
     const tooWide = demands.find((d) => d.minWidthMm > usableWidth - options.labelGutterMm + 0.01);
     if (tooWide) {
-      firstRejection ??= `${nameOf(tooWide.panelId)} needs ${tooWide.minWidthMm.toFixed(1)} mm of width and the page offers ${(usableWidth - options.labelGutterMm).toFixed(1)} mm`;
+      firstRejection ??= `${nameOf(tooWide.unitId)} needs ${tooWide.minWidthMm.toFixed(1)} mm of width and the page offers ${(usableWidth - options.labelGutterMm).toFixed(1)} mm`;
       continue;
     }
     const maxCols = mostThatFit(
@@ -655,10 +898,6 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
       options.gutterMm,
     );
 
-    const aspectLocks: Record<NodeId, number | null> = {};
-    for (const demand of demands) {
-      aspectLocks[demand.panelId] = demand.aspectFromContent ? demand.aspect : null;
-    }
     const sizes = demands.map(sizeDemand);
 
     for (const arrangement of enumerateArrangements(n, { maxColumns: maxCols, maxRows })) {
@@ -688,16 +927,24 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
         // Solved at *this* height, so a short page tightens every band toward
         // its minimum rather than scaling the wants down uniformly and pushing
         // one panel under its own floor.
-        const frames = arrangementFrames(
+        const layout = arrangementLayout(
           arrangement,
           order,
           sizes,
           layoutOptionsFor(options, pageHeightMm),
         );
-        if (!frames) {
+        if (!layout) {
           firstRejection ??= `no ${shape} arrangement fits in ${pageHeightMm.toFixed(0)} mm of page`;
           continue;
         }
+        const { frames } = layout;
+        /*
+         * The height the bands actually used, not the one we asked for. Every
+         * enumerated height at or above the arrangement's own `wantMm` now
+         * realises as exactly `wantMm`, so scoring the *requested* height would
+         * report a page taller than the one applying it produces.
+         */
+        const realisedHeightMm = Math.max(options.minPageHeightMm, layout.pageHeightMm);
 
         const rejection = rejectionFor(frames, demands, nameOf);
         if (rejection) {
@@ -708,12 +955,50 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
         // The structural reading-order argument, checked rather than trusted.
         if (!readsInOrder(order, frames)) continue;
 
-        const { score, terms } = scoreCandidate(frames, demands, pageHeightMm, scale.fontScale, options);
+        /*
+         * Two enumerated heights can now collapse onto one realised page, which
+         * would otherwise put two identical candidates in the list under
+         * different ids — and `id` is the React key the offered list renders on.
+         */
+        const id = `${shape}-h${realisedHeightMm.toFixed(1)}-f${scale.fontScale}`;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+
+        /*
+         * The ratio the panel really got, read off the frames rather than
+         * predicted from the demand.
+         *
+         * A montage's height is affine in its width, so no single ratio is
+         * right at more than one size — the old code took the demand's nominal
+         * aspect, computed at a 5 mm cell, and locked panels to a shape no
+         * candidate ever produced. This one is exact at the size the author is
+         * about to see, the same reason the page height is scored at its
+         * realised value rather than the enumerated one.
+         *
+         * `aspectFromContent` still decides whether a lock is written at all:
+         * an author-set lock is a constraint, not a suggestion.
+         */
+        const aspectLocks: Record<NodeId, number | null> = {};
+        for (const demand of demands) {
+          const frame = frames.get(demand.unitId);
+          aspectLocks[demand.unitId] =
+            demand.aspectFromContent && frame && frame.height > 0
+              ? frame.width / frame.height
+              : null;
+        }
+
+        const { score, terms } = scoreCandidate(
+          frames,
+          demands,
+          realisedHeightMm,
+          scale.fontScale,
+          options,
+        );
         scored.push({
-          id: `${shape}-h${pageHeightMm}-f${scale.fontScale}`,
+          id,
           arrangement,
           order,
-          pageHeightMm,
+          pageHeightMm: realisedHeightMm,
           fontScale: scale.fontScale,
           typeScale: scale.typeScale,
           minPt: scale.minPt,
@@ -789,7 +1074,19 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
    */
   const buckets = new Map<string, SmartLayoutCandidate>();
   for (const candidate of bestPerShape) {
-    const key = `${candidate.arrangement.bands.length}${hasStack(candidate.arrangement) ? 'L' : ''}`;
+    /*
+     * `A` is in the key for the same reason `L` is. An aligned arrangement is a
+     * distinct offer — tidy columns across every band — and it now scores
+     * honestly worse on `bandWaste`, because sharing one width division across
+     * bands is exactly what leaves a row ragged. Without its own bucket it would
+     * lose its slot to the plain variant on a point of score, quietly removing a
+     * shipped option.
+     */
+    const key = [
+      candidate.arrangement.bands.length,
+      hasStack(candidate.arrangement) ? 'L' : '',
+      candidate.arrangement.aligned ? 'A' : '',
+    ].join('');
     if (!buckets.has(key)) buckets.set(key, candidate);
   }
   const representatives = new Set(buckets.values());
@@ -801,9 +1098,12 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
     .sort((a, b) => bestPerShape.indexOf(a) - bestPerShape.indexOf(b));
 
   const baseScale = scales[0]!;
+  const baselineByUnit = new Map(
+    unitDemands(doc, units, baseScale.demands).map((d) => [d.unitId, d]),
+  );
   const baselineDemands = order
-    .map((id) => baseScale.demands.find((d) => d.panelId === id))
-    .filter((d): d is PanelDemand => d !== undefined);
+    .map((id) => baselineByUnit.get(id))
+    .filter((d): d is UnitDemand => d !== undefined);
 
   return {
     candidates: offered,
@@ -821,9 +1121,10 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
  */
 function currentAsCandidate(
   input: SmartLayoutInput,
-  demands: readonly PanelDemand[],
+  demands: readonly UnitDemand[],
 ): SmartLayoutCandidate {
-  const { options, order, currentFrames } = input;
+  const { options, currentFrames } = input;
+  const order = input.units.map((u) => u.id);
   const scale = input.scales[0]!;
   const { score, terms } = scoreCandidate(
     currentFrames,
@@ -862,7 +1163,7 @@ function currentAsCandidate(
 export function rescoreCandidate(
   candidate: SmartLayoutCandidate,
   frames: ReadonlyMap<NodeId, RectMm>,
-  demands: readonly PanelDemand[],
+  demands: readonly UnitDemand[],
   options: SmartLayoutOptions,
 ): SmartLayoutCandidate {
   const { score, terms } = scoreCandidate(
@@ -899,6 +1200,10 @@ export function explainCandidate(
     const diffs: { label: string; delta: number }[] = [
       { label: 'unmet demand', delta: baseline.terms.unmetDemand - candidate.terms.unmetDemand },
       { label: 'whitespace', delta: baseline.terms.whitespace - candidate.terms.whitespace },
+      // Named, or a term that reorders the list would never be visible to the
+      // author — the other half of "the explanation is generated from the
+      // score's own terms, so it cannot describe a trade the score did not make".
+      { label: 'dead space', delta: baseline.terms.bandWaste - candidate.terms.bandWaste },
     ];
     diffs.sort((a, b) => b.delta - a.delta);
     const best = diffs[0];
@@ -908,6 +1213,8 @@ export function explainCandidate(
   const gain = biggest();
   if (gain?.label === 'whitespace') {
     parts.push(`Removes ${pct(gain.delta)} of the whitespace.`);
+  } else if (gain?.label === 'dead space') {
+    parts.push(`Removes ${pct(gain.delta)} of the dead space under the shorter panels.`);
   } else if (gain?.label === 'unmet demand') {
     parts.push(`Closes ${pct(gain.delta)} of the size shortfall.`);
   } else {
@@ -964,9 +1271,9 @@ export function applySmartLayout(
    * invariant, not a guarantee, and placing a panel in another's position would
    * silently transpose the figure. Refuse instead.
    */
-  const panels = readingOrder(draft.nodes) as PanelNode[];
-  if (panels.length !== candidate.order.length) return false;
-  if (panels.some((panel, index) => panel.id !== candidate.order[index])) return false;
+  const units = layoutUnits(draft.nodes);
+  if (units.length !== candidate.order.length) return false;
+  if (units.some((unit, index) => unit.id !== candidate.order[index])) return false;
 
   // 1. Page height first, so the document and the frames below agree about the
   //    page they were solved for.
@@ -1002,11 +1309,11 @@ export function applySmartLayout(
    * `applyAutoLayout`'s own comment already says a slot replayed against a
    * differently-shaped grid silently reinterprets itself.
    */
-  placePanels(
+  placeUnits(
     draft,
-    panels,
+    units,
     candidate.frames,
-    panels.map(() => null),
+    units.map(() => null),
   );
 
   return true;

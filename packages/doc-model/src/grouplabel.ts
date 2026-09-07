@@ -76,6 +76,26 @@ export function groupLabelClearanceMm(
 }
 
 /**
+ * A panel letter's own line height, in millimetres.
+ *
+ * Needed because a `'top'` heading over a panel is drawn *below* that panel's
+ * letter — the letter identifies the panel and belongs outside everything else,
+ * so it is the letter that moves up and the heading that takes the band beneath
+ * it. Reserving space for the heading alone would leave the two on the same
+ * line.
+ *
+ * Read from the label node's own `style.fontSizePt`, which is the size actually
+ * drawn, so `doc-model` still needs no theme. `PANEL_LABEL_FALLBACK_PT` matches
+ * every journal preset's `panelLabelPt` and is only reached by a label that
+ * never had a size written onto it.
+ */
+export const PANEL_LABEL_FALLBACK_PT = 8;
+
+export function panelLetterHeightMm(fontSizePt: number | undefined): number {
+  return ptToMm(fontSizePt ?? PANEL_LABEL_FALLBACK_PT) * 1.2;
+}
+
+/**
  * The one place a `GroupLabelNode`'s own fields become a clearance, so no
  * call site can read three of the four and quietly disagree with the others.
  *

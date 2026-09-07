@@ -32,10 +32,11 @@ import {
   normaliseArrowFrame,
   plainTextOfRuns,
   reconcileTextEdit,
+  groupLabelMembersAreImages,
   reflowGroupLabels,
   resizePanel,
   montageTiles,
-  reserveSpaceForGroupLabels,
+  reserveLayoutSpace,
   resyncScaleBars,
   scaleBarWidthMm,
   setImageCrop,
@@ -77,7 +78,7 @@ import { isRotatable } from './Canvas.js';
 import { ColorChip } from './ColorChip.js';
 import { SymbolPicker } from './SymbolPicker.js';
 import { DEFAULT_BAR_GAP_FRACTION, DEFAULT_GROUP_GAP_FRACTION } from '@figureforge/plots';
-import { PALETTES, findColorConflicts, paletteColors, type ColorConflict, type Theme } from '@figureforge/theme';
+import { PALETTES, findColorConflicts, paletteColors, resolveTheme, type ColorConflict, type Theme } from '@figureforge/theme';
 
 /**
  * The colour-conflict warning shown wherever a plot's own resolved colours
@@ -706,6 +707,7 @@ export function InspectorTab({
           api={api}
           node={node}
           doc={doc}
+          theme={theme}
           measuring={measureNodeId === node.id}
           measuredPx={measureNodeId === node.id ? measuredPx : null}
           onMeasureNodeChange={onMeasureNodeChange}
@@ -2348,11 +2350,13 @@ function GroupLabelFields({
       if (soleParent?.type === 'panel' && soleParent.contentGrid) {
         fillPanelChildren(draft, soleParent.id, soleParent.frame);
       } else {
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
       }
       reflowGroupLabels(draft);
     });
   };
+
+  const placementApplies = groupLabelMembersAreImages(api.document.nodes, node.memberIds);
 
   const runs: readonly TextRun[] = node.richText ?? [{ text: node.title }];
   const commitRuns = (nextRuns: readonly TextRun[]): void => {
@@ -2419,20 +2423,33 @@ function GroupLabelFields({
       </div>
 
       <div className="field-row">
-        <label className="field">
-          Placement
-          <select
-            value={node.placement ?? 'outside'}
-            onChange={(e) =>
-              applyAndReflow('Change heading placement', (target) => {
-                target.placement = e.target.value === 'overlay' ? 'overlay' : undefined;
-              })
-            }
-          >
-            <option value="outside">Beside the image</option>
-            <option value="overlay">On the image</option>
-          </select>
-        </label>
+        {/*
+          Overlaying draws the heading *on* the content in white with a dark
+          outline, which is a micrograph convention — over a plot it paints a
+          white caption across the axes. So the control appears only where the
+          option means something.
+
+          The `=== 'overlay'` half keeps it reachable on a document that already
+          carries the value: hiding a control is presentation, but stranding a
+          stored setting behind it would leave the author no way back. Nothing
+          is rewritten on load — that would be a migration, and this is not one.
+        */}
+        {(placementApplies || node.placement === 'overlay') && (
+          <label className="field">
+            Placement
+            <select
+              value={node.placement ?? 'outside'}
+              onChange={(e) =>
+                applyAndReflow('Change heading placement', (target) => {
+                  target.placement = e.target.value === 'overlay' ? 'overlay' : undefined;
+                })
+              }
+            >
+              <option value="outside">Beside the image</option>
+              <option value="overlay">On the image</option>
+            </select>
+          </label>
+        )}
         <label className="field">
           Colour
           <input
@@ -2595,7 +2612,7 @@ function ImageFields({
       if (parent?.type === 'panel' && parent.contentGrid) {
         fillPanelChildren(draft, parent.id, parent.frame);
       } else {
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
       }
       reflowGroupLabels(draft);
       reflowBrackets(draft, theme);
@@ -2793,6 +2810,7 @@ function ScaleBarFields({
   api,
   node,
   doc,
+  theme,
   measuring,
   measuredPx,
   onMeasureNodeChange,
@@ -2800,6 +2818,7 @@ function ScaleBarFields({
   api: DocumentApi;
   node: Extract<FigureNode, { type: 'scale-bar' }>;
   doc: FigureDocument;
+  theme: Theme;
   measuring: boolean;
   measuredPx: number | null;
   onMeasureNodeChange: (id: NodeId | null) => void;
@@ -2825,6 +2844,40 @@ function ScaleBarFields({
     commit(label, (draft) => {
       updateNode(draft, node.id, patch);
       resyncScaleBars(draft);
+    });
+  };
+
+  /**
+   * Placement is the one scale-bar change that moves other things.
+   *
+   * A bar below the picture needs a band reserved beneath it, and a picture
+   * routinely fills its frame exactly — so this runs the reservation and the
+   * reflows that follow panels moving. Colour and thickness move nothing, which
+   * is why they keep the plain `setBar` above.
+   */
+  const setPlacement = (placement: 'inside' | 'below'): void => {
+    const patch: Partial<typeof node> = {
+      placement,
+      // Outside the picture the bar sits on the white page, where white — the
+      // right choice over a dark micrograph, and what an author will often have
+      // set — is invisible. A starting point, not a lock: the Colour controls
+      // beside this one still apply.
+      ...(placement === 'below' ? { fill: { ...node.fill, color: '#000000' } } : {}),
+      // The label needs the same conversion for the same reason, but only where
+      // the author actually set a colour. An absent one already resolves to
+      // `theme.foreground`, so writing black over it would change nothing today
+      // and freeze the label against a later theme change — the fill has no
+      // such option, since `Fill.color` is required and therefore always set.
+      ...(placement === 'below' && node.style.color !== undefined
+        ? { style: { ...node.style, color: '#000000' } }
+        : {}),
+    };
+    commit('Change scale bar placement', (draft) => {
+      updateNode(draft, node.id, patch);
+      resyncScaleBars(draft);
+      reserveLayoutSpace(draft);
+      reflowGroupLabels(draft);
+      reflowBrackets(draft, resolveTheme(draft.themeId, draft.themeOverrides));
     });
   };
 
@@ -2943,6 +2996,16 @@ function ScaleBarFields({
       <h4>Appearance</h4>
       <div className="field-row">
         <label className="field">
+          Placement
+          <select
+            value={node.placement ?? 'inside'}
+            onChange={(e) => setPlacement(e.target.value === 'below' ? 'below' : 'inside')}
+          >
+            <option value="inside">On the image</option>
+            <option value="below">Below the image</option>
+          </select>
+        </label>
+        <label className="field">
           Label
           <select
             value={node.labelPosition}
@@ -2958,8 +3021,11 @@ function ScaleBarFields({
             <option value="none">Hidden</option>
           </select>
         </label>
+        {/* "Bar colour", not "Colour": the label has its own swatch beside
+            this one, and two controls sharing a name in one row is how the
+            wrong one gets set. */}
         <label className="field">
-          Colour
+          Bar colour
           <input
             type="color"
             value={node.fill.color}
@@ -2970,6 +3036,27 @@ function ScaleBarFields({
             }
           />
         </label>
+        {/* Hidden with the label itself — colouring text nobody draws is the
+            standing "a control that visibly does nothing is a defect" rule.
+            `style.color` has been a real, rendered field since phase 1 with
+            nothing in the UI setting it, so a white bar over a dark micrograph
+            has always been captioned in the theme's black. */}
+        {node.labelPosition !== 'none' && (
+          <label className="field">
+            Label colour
+            <input
+              type="color"
+              // An absent colour draws as `theme.foreground`, so that is what
+              // the swatch has to show — a colour input cannot express "unset",
+              // and showing black on a light-on-dark theme would misreport what
+              // is on the page.
+              value={node.style.color ?? theme.foreground}
+              onChange={(e) =>
+                setBar('Change label colour', { style: { ...node.style, color: e.target.value } })
+              }
+            />
+          </label>
+        )}
         <label className="field">
           Thickness
           <input
@@ -3290,7 +3377,7 @@ function PanelFields({
         fitMontageToImages(draft, node.id);
         resizePanel(draft, node.id, target.frame);
       }
-      reserveSpaceForGroupLabels(draft);
+      reserveLayoutSpace(draft);
       reflowGroupLabels(draft);
     });
   };

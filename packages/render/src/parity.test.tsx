@@ -1672,6 +1672,48 @@ describe('image and annotation nodes', () => {
     expect(svg).not.toContain('scale(');
   });
 
+  it('keeps a bar placed below a cropped picture, which the frame clip would have eaten', () => {
+    /*
+     * The cropped branch clips the picture *and* its overlays at the frame, on
+     * purpose: an annotation in the letterbox margin should survive, one
+     * outside the frame should not. A scale bar placed below the picture is
+     * outside the frame by construction, so it was clipped away — and the
+     * uncropped branch emits no clip at all, so this would have looked right
+     * until the author cropped the micrograph and then silently vanished.
+     *
+     * The overlays now get their own, taller clip. They cannot share one with
+     * the picture: on this branch the `<image>` is deliberately larger than the
+     * frame, so a clip stretched to hold the bar would also reveal the region
+     * the author cropped away.
+     */
+    const withBar = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      const bar = Object.values(draft.nodes).find((n) => n.type === 'scale-bar')!;
+      if (bar.type === 'scale-bar') bar.placement = 'below';
+      setImageCrop(draft, image.id, { x: 0.25, y: 0, width: 0.5, height: 1 });
+    });
+    const scene = renderDocument(withBar, { theme: NATURE_THEME, resolveAsset });
+    const svg = toSvgString(scene);
+
+    // The bar is still in the scene, and there is a second, taller clip for it.
+    expect(collectByRole(scene, 'scale-bar')).toHaveLength(1);
+    expect(svg).toContain('-overlay');
+    // The picture's own clip is unchanged at the frame, so no cropped-away
+    // source can leak out of the bottom.
+    expect(svg).toContain('<rect x="0" y="0" width="50" height="40"/>');
+  });
+
+  it('leaves a cropped image with no below-placed bar exactly as it was', () => {
+    // The extra clip is emitted only where it is needed, so every existing
+    // cropped figure keeps the markup it already had.
+    const cropped = editDocument(doc, (draft) => {
+      const image = Object.values(draft.nodes).find((n) => n.type === 'image')!;
+      setImageCrop(draft, image.id, { x: 0.25, y: 0, width: 0.5, height: 1 });
+    });
+    const svg = toSvgString(renderDocument(cropped, { theme: NATURE_THEME, resolveAsset }));
+    expect(svg).not.toContain('-overlay');
+  });
+
   it('shows the region that was cropped, and only that region', () => {
     /*
      * The crop halves the width of an aspect-locked 50 × 40 image, so what is
@@ -1756,6 +1798,31 @@ describe('image and annotation nodes', () => {
     });
     const scene = renderDocument(silent, { theme: NATURE_THEME, resolveAsset });
     expect(collectByRole(scene, 'scale-bar-label')).toEqual([]);
+  });
+
+  /*
+   * `style.color` has been rendered since phase 1, but nothing could set it on
+   * a scale bar until the Inspector gained a Label colour control — so these
+   * two pin what that control is worth: an explicit colour reaches the drawn
+   * caption and nothing else, and leaving it unset still falls to the theme
+   * rather than to a hardcoded black.
+   */
+  it('draws the scale bar label in its own colour, independently of the bar', () => {
+    const coloured = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type !== 'scale-bar') continue;
+        node.fill = { ...node.fill, color: '#ffffff' };
+        node.style = { ...node.style, color: '#ff0000' };
+      }
+    });
+    const scene = renderDocument(coloured, { theme: NATURE_THEME, resolveAsset });
+    expect(collectByRole(scene, 'scale-bar')[0]!.attrs?.fill).toBe('#ffffff');
+    expect(collectByRole(scene, 'scale-bar-label')[0]!.attrs?.fill).toBe('#ff0000');
+  });
+
+  it('falls back to the theme foreground when the label has no colour', () => {
+    const label = collectByRole(scene, 'scale-bar-label')[0]!;
+    expect(label.attrs?.fill).toBe(NATURE_THEME.foreground);
   });
 
   it('draws arrowheads as explicit geometry, never as markers', () => {

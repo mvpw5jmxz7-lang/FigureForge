@@ -17,16 +17,20 @@ import { isTwoFactor, toSeries } from './data.js';
 import type { Asset, FigureDocument } from './document.js';
 import { layerByName, nextZ } from './document.js';
 import type { FitAlign, PointMm, RectMm } from './geometry.js';
-import { fitAspectAligned, union } from './geometry.js';
+import { aspectShape, fitAspectAligned, fitShape, union } from './geometry.js';
+import type { ShapeMm } from './geometry.js';
 import {
   alignFrames,
   autoLayout,
   distributeFrames,
   gridCells,
+  layoutUnits,
   readingOrder,
+  rowBands,
   suggestGrid,
   type AlignMode,
   type GridSlot,
+  type LayoutUnit,
   type GridSpec,
   type GuideAxis,
   type LayoutOptions,
@@ -36,6 +40,7 @@ import {
   clearanceForLabel,
   DEFAULT_GROUP_LABEL_PT,
   GROUP_LABEL_OVERLAY_PAD_MM,
+  panelLetterHeightMm,
 } from './grouplabel.js';
 import { ptToMm } from './units.js';
 import {
@@ -452,6 +457,10 @@ export function relabelPanels(
   }
 
   panels.forEach((panel, index) => {
+    // Page space, because a `panel-label` is a top-level node. `panel.frame` is
+    // only page space for a top-level panel — for a grouped one it is relative
+    // to the group, so the letter used to land in the group's local space.
+    const page = absoluteFrame(draft.nodes, panel.id) ?? panel.frame;
     let letters = '';
     let n = index;
     do {
@@ -479,7 +488,7 @@ export function relabelPanels(
         `Label ${letter}`,
         labelLayer,
         // Positioned in page space, just outside the panel's top-left corner.
-        { x: panel.frame.x - offset, y: panel.frame.y, width: 5, height: 5 },
+        { x: page.x - offset, y: page.y, width: 5, height: 5 },
         null,
         nextZ(draft.nodes, null),
       ),
@@ -539,15 +548,26 @@ export function applyAutoLayout(
     template?: LayoutTemplate | null;
   },
 ): void {
-  const panels = readingOrder(draft.nodes) as PanelNode[];
-  if (panels.length === 0) return;
+  const units = layoutUnits(draft.nodes);
+  if (units.length === 0) return;
 
-  // A template that does not fit the panel count would silently drop panels
-  // (autoLayout skips any panel with no cell), so fall back to the even grid.
+  /*
+   * Units, not panels. A group is laid out as one thing and its members scale
+   * with it — grouping panels is specifically for moving and resizing them
+   * together, so pulling a group apart would undo what the author asked for.
+   *
+   * It is also what stops a grouped panel being teleported: `placeUnits` writes
+   * a page-space frame, and only a *top-level* node's `frame` is page space.
+   * Measured before this, on three panels with two of them grouped: one landed
+   * with its right edge at 186 mm on a 183 mm page.
+   */
+  // A template that does not fit the unit count would silently drop units
+  // (autoLayout skips any unit with no cell), so fall back to the even grid.
+  // `panelCount` is really a slot count, and a group occupies one slot.
   const template =
-    options.template && options.template.panelCount === panels.length ? options.template : null;
+    options.template && options.template.panelCount === units.length ? options.template : null;
 
-  const grid = template?.grid ?? options.grid ?? suggestGrid(panels.length);
+  const grid = template?.grid ?? options.grid ?? suggestGrid(units.length);
 
   /*
    * A slot is only meaningful against the grid it was authored for. Replaying
@@ -559,9 +579,9 @@ export function applyAutoLayout(
    * a template arrangement, so the stale slot is dropped rather than reused.
    */
   const frames = autoLayout(
-    panels.map((p, index) => ({
-      id: p.id,
-      aspectLock: p.aspectLock,
+    units.map((unit, index) => ({
+      id: unit.id,
+      ...unitLayoutShape(draft, unit),
       slot: template ? (template.slots[index] ?? null) : null,
     })),
     grid,
@@ -572,12 +592,59 @@ export function applyAutoLayout(
     },
   );
 
-  placePanels(
+  placeUnits(
     draft,
-    panels,
+    units,
     frames,
-    panels.map((_, index) => (template ? (template.slots[index] ?? null) : null)),
+    units.map((_, index) => (template ? (template.slots[index] ?? null) : null)),
   );
+}
+
+/**
+ * The shape constraint a layout unit carries.
+ *
+ * For a panel: its own lock, plus an auto-fitting montage's full shape, because
+ * a stored ratio cannot express one — a montage's height is affine in its
+ * width, so the lock is exact only at the size it was written at.
+ *
+ * For a group: a plain ratio, and **only** when something inside it needs one.
+ * `resizeGroupGeometry` scales `sx` and `sy` independently and
+ * `resizePanelGeometry` does not enforce a member's `aspectLock` — it assigns
+ * the frame and re-tiles. So a non-uniform group scale does not bend a lock, it
+ * hands a montage a wrong-shaped frame that `fillPanelChildren` then fills,
+ * which is round 41's dead strip per tile with the group as the cause. Pinning
+ * the group to its own current ratio is what forces `sx === sy`.
+ *
+ * The group's fixed bands are zero, and that is not an oversight. Under a
+ * uniform scale every extent inside scales together — gutters, label bands,
+ * scale-bar bands — because `resizeGroupGeometry` scales frames and nothing
+ * else. So round 41's "affine, not a ratio" lesson inverts here: this is the one
+ * place a single ratio really is exact at every size.
+ */
+export function unitLayoutShape(
+  draft: FigureDocument,
+  unit: LayoutUnit,
+): { aspectLock: number | null; shape: ShapeMm | null } {
+  if (unit.kind === 'panel') {
+    const panel = draft.nodes[unit.id];
+    if (panel?.type !== 'panel') return { aspectLock: null, shape: null };
+    return {
+      aspectLock: panel.aspectLock,
+      shape: panel.contentGrid?.autoFit === true ? montageShape(draft, unit.id) : null,
+    };
+  }
+
+  const bound = unit.panelIds.some((id) => {
+    const panel = draft.nodes[id];
+    if (panel?.type !== 'panel') return false;
+    // An `autoFit` montage carries no stored lock — round 41 demoted it — and
+    // is distorted by a non-uniform scale just the same, so its shape counts.
+    return panel.aspectLock !== null || montageShape(draft, id) !== null;
+  });
+  if (!bound || unit.frame.width <= 0 || unit.frame.height <= 0) {
+    return { aspectLock: null, shape: null };
+  }
+  return { aspectLock: null, shape: aspectShape(unit.frame.width / unit.frame.height) };
 }
 
 /**
@@ -593,20 +660,47 @@ export function applyAutoLayout(
  * slot is only meaningful against the grid it was authored for, so anything that
  * is not a template arrangement must pass null rather than leave a stale one.
  */
-export function placePanels(
+export function placeUnits(
   draft: FigureDocument,
-  panels: readonly PanelNode[],
+  units: readonly LayoutUnit[],
   frames: ReadonlyMap<NodeId, RectMm>,
   slots: readonly (GridSlot | null)[],
 ): void {
-  for (const [index, panel] of panels.entries()) {
-    const frame = frames.get(panel.id);
+  for (const [index, unit] of units.entries()) {
+    const frame = frames.get(unit.id);
     if (!frame) continue;
+
+    if (unit.kind === 'group') {
+      /*
+       * `resizeGroup` is the whole placement. It scales panels, shapes, arrows
+       * and nested groups about the group's own origin, assigns the group's own
+       * frame — which is what "a group's box goes stale after a layout" was —
+       * and brackets the lot with the panel-position snapshot and
+       * `resyncScaleBars`, so every descendant panel's letter follows its new
+       * absolute position however deeply nested it is.
+       *
+       * Repositioning needs no work of its own: every member's frame is already
+       * relative to the group. And no `dx`/`dy` translation here — the snapshot
+       * has already moved the letters, and doing both would move them twice.
+       */
+      resizeGroup(draft, unit.id, frame);
+      // Cleared with the arrangement it belonged to, exactly as for a panel.
+      for (const panelId of unit.panelIds) {
+        const member = draft.nodes[panelId];
+        if (member?.type === 'panel') member.slot = null;
+      }
+      continue;
+    }
+
+    const panel = draft.nodes[unit.id];
+    if (panel?.type !== 'panel') continue;
 
     // Cleared with the arrangement it belonged to, so the next plain layout
     // cannot resurrect it against a differently shaped grid.
     panel.slot = slots[index] ?? null;
 
+    // Sound because a panel unit is top-level by construction, so its `frame`
+    // *is* page space — which is precisely what was not true of a grouped panel.
     const dx = frame.x - panel.frame.x;
     const dy = frame.y - panel.frame.y;
     panel.frame = frame;
@@ -621,7 +715,9 @@ export function placePanels(
     }
   }
 
-  // An image that changed size changes what a millimetre on it means.
+  // An image that changed size changes what a millimetre on it means. Harmless
+  // after `resizeGroup` has already done it: this is a re-derivation from
+  // current geometry, never a delta.
   resyncScaleBars(draft);
 }
 
@@ -640,8 +736,8 @@ export const DEFAULT_SCALE_BAR_INSET_MM = 2;
 
 /**
  * Extra clearance to fold into a montage panel's own internal gutters, one
- * per grid boundary, for every group-label whose members are *all* tiles of
- * this one panel's grid.
+ * per grid boundary: a group-label band above the row it heads, and a
+ * scale-bar band below the row whose picture carries one.
  *
  * This is the "always live" half of the two group-label mechanisms: because
  * `fillPanelChildren` already re-tiles on every resize, folding the
@@ -649,8 +745,17 @@ export const DEFAULT_SCALE_BAR_INSET_MM = 2;
  * reflow step and no risk of fighting a manual drag the way translating a
  * *sibling* panel would (see `reserveSpaceForGroupLabels`, the other half,
  * for why that one is deliberately not live).
+ *
+ * A below-placed scale bar has to be here rather than merely in the solver's
+ * demand, and that is the load-bearing part. The bar is drawn outside its
+ * tile's own frame, so unless the *grid* holds the room open the tiler simply
+ * fills the space with picture and the bar lands on the panel below. Stated
+ * only in the demand it would be worse than useless: the demand would claim a
+ * taller panel while `fillPanelChildren` gave the height back to the tiles,
+ * and the two would disagree — the exact failure `montageFixedExtentMm`'s own
+ * docstring exists to prevent.
  */
-function groupLabelGutterExtras(
+function montageGutterExtras(
   doc: FigureDocument,
   panelId: NodeId,
   children: readonly FigureNode[],
@@ -689,19 +794,37 @@ function groupLabelGutterExtras(
     }
   }
 
+  /*
+   * A bar below its picture reserves the strip under its own row. The extent
+   * depends only on the bar's own fields — its gap, its thickness and its
+   * label's point size — never on any geometry, so this stays closed form and
+   * cannot feed back into the layout it is part of.
+   *
+   * `gridCells`' boundary extras run 0..rows inclusive, so a bar in the last
+   * row reserves its strip between that row and the panel's own bottom
+   * padding rather than falling off the end.
+   */
+  children.forEach((child, index) => {
+    const extent = imageScaleBarBelowExtentMm(doc.nodes, child.id);
+    if (extent <= 0) return;
+    const row = Math.floor(index / grid.cols);
+    rowExtra[row + 1] = Math.max(rowExtra[row + 1]!, extent);
+  });
+
   return { rowExtra, columnExtra };
 }
 
 /**
- * The part of a montage panel's extent that is *not* cells: gutters, padding
- * and any group-label bands, on each axis.
+ * The part of a montage panel's extent that is *not* cells: gutters, padding,
+ * group-label bands and scale-bar bands, on each axis.
  *
- * `montagePanelAspect` composes the same two quantities inline to solve the
- * panel's shape; smart layout needs them to state the smallest frame at which
- * every cell still clears `MIN_TILE_MM`, which is exactly the condition
- * `montageCellRects` returns null on. Exported so the two cannot disagree —
- * reimplementing this arithmetic beside the solver is how a panel comes to be
- * declared layout-able at a frame the tiler then refuses to fill.
+ * `montageShape` reads these to state the panel's shape and smart layout reads
+ * them for the smallest frame at which every cell still clears `MIN_TILE_MM`,
+ * which is exactly the condition `montageCellRects` returns null on. One
+ * definition, so the two cannot disagree — reimplementing this arithmetic
+ * beside the solver is how a panel comes to be declared layout-able at a frame
+ * the tiler then refuses to fill, and the function this replaced did exactly
+ * that.
  */
 export function montageFixedExtentMm(
   doc: FigureDocument,
@@ -711,7 +834,7 @@ export function montageFixedExtentMm(
   const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
   if (!grid || grid.rows < 1 || grid.cols < 1) return null;
 
-  const { rowExtra, columnExtra } = groupLabelGutterExtras(
+  const { rowExtra, columnExtra } = montageGutterExtras(
     doc,
     panelId,
     montageTiles(doc.nodes, panelId),
@@ -758,7 +881,24 @@ export function fillPanelChildren(draft: FigureDocument, panelId: NodeId, frame:
    */
   if (!grid || grid.rows < 1 || grid.cols < 1) {
     for (const child of children) {
-      child.frame = { x: 0, y: 0, width: frame.width, height: frame.height };
+      /*
+       * The same band a montage row reserves, for the same reason: a bar below
+       * the picture is outside the picture, so the room has to be held open
+       * here or the tile takes it. Without this the lone-image case is the one
+       * that double-counts — `imageContentRect` centres by default, so half the
+       * band would land above the picture and `reserveSpaceForScaleBars` would
+       * shrink the panel on the bottom row anyway.
+       *
+       * Zero for every bar left `'inside'`, which is every figure saved before
+       * round 38 — so this is additive and the byte-identical case stays so.
+       */
+      const band = imageScaleBarBelowExtentMm(draft.nodes, child.id);
+      child.frame = {
+        x: 0,
+        y: 0,
+        width: frame.width,
+        height: Math.max(0, frame.height - band),
+      };
     }
     return;
   }
@@ -815,7 +955,7 @@ export function montageCellRects(
   const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
   if (!grid || grid.rows < 1 || grid.cols < 1) return null;
 
-  const { rowExtra, columnExtra } = groupLabelGutterExtras(
+  const { rowExtra, columnExtra } = montageGutterExtras(
     doc,
     panelId,
     montageTiles(doc.nodes, panelId),
@@ -880,47 +1020,43 @@ export function montageTileAspect(nodes: NodeMap, panelId: NodeId): number | nul
 }
 
 /**
- * The panel aspect (w/h) at which every cell matches the tiles' own aspect —
- * the shape at which pictures stop letterboxing and fill their cells.
+ * The shapes a montage panel can take: its cells' combined aspect, plus the
+ * bands that do not scale with them.
  *
- * Solved in closed form rather than converged to. Writing `h` for the cell
- * height, cell width is `aspect * h`, so
+ * Replaces `montagePanelAspect`, which returned a single ratio and was wrong
+ * whenever `fixedWidth / fixedHeight != cols * tileAspect / rows`. Its comment
+ * claimed "any positive cell height gives the same ratio" — true of the cells
+ * block, and false of the panel, which is the cells block *plus* constant
+ * bands. Measured on a 1 × 3 montage of 4:3 tiles under one group title, the
+ * ratio it returned (2.5761, at its own `max(MIN_TILE_MM, fixedHeight)` probe)
+ * against the truth at the sizes the solver actually used: 3.3259 at 60 mm,
+ * 3.6320 at 120 mm, 3.7401 at 175 mm. Panels were locked far too tall and
+ * every tile lost the difference as dead space under its picture — 1219 mm²
+ * per tile at 175 mm of width, which is the whitespace this replaced.
  *
- *   panelWidth  = cols * aspect * h + fixedWidth
- *   panelHeight = rows * h          + fixedHeight
+ * Still closed form, and more strictly so than what it replaces: there is no
+ * probe height to pick, because `heightForWidth` is the answer at every width
+ * rather than at one.
  *
- * where the fixed terms are the gutters, the padding and the label bands
- * `groupLabelGutterExtras` already computes — all independent of `h`. Picking
- * any `h` therefore gives the same ratio, so this terminates by construction,
- * the same argument the two-pass margin rule and `offsetReserveMm` rest on.
+ * The fixed extents come from `montageFixedExtentMm` rather than being
+ * recomposed here. Recomposing them is what let the old function drift from
+ * the tiler it was supposed to agree with.
  *
  * Returns null when the panel has no grid or no measurable tile.
  */
-export function montagePanelAspect(doc: FigureDocument, panelId: NodeId): number | null {
-  const panel = doc.nodes[panelId];
-  const grid = panel?.type === 'panel' ? panel.contentGrid : undefined;
-  if (!grid || grid.rows < 1 || grid.cols < 1) return null;
+export function montageShape(doc: FigureDocument, panelId: NodeId): ShapeMm | null {
+  const fixed = montageFixedExtentMm(doc, panelId);
+  if (!fixed) return null;
+  const tile = montageTileAspect(doc.nodes, panelId);
+  if (tile === null || !(tile > 0)) return null;
 
-  const aspect = montageTileAspect(doc.nodes, panelId);
-  if (aspect === null) return null;
-
-  const { rowExtra, columnExtra } = groupLabelGutterExtras(doc, panelId, montageTiles(doc.nodes, panelId), {
-    rows: grid.rows,
-    cols: grid.cols,
-  });
-  const sum = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0);
-
-  const padding = panel?.type === 'panel' ? panel.paddingMm : 0;
-  const fixedWidth = (grid.cols - 1) * grid.gutterMm + sum(columnExtra) + 2 * padding;
-  const fixedHeight = (grid.rows - 1) * grid.gutterMm + sum(rowExtra) + 2 * padding;
-
-  // Any positive cell height gives the same ratio; use one that keeps the
-  // fixed terms from dominating so the result is numerically well behaved.
-  const cellHeight = Math.max(MIN_TILE_MM, fixedHeight);
-  const width = grid.cols * aspect * cellHeight + fixedWidth;
-  const height = grid.rows * cellHeight + fixedHeight;
-  if (!(height > 0) || !(width > 0)) return null;
-  return width / height;
+  const contentAspect = (fixed.cols * tile) / fixed.rows;
+  if (!Number.isFinite(contentAspect) || contentAspect <= 0) return null;
+  return {
+    contentAspect,
+    fixedWidthMm: fixed.fixedWidthMm,
+    fixedHeightMm: fixed.fixedHeightMm,
+  };
 }
 
 /**
@@ -991,12 +1127,24 @@ export function suggestMontageGrid(
 /**
  * Re-shape a montage so its pictures fill their cells.
  *
- * Sets `aspectLock` to the fitted aspect, which `autoLayout` already honours
- * (`fitAspect(inner, panel.aspectLock)`) — so the next layout pass gives the
- * panel the largest correctly-shaped rect inside its page cell, and
- * `fillPanelChildren` then fills every cell edge to edge. `addPanelWithImages`
- * set `aspectLock: null` for the stated reason that differently-shaped
- * micrographs have "no one honest ratio"; the fitted aspect is that ratio.
+ * Sets `aspectLock` to the ratio the panel's own frame takes at its current
+ * width, which `autoLayout` honours — so the next layout pass gives the panel
+ * a correctly-shaped rect inside its page cell and `fillPanelChildren` fills
+ * every cell edge to edge. `addPanelWithImages` set `aspectLock: null` for the
+ * stated reason that differently-shaped micrographs have "no one honest
+ * ratio".
+ *
+ * **The lock is exact only at this width**, because a montage's height is
+ * affine in its width rather than proportional to it — see `ShapeMm`. That is
+ * why `applyAutoLayout` passes the *shape* for an auto-fitting montage instead
+ * of relying on the stored ratio, and why the lock survives here as the
+ * manual-resize fallback rather than as the whole answer.
+ *
+ * The frame itself is deliberately not reshaped. This runs from
+ * `addPanelWithImages`, `setMontageCellImage`, `deleteNodesWithLayout` and
+ * three Inspector controls, and silently changing a panel's height on each is
+ * a larger behaviour change than the defect; the next layout pass gets the
+ * shape right regardless.
  *
  * A no-op unless `contentGrid.autoFit` is on, which is off for every figure
  * saved before this existed.
@@ -1005,10 +1153,13 @@ export function fitMontageToImages(draft: FigureDocument, panelId: NodeId): void
   const panel = draft.nodes[panelId];
   if (panel?.type !== 'panel' || !panel.contentGrid?.autoFit) return;
 
-  const aspect = montagePanelAspect(draft, panelId);
-  if (aspect === null) return;
+  const shape = montageShape(draft, panelId);
+  if (!shape) return;
 
-  panel.aspectLock = aspect;
+  const fitted = fitShape(panel.frame, shape, 'start', 'start');
+  if (!(fitted.width > 0) || !(fitted.height > 0)) return;
+
+  panel.aspectLock = fitted.width / fitted.height;
   // Re-tile immediately so the frames on the children match the new shape
   // even if the caller never runs a full layout pass.
   fillPanelChildren(draft, panelId, panel.frame);
@@ -1465,9 +1616,21 @@ export function scaleBarWidthMm(nodes: NodeMap, id: NodeId): number | null {
   if (!parent || parent.type !== 'image') return null;
 
   const visiblePx = parent.naturalPx.width * (parent.crop.width || 1);
-  if (visiblePx <= 0 || parent.frame.width <= 0) return null;
+  /*
+   * The *picture's* width, not the frame's.
+   *
+   * Those `visiblePx` source pixels are drawn across the picture, and on a
+   * letterboxed image the picture is narrower than the frame it sits in — so
+   * dividing by the frame overstates how far a pixel reaches and the bar is
+   * drawn longer than the distance it claims. That is a false measurement in a
+   * published figure, exactly what `checkScaleBarCalibration` exists to keep
+   * out, and the same class of defect as a bar that sits off its own image.
+   * For a picture that fills its frame the two are the same number.
+   */
+  const drawnWidth = imageContentRect(parent).width;
+  if (visiblePx <= 0 || drawnWidth <= 0) return null;
 
-  const mmPerPixel = parent.frame.width / visiblePx;
+  const mmPerPixel = drawnWidth / visiblePx;
   return bar.length * bar.pixelsPerUnit * mmPerPixel;
 }
 
@@ -1509,12 +1672,68 @@ export function scaleBarFrame(
   // Local to the image node's own frame, which is what a child frame is
   // relative to — so the content rect is used as an offset, not as a position.
   const content = imageContentRect(image);
+
+  /*
+   * Below the picture rather than on it: still bottom-right, but clear of the
+   * image data entirely. The x is aligned to the picture's right edge with no
+   * inset — the bar is outside the picture now, so insetting it would pull it
+   * away from the edge it is meant to line up with.
+   *
+   * This frame can land outside the image node's own frame, which is fine and
+   * intended: `reserveSpaceForScaleBars` makes the room, and `renderImage`
+   * widens its clip so a cropped image does not cut the bar off.
+   */
+  if (bar.placement === 'below') {
+    return {
+      x: Math.max(0, content.x + content.width - width),
+      y: content.y + content.height + SCALE_BAR_BELOW_GAP_MM,
+      width,
+      height: bar.barHeightMm,
+    };
+  }
+
   return {
     x: Math.max(0, content.x + content.width - insetMm - width),
     y: Math.max(0, content.y + content.height - insetMm - bar.barHeightMm),
     width,
     height: bar.barHeightMm,
   };
+}
+
+/** Gap between the picture's bottom edge and a bar placed below it. */
+export const SCALE_BAR_BELOW_GAP_MM = 1;
+
+/**
+ * How much room a below-placed bar needs beneath the picture.
+ *
+ * One line of the label's own size whenever a label is drawn, whichever side of
+ * the bar `labelPosition` puts it — reserving for either keeps that control
+ * working unchanged, and the difference is well under a millimetre.
+ *
+ * Zero for a bar drawn on the picture, which is what makes this safe to call
+ * unconditionally.
+ */
+export function scaleBarBelowExtentMm(bar: ScaleBarNode): number {
+  if (bar.placement !== 'below') return 0;
+  const label =
+    bar.labelPosition === 'none' ? 0 : ptToMm(bar.style.fontSizePt ?? SCALE_BAR_FALLBACK_PT) * 1.2;
+  return SCALE_BAR_BELOW_GAP_MM + bar.barHeightMm + label;
+}
+
+/**
+ * Label size for a bar that never had one written onto it. Matches every
+ * journal preset's `scaleBarPt`; `doc-model` may not import `theme`.
+ */
+const SCALE_BAR_FALLBACK_PT = 6;
+
+/** The band any of an image's own bars need below it, for the clip and the reserve. */
+export function imageScaleBarBelowExtentMm(nodes: NodeMap, imageId: NodeId): number {
+  let extent = 0;
+  for (const node of Object.values(nodes)) {
+    if (node.type !== 'scale-bar' || node.parentId !== imageId) continue;
+    extent = Math.max(extent, scaleBarBelowExtentMm(node));
+  }
+  return extent;
 }
 
 /**
@@ -2146,6 +2365,36 @@ export function memberContentRect(nodes: NodeMap, id: NodeId): RectMm | null {
 /** True when every member shares one parent panel that tiles them into a
  *  `contentGrid` — the case `fillPanelChildren`'s own gutter growth already
  *  covers live, on every resize, with no reflow of its own needed. */
+/**
+ * Whether every member of a heading is a picture.
+ *
+ * What `placement: 'overlay'` is offered against. Overlaying a heading draws it
+ * *on* the content in white with a dark outline — a micrograph convention that
+ * over a plot paints a white caption across the axes. So the control is shown
+ * only where the option means something, the standing "a control that visibly
+ * does nothing is a defect" rule in its sharper form: here it does something,
+ * and that something is wrong.
+ *
+ * A member is a picture if it is an `image` node, or a panel whose own content
+ * children are images. A panel holding a plot is not, and neither is an empty
+ * one — there is nothing to overlay a heading onto.
+ */
+export function groupLabelMembersAreImages(
+  nodes: NodeMap,
+  memberIds: readonly NodeId[],
+): boolean {
+  if (memberIds.length === 0) return false;
+  return memberIds.every((id) => {
+    const node = nodes[id];
+    if (!node) return false;
+    if (node.type === 'image') return true;
+    if (node.type !== 'panel') return false;
+    const children = Object.values(nodes).filter((n) => n.parentId === id);
+    const images = children.filter((n) => n.type === 'image');
+    return images.length > 0 && images.length === children.length;
+  });
+}
+
 function isSameMontageGroup(nodes: NodeMap, memberIds: readonly NodeId[]): boolean {
   if (memberIds.length === 0) return false;
   const parents = new Set(memberIds.map((id) => nodes[id]?.parentId ?? null));
@@ -2267,7 +2516,7 @@ function groupLabelStackOffsetMm(nodes: NodeMap, node: GroupLabelNode): number {
  * clearance plus the room taken by any wider heading stacked outside it.
  *
  * Composed once here and read by `groupLabelFrame`, by
- * `groupLabelGutterExtras` (the same-panel gutter) and by
+ * `montageGutterExtras` (the same-panel gutter) and by
  * `reserveSpaceForGroupLabels` (the cross-panel push), so the space a
  * heading is *given* and the space it is *drawn in* cannot disagree.
  */
@@ -2344,6 +2593,71 @@ export function reflowGroupLabels(draft: FigureDocument): void {
     const frame = groupLabelFrame(draft.nodes, node);
     if (frame) node.frame = frame;
   }
+  reflowPanelLetterLifts(draft);
+}
+
+/**
+ * Lift each panel letter clear of any heading drawn above its panel.
+ *
+ * A panel letter identifies the panel and belongs outside everything else, so
+ * the order down the page is letter, then heading, then the graph. The heading's
+ * own geometry is untouched — it still sits in the band immediately above its
+ * members — and it is the letter that moves up to make way. Doing it the other
+ * way round (insetting the panel's content so the heading fits inside the frame)
+ * would mean changing `groupLabelFrame` and `fillPanelChildren` for every
+ * heading, including the montage and single-image cases, to fix something that
+ * only arises for panels.
+ *
+ * The lift is *stored* and applied as a difference. Setting `frame.y` outright
+ * would be simpler and wrong: this runs after every canvas drag, so an absolute
+ * recompute would snap a hand-nudged letter back to its panel on the author's
+ * next move. Adjusting by `next - previous` leaves any manual nudge intact and
+ * puts the letter back exactly when the heading is resized or deleted.
+ *
+ * Called from `reflowGroupLabels` rather than exported separately, so every one
+ * of that function's existing call sites settles the letters too.
+ */
+function reflowPanelLetterLifts(draft: FigureDocument): void {
+  /*
+   * A heading lifts a letter only when it is really drawn *above the panel's own
+   * top edge*. That is what separates a heading over the panel from a montage
+   * cell caption, which lives inside the panel's grid and must move nothing:
+   * the cell caption's frame starts below the panel top, so it fails this test
+   * without needing to know anything about montages.
+   */
+  const liftByPanel = new Map<NodeId, number>();
+
+  for (const label of Object.values(draft.nodes)) {
+    if (label.type !== 'group-label') continue;
+    if (label.edge !== 'top' || label.placement === 'overlay') continue;
+
+    for (const memberId of label.memberIds) {
+      const ownerId = topLevelOwner(draft.nodes, memberId);
+      if (!ownerId) continue;
+      const owner = draft.nodes[ownerId];
+      if (owner?.type !== 'panel') continue;
+
+      const gap = owner.frame.y - label.frame.y;
+      if (gap <= 1e-6) continue;
+      liftByPanel.set(ownerId, Math.max(liftByPanel.get(ownerId) ?? 0, gap));
+    }
+  }
+
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type !== 'panel-label') continue;
+    const panel = draft.nodes[node.panelId];
+    if (panel?.type !== 'panel') continue;
+
+    const heading = liftByPanel.get(node.panelId) ?? 0;
+    // Sit the letter immediately above the heading, not merely clear of the
+    // panel — the heading occupies the whole band the lift measures.
+    const next = heading > 0 ? heading + panelLetterHeightMm(node.style.fontSizePt) : 0;
+    const previous = node.liftMm ?? 0;
+    if (Math.abs(next - previous) <= 1e-6) continue;
+
+    node.frame = { ...node.frame, y: node.frame.y - (next - previous) };
+    node.liftMm = next > 0 ? next : undefined;
+  }
 }
 
 /**
@@ -2381,7 +2695,31 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
     if (ownerRects.length === 0) continue;
     const bounds = union(ownerRects)!;
 
-    const clearance = groupLabelExtentMm(draft.nodes, label);
+    /*
+     * A `'top'` heading over a panel is drawn below that panel's letter, so the
+     * band it needs is its own extent plus the letter's line height. Without
+     * this the two land on the same line and the letter has nowhere to go.
+     * Only panels have letters, and only a heading above the panel's own top
+     * edge displaces one — a montage cell caption sits inside the frame.
+     */
+    const letterMm =
+      label.edge === 'top' && label.placement !== 'overlay'
+        ? Math.max(
+            0,
+            ...[...ownerIds].map((id) => {
+              const owner = draft.nodes[id];
+              if (owner?.type !== 'panel') return 0;
+              const letter = Object.values(draft.nodes).find(
+                (n) => n.type === 'panel-label' && n.panelId === id,
+              );
+              return letter?.type === 'panel-label'
+                ? panelLetterHeightMm(letter.style.fontSizePt)
+                : 0;
+            }),
+          )
+        : 0;
+
+    const clearance = groupLabelExtentMm(draft.nodes, label) + letterMm;
 
     const axis: 'x' | 'y' = label.edge === 'top' ? 'y' : 'x';
     const boundary =
@@ -2419,25 +2757,227 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
         if (neighborEdge === null || far > neighborEdge) neighborEdge = far;
       }
     }
-    if (neighborEdge === null) continue; // nothing to measure a gap against
+    /*
+     * No panel on that side means the heading is drawing into the page's own
+     * margin, so the *page edge* is what the gap is measured against.
+     *
+     * This is the whole defect the top row suffered from: the branch used to
+     * `continue` here, so the one case that most needs space reserved — a
+     * heading on the top row, with nothing above it to push against — reserved
+     * none, and the heading was drawn above the page's top edge and over the
+     * panel letter. Measured on the sample figure before the fix: y = -1.27 mm.
+     */
+    const pageEdge =
+      label.edge === 'right'
+        ? draft.page.widthMm - marginMm(draft)
+        : marginMm(draft);
+    if (neighborEdge === null) neighborEdge = pageEdge;
 
     const currentGap = label.edge === 'right' ? neighborEdge - boundary : boundary - neighborEdge;
     const shortfall = clearance - currentGap;
     if (shortfall <= EPS) continue;
 
+    pushPanelsFrom(draft, panels, axis, boundary, shortfall);
+  }
+}
+
+/**
+ * Make room beneath every picture whose scale bar is drawn below it.
+ *
+ * The sibling of `reserveSpaceForGroupLabels`, sharing its `pushPanelsFrom` so
+ * there is one implementation of push-then-shrink rather than two that can
+ * drift. Same contract, and for the same reason: **not** live during a manual
+ * drag, resize, align or distribute — it moves other panels, which the
+ * manual-layout contract forbids — so it is called only from deliberate actions
+ * and from the paths that already lay the page out from scratch.
+ *
+ * Needed at all because a picture routinely fills its frame exactly: measured
+ * on the sample, the montage's tiles are 16.78 x 11.89 mm pictures in 16.78 x
+ * 11.89 mm frames, so there is no spare strip beneath one to drop a bar into.
+ */
+export function reserveSpaceForScaleBars(draft: FigureDocument): void {
+  const EPS = 1e-6;
+
+  const panels = Object.values(draft.nodes).filter(
+    (n): n is PanelNode => n.type === 'panel' && n.parentId === null,
+  );
+
+  for (const bar of Object.values(draft.nodes)) {
+    if (bar.type !== 'scale-bar' || bar.placement !== 'below') continue;
+
+    const image = bar.parentId ? draft.nodes[bar.parentId] : undefined;
+    if (image?.type !== 'image') continue;
+    const imageFrame = absoluteFrame(draft.nodes, image.id);
+    if (!imageFrame) continue;
+
+    const content = imageContentRect(image);
+    const pictureBottom = imageFrame.y + content.y + content.height;
+    const pictureLeft = imageFrame.x + content.x;
+    const pictureRight = pictureLeft + content.width;
+
+    const required = scaleBarBelowExtentMm(bar);
+    if (required <= EPS) continue;
+
+    const ownerId = topLevelOwner(draft.nodes, image.id);
+    const owner = ownerId ? draft.nodes[ownerId] : undefined;
+    if (owner?.type !== 'panel') continue;
+    const ownerFrame = absoluteFrame(draft.nodes, owner.id);
+    if (!ownerFrame) continue;
+
+    // The nearest panel below that actually sits under this picture. A panel
+    // off to one side is not in the bar's way.
+    let below: number | null = null;
     for (const panel of panels) {
+      if (panel.id === owner.id) continue;
       const rect = absoluteFrame(draft.nodes, panel.id);
       if (!rect) continue;
-      const coord = axis === 'y' ? rect.y : rect.x;
-      if (coord < boundary - EPS) continue;
+      if (rect.x + rect.width <= pictureLeft + EPS || rect.x >= pictureRight - EPS) continue;
+      if (rect.y < pictureBottom - EPS) continue;
+      if (below === null || rect.y < below) below = rect.y;
+    }
 
+    const limit = below ?? draft.page.heightMm - marginMm(draft);
+    const shortfall = required - (limit - pictureBottom);
+    if (shortfall <= EPS) continue;
+
+    if (below !== null) {
+      pushPanelsFrom(draft, panels, 'y', ownerFrame.y + ownerFrame.height, shortfall);
+      continue;
+    }
+
+    /*
+     * Nothing below to push — the bottom row — so the panel that gained the bar
+     * pays for it out of its own height. The picture shrinks with the panel, so
+     * the band opens up inside the panel's own frame and the page is untouched.
+     */
+    const height = Math.max(MIN_TILE_MM, owner.frame.height - shortfall);
+    if (height >= owner.frame.height - EPS) continue;
+    const snapshot = snapshotPanelAbsolutePositions(draft.nodes, owner.id);
+    resizePanel(draft, owner.id, { ...owner.frame, height });
+    syncPanelLabelsFromSnapshot(draft, snapshot);
+  }
+
+  // The bars themselves follow whatever just moved.
+  resyncScaleBars(draft);
+}
+
+/**
+ * Every reservation the page needs, in one call.
+ *
+ * There are two — headings above their members and scale bars below their
+ * pictures — and roughly ten call sites that must run both. One name is what
+ * stops a new call site remembering one and forgetting the other; the halves
+ * stay exported so each can be tested on its own.
+ */
+export function reserveLayoutSpace(draft: FigureDocument): void {
+  reserveSpaceForGroupLabels(draft);
+  reserveSpaceForScaleBars(draft);
+}
+
+/**
+ * The page margin, which `reserveSpaceForGroupLabels` needs and the document
+ * does not store.
+ *
+ * `theme.spacing.marginMm` is the real source and `doc-model` may not import
+ * `theme`, so this reads the margin the page is *actually laid out with*: the
+ * smallest inset any top-level panel sits at. A figure whose panels have been
+ * dragged inward simply reports a larger margin, which is the honest answer —
+ * the question being asked is "how much room is there above the top row", not
+ * "what does the theme nominally reserve".
+ */
+function marginMm(draft: FigureDocument): number {
+  let smallest = Number.POSITIVE_INFINITY;
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type !== 'panel') continue;
+    // Page space, and every panel rather than only the top-level ones: a figure
+    // whose panels are all inside groups used to match nothing here and report
+    // a 0 mm margin, which let a heading be pushed into the bleed.
+    const page = absoluteFrame(draft.nodes, node.id) ?? node.frame;
+    smallest = Math.min(smallest, page.x, page.y);
+  }
+  return Number.isFinite(smallest) ? Math.max(0, smallest) : 0;
+}
+
+/**
+ * Push every panel at or beyond a boundary, then take back whatever no longer
+ * fits on the page.
+ *
+ * Pushing alone would walk the bottom row off the page — on the sample figure
+ * the required band is about 6.4 mm against 3.6 mm of slack, so the shrink is
+ * the common path rather than a rare branch. Growing the page instead was
+ * considered and refused: a caption silently making a figure taller can breach
+ * a journal's maximum height, and the page is not this function's to spend.
+ *
+ * Panels are shrunk by *row*, banded on `y` with the same 5 mm tolerance
+ * `readingOrder` uses to decide what a row is, so a row's panels keep their
+ * shared top and bottom edges.
+ */
+function pushPanelsFrom(
+  draft: FigureDocument,
+  panels: readonly PanelNode[],
+  axis: 'x' | 'y',
+  boundary: number,
+  shortfall: number,
+): void {
+  const EPS = 1e-6;
+  const moved: PanelNode[] = [];
+
+  for (const panel of panels) {
+    const rect = absoluteFrame(draft.nodes, panel.id);
+    if (!rect) continue;
+    const coord = axis === 'y' ? rect.y : rect.x;
+    if (coord < boundary - EPS) continue;
+
+    const before = snapshotPanelAbsolutePositions(draft.nodes, panel.id);
+    panel.frame =
+      axis === 'y'
+        ? { ...panel.frame, y: panel.frame.y + shortfall }
+        : { ...panel.frame, x: panel.frame.x + shortfall };
+    syncPanelLabelsFromSnapshot(draft, before);
+    moved.push(panel);
+  }
+
+  // Only a downward push can run off the page; a `left`/`right` heading moves
+  // panels sideways within a width this function never changes.
+  if (axis !== 'y' || moved.length === 0) return;
+
+  const margin = marginMm(draft);
+  const limit = draft.page.heightMm - margin;
+  const lowest = Math.max(...moved.map((p) => p.frame.y + p.frame.height));
+  const overflow = lowest - limit;
+  if (overflow <= EPS) return;
+
+  // Rows, by the rule `readingOrder` already uses to decide what a row is.
+  const rows = rowBands(moved, (panel) => panel.frame.y);
+
+  const rowHeight = (row: readonly PanelNode[]): number =>
+    Math.max(...row.map((p) => p.frame.height));
+  const totalHeight = rows.reduce((sum, row) => sum + rowHeight(row), 0);
+  if (totalHeight <= EPS) return;
+
+  let shift = 0;
+  for (const row of rows) {
+    const height = rowHeight(row);
+    /*
+     * Never below the floor a panel needs to stay usable. Where the overflow
+     * cannot be fully absorbed the rows take what they can and the remainder is
+     * left on the page — a figure slightly over its page is recoverable, a row
+     * of panels collapsed to nothing is not.
+     */
+    const wanted = (overflow * height) / totalHeight;
+    const take = Math.max(0, Math.min(wanted, height - MIN_TILE_MM));
+
+    for (const panel of row) {
+      const next: RectMm = {
+        ...panel.frame,
+        y: panel.frame.y - shift,
+        height: Math.max(MIN_TILE_MM, panel.frame.height - take),
+      };
       const before = snapshotPanelAbsolutePositions(draft.nodes, panel.id);
-      panel.frame =
-        axis === 'y'
-          ? { ...panel.frame, y: panel.frame.y + shortfall }
-          : { ...panel.frame, x: panel.frame.x + shortfall };
+      resizePanel(draft, panel.id, next);
       syncPanelLabelsFromSnapshot(draft, before);
     }
+    shift += take;
   }
 }
 

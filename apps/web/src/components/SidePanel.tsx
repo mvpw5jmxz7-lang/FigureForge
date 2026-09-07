@@ -37,7 +37,7 @@ import {
   reorderNode,
   replaceAnalysisForPlot,
   repositionBrackets,
-  reserveSpaceForGroupLabels,
+  reserveLayoutSpace,
   toMatrix,
   toSeries,
   toSurvivalGroups,
@@ -386,7 +386,7 @@ function DataTab({
           gutterMm: theme.spacing.panelGutterMm,
           labelGutterMm: 4,
         });
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
         relabelPanels(draft, newId, {
           uppercase: theme.panelLabelCase === 'upper',
           fontSizePt: theme.type.panelLabelPt,
@@ -498,7 +498,7 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
-          reserveSpaceForGroupLabels(draft);
+          reserveLayoutSpace(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
@@ -595,7 +595,7 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
-          reserveSpaceForGroupLabels(draft);
+          reserveLayoutSpace(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
@@ -758,7 +758,7 @@ function DataTab({
             gutterMm: theme.spacing.panelGutterMm,
             labelGutterMm: 4,
           });
-          reserveSpaceForGroupLabels(draft);
+          reserveLayoutSpace(draft);
           relabelPanels(draft, newId, {
             uppercase: theme.panelLabelCase === 'upper',
             fontSizePt: theme.type.panelLabelPt,
@@ -882,7 +882,7 @@ function DataTab({
           gutterMm: theme.spacing.panelGutterMm,
           labelGutterMm: 4,
         });
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
         relabelPanels(draft, newId, {
           uppercase: theme.panelLabelCase === 'upper',
           fontSizePt: theme.type.panelLabelPt,

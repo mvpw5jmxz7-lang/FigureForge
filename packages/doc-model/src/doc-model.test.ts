@@ -53,6 +53,7 @@ import {
   addGroup,
   addGroupLabel,
   addImage,
+  addPanel,
   addPanelWithImage,
   addPanelWithImages,
   addPanelWithPlot,
@@ -66,13 +67,17 @@ import {
   deleteNode,
   duplicateNode,
   fillPanelChildren,
+  groupLabelMembersAreImages,
+  reserveSpaceForScaleBars,
+  scaleBarBelowExtentMm,
+  SCALE_BAR_BELOW_GAP_MM,
   groupLabelExtentMm,
   fitMontageToImages,
   imageContentRect,
   resyncScaleBars,
   imagesUsingAsset,
   memberContentRect,
-  montagePanelAspect,
+  montageShape,
   montageTileAspect,
   suggestMontageGrid,
   montageCellRects,
@@ -110,23 +115,25 @@ import {
   type PlotMeasurements,
 } from './operations.js';
 import { absoluteFrame } from './nodes.js';
-import type { BracketNode, GroupLabelNode, ImageNode } from './nodes.js';
-import { GROUP_LABEL_GAP_MM, groupLabelClearanceMm } from './grouplabel.js';
+import type { BracketNode, FigureNode, GroupLabelNode, ImageNode, ScaleBarNode } from './nodes.js';
+import { GROUP_LABEL_GAP_MM, groupLabelClearanceMm, panelLetterHeightMm } from './grouplabel.js';
 import {
   alignFrames,
   autoLayout,
   distributeFrames,
   gridCells,
   resizeFrame,
+  layoutUnits,
+  readingOrder,
   snapFrame,
   suggestGrid,
 } from './layout.js';
-import { fitAspect, fitAspectAligned, rotatePoint, snapAngle, snapRotation } from './geometry.js';
+import { fitAspect, fitAspectAligned, fitShape, heightForWidth, rotatePoint, snapAngle, snapRotation } from './geometry.js';
 import { LAYOUT_TEMPLATES, findLayoutTemplate, templatesForPanelCount } from './templates.js';
 import { isLocked } from './document.js';
 import type { Analysis } from './analysis.js';
 import type { FigureDocument } from './document.js';
-import type { TextRun } from './nodes.js';
+import type { NodeId, TextRun } from './nodes.js';
 
 // ---------------------------------------------------------------------------
 // Units
@@ -2032,6 +2039,134 @@ describe('scale bars', () => {
     expect(shorter.nodes[bar.id]!.frame.y).not.toBeCloseTo(before, 3);
   });
 
+  it('sits under the picture, right-aligned to it, when placed below', () => {
+    const { doc, bar, image } = barDocument();
+    const placed = editDocument(doc, (draft) => {
+      const target = draft.nodes[bar.id]!;
+      if (target.type === 'scale-bar') target.placement = 'below';
+      resyncScaleBars(draft);
+    });
+
+    const content = imageContentRect(placed.nodes[image.id] as ImageNode);
+    const frame = placed.nodes[bar.id]!.frame;
+    const width = scaleBarWidthMm(placed.nodes, bar.id)!;
+
+    // Below the picture's bottom edge by the gap, and flush with its right
+    // edge — the picture's, not the frame's, which is the distinction that
+    // matters the moment an image letterboxes.
+    expect(frame.y).toBeCloseTo(content.y + content.height + SCALE_BAR_BELOW_GAP_MM, 10);
+    expect(frame.x + frame.width).toBeCloseTo(content.x + content.width, 10);
+    expect(frame.width).toBeCloseTo(width, 10);
+  });
+
+  it('leaves an inside bar exactly where it has always been', () => {
+    // Absent and explicit `'inside'` must both produce today's frame, or every
+    // saved figure moves on open.
+    const { doc, bar } = barDocument();
+    const explicit = editDocument(doc, (draft) => {
+      const target = draft.nodes[bar.id]!;
+      if (target.type === 'scale-bar') target.placement = 'inside';
+      resyncScaleBars(draft);
+    });
+    expect(explicit.nodes[bar.id]!.frame).toEqual(doc.nodes[bar.id]!.frame);
+  });
+
+  it("keeps the label's own colour through a save", () => {
+    /*
+     * `TextStyle.color` has been in the schema since phase 1 and nothing has
+     * ever round-tripped it, on any node type — so this is the first thing to
+     * prove zod actually keeps it. The standing hazard is the other way round
+     * (a field in the type but not the schema is dropped on save); an
+     * unexercised schema field is the same risk from the far side.
+     */
+    const { doc, bar } = barDocument();
+    const coloured = editDocument(doc, (draft) => {
+      const target = draft.nodes[bar.id]!;
+      if (target.type === 'scale-bar') target.style = { ...target.style, color: '#ff0000' };
+    });
+    const reloaded = loadArchive(saveArchive(buildArchiveContents(coloured))).document;
+    const node = reloaded.nodes[bar.id]!;
+    expect(node.type === 'scale-bar' && node.style.color).toBe('#ff0000');
+    // And an untouched bar keeps no colour at all, so it still follows the
+    // theme rather than being frozen at whatever black happened to be.
+    const plain = loadArchive(saveArchive(buildArchiveContents(doc))).document.nodes[bar.id]!;
+    expect(plain.type === 'scale-bar' && plain.style.color).toBeUndefined();
+  });
+
+  it('makes room below by pushing the row beneath it', () => {
+    /*
+     * A picture routinely fills its frame exactly — measured on the sample, the
+     * montage tiles are 16.78 x 11.89 mm pictures in 16.78 x 11.89 mm frames —
+     * so there is no spare strip to drop a bar into and the space has to be
+     * made.
+     */
+    const { doc, bar, image } = barDocument();
+    const upper = image.parentId!;
+    const newId = createIdFactory();
+    const withNeighbour = editDocument(doc, (draft) => {
+      addPanel(draft, newId, { frame: { x: 0, y: 41, width: 50, height: 20 }, name: 'Below' });
+    });
+    const lower = Object.values(withNeighbour.nodes).find(
+      (n) => n.type === 'panel' && n.name === 'Below',
+    )!;
+
+    const after = editDocument(withNeighbour, (draft) => {
+      const target = draft.nodes[bar.id]!;
+      if (target.type === 'scale-bar') target.placement = 'below';
+      resyncScaleBars(draft);
+      reserveSpaceForScaleBars(draft);
+    });
+
+    const band = scaleBarBelowExtentMm(after.nodes[bar.id] as ScaleBarNode);
+    const pictureBottom = 0 + imageContentRect(after.nodes[image.id] as ImageNode).height;
+    expect(after.nodes[lower.id]!.frame.y - pictureBottom).toBeCloseTo(band, 6);
+    // The captioned panel itself never moved — only what sits below it.
+    expect(after.nodes[upper]!.frame).toEqual(withNeighbour.nodes[upper]!.frame);
+
+    // And a second pass moves nothing: this runs on every from-scratch layout.
+    const again = editDocument(after, (draft) => reserveSpaceForScaleBars(draft));
+    expect(again.nodes[lower.id]!.frame).toEqual(after.nodes[lower.id]!.frame);
+  });
+
+  it('shrinks its own panel when there is no row below to push', () => {
+    /*
+     * The bottom row: nothing to move, so the panel that gained the bar pays
+     * for it out of its own height and the page is untouched.
+     *
+     * The picture has to actually reach the page's bottom edge for there to be
+     * no room — the plain fixture leaves 35 mm of empty page below it, where
+     * the honest answer is that nothing needs reserving at all. So the panel is
+     * grown to the full page and the image stretched to fill it.
+     */
+    const { doc: base, bar, image } = barDocument();
+    const panelId = image.parentId!;
+    const doc = editDocument(base, (draft) => {
+      const img = draft.nodes[image.id]!;
+      if (img.type === 'image') img.preserveAspect = false;
+      resizePanel(draft, panelId, { x: 0, y: 0, width: 50, height: 75 });
+      resyncScaleBars(draft);
+    });
+    const before = doc.nodes[panelId]!.frame.height;
+
+    const after = editDocument(doc, (draft) => {
+      const target = draft.nodes[bar.id]!;
+      if (target.type === 'scale-bar') target.placement = 'below';
+      resyncScaleBars(draft);
+      reserveSpaceForScaleBars(draft);
+    });
+
+    expect(after.nodes[panelId]!.frame.height).toBeLessThan(before);
+    expect(after.nodes[panelId]!.frame.height).toBeGreaterThanOrEqual(MIN_TILE_MM);
+    expect(after.page.heightMm).toBe(doc.page.heightMm);
+  });
+
+  it('reserves nothing for a bar drawn on the picture', () => {
+    const { doc, image } = barDocument();
+    const panelId = image.parentId!;
+    const after = editDocument(doc, (draft) => reserveSpaceForScaleBars(draft));
+    expect(after.nodes[panelId]!.frame).toEqual(doc.nodes[panelId]!.frame);
+  });
+
   it('draws black unless asked otherwise', () => {
     // White is right only over a dark micrograph and invisible everywhere else,
     // including on the page a bar dragged off its image sits on.
@@ -2050,11 +2185,40 @@ describe('scale bars', () => {
     expect(resized.nodes[bar.id]!.frame.width).toBeCloseTo(0.5, 10);
   });
 
-  it('doubles when the image is cropped to half its width', () => {
+  it('is measured across the picture, not the frame, when a crop letterboxes it', () => {
+    /*
+     * This test used to assert 2.0 and was pinning a real bug.
+     *
+     * The fixture is a 1000 x 800 px micrograph in a 50 x 40 mm frame, so the
+     * picture fills the frame and 1000 px span 50 mm. Cropping to half the
+     * width keeps 500 px, and because `preserveAspect` is on, the kept region's
+     * new 0.625 aspect **letterboxes**: `renderImage` draws those 500 px across
+     * 25 mm, not 50. So a pixel is still 0.05 mm, and the bar — 10 µm at 2 px
+     * per µm, i.e. 20 source pixels — is still 1.0 mm.
+     *
+     * Dividing by `frame.width` instead said 0.1 mm per pixel and drew the bar
+     * at 2.0 mm: exactly twice the distance it claims. A bar that overstates
+     * its own length is a false measurement in a published figure, which is
+     * what `checkScaleBarCalibration` exists to keep out.
+     */
     const { doc, bar, image } = barDocument();
-    // Half as many source pixels span the same millimetres, so each pixel is
-    // twice as wide on the page and the bar must grow to match.
     const cropped = editDocument(doc, (draft) => setImageCrop(draft, image.id, { width: 0.5 }));
+    expect(imageContentRect(cropped.nodes[image.id] as ImageNode).width).toBeCloseTo(25, 10);
+    expect(scaleBarWidthMm(cropped.nodes, bar.id)).toBeCloseTo(1.0, 10);
+  });
+
+  it('does grow when the crop really does spread fewer pixels over the same width', () => {
+    /*
+     * The property the old test was reaching for, set up so it actually holds:
+     * with `preserveAspect` off the kept region is stretched to fill the frame,
+     * so 500 px really do span all 50 mm and each is twice as wide.
+     */
+    const { doc, bar, image } = barDocument();
+    const cropped = editDocument(doc, (draft) => {
+      const img = draft.nodes[image.id]!;
+      if (img.type === 'image') img.preserveAspect = false;
+      setImageCrop(draft, image.id, { width: 0.5 });
+    });
     expect(scaleBarWidthMm(cropped.nodes, bar.id)).toBeCloseTo(2.0, 10);
   });
 
@@ -2171,6 +2335,215 @@ describe('annotations', () => {
     const shape = Object.values(after.nodes).find((n) => n.type === 'shape')!;
     expect(shape.type === 'shape' && shape.fill).toBeNull();
     expect(shape.type === 'shape' && shape.stroke).not.toBeNull();
+  });
+});
+
+describe('group-aware layout', () => {
+  /**
+   * The reported figure: panel C alone at the top, panels A and B grouped at
+   * the *bottom*, which is what makes the relative-versus-page distinction
+   * bite. `addGroup` unions the members, so G comes out (5, 60, 115, 40) with A
+   * local (0, 0) and B local (60, 0).
+   */
+  function groupedFigure() {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 120,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    let doc = editDocument(base, (draft) => {
+      addPanel(draft, newId, { frame: { x: 5, y: 60, width: 55, height: 40 }, name: 'A' });
+      addPanel(draft, newId, { frame: { x: 65, y: 60, width: 55, height: 40 }, name: 'B' });
+      addPanel(draft, newId, { frame: { x: 5, y: 5, width: 80, height: 40 }, name: 'C' });
+    });
+    const id = (name: string): NodeId =>
+      Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === name)!.id;
+    const a = id('A');
+    const b = id('B');
+    const c = id('C');
+    doc = editDocument(doc, (draft) => {
+      addGroup(draft, newId, [a, b]);
+    });
+    const g = Object.values(doc.nodes).find((n) => n.type === 'group')!.id;
+    return { doc, newId, a, b, c, g };
+  }
+
+  const OPTS = { marginMm: 2, gutterMm: 5, labelGutterMm: 4 };
+
+  it('reads a grouped panel at its page position, not its position in the group', () => {
+    /*
+     * A grouped panel's frame is relative to its group, so comparing the two
+     * spaces put A and B — local y 0, page y 60 — inside C's 5 mm row band and
+     * sorted the three by x: 0, 5, 60. Measured `A C B`, on a page that plainly
+     * reads `C A B`, and the figure was lettered to match.
+     */
+    const { doc } = groupedFigure();
+    expect(readingOrder(doc.nodes).map((n) => n.name)).toEqual(['C', 'A', 'B']);
+  });
+
+  it('lays a group out as one unit, keeping its members together', () => {
+    /*
+     * Two units — panel C and group G — so `suggestGrid(2)` is 1 × 2.
+     *   usable width 183 − 2*2 − 5 = 174, columns 87, xs at 2 and 94
+     *   label gutter 4 -> inner cells (6, 2, 83, 116) and (98, 2, 83, 116)
+     * G holds no shape-bound panel, so it takes its cell whole and
+     *   sx = 83/115 = 0.7217391304 , sy = 116/40 = 2.9
+     *   A local (0, 0, 55, 40)  -> (0, 0, 39.6956522, 116)
+     *   B local (60, 0, 55, 40) -> (43.3043478, 0, 39.6956522, 116)
+     *
+     * Before this, every panel was placed individually and its page-space frame
+     * written into a group-relative field: A read (6, 2) against a true page
+     * position of (11, 62), and B landed with its right edge at 186 mm on a
+     * 183 mm page.
+     */
+    const { doc, a, b, c, g } = groupedFigure();
+    const after = editDocument(doc, (draft) => {
+      applyAutoLayout(draft, OPTS);
+    });
+
+    expect(after.nodes[c]!.frame).toEqual({ x: 6, y: 2, width: 83, height: 116 });
+    // The group's own box moved with its members, where it used to go stale.
+    expect(after.nodes[g]!.frame).toEqual({ x: 98, y: 2, width: 83, height: 116 });
+
+    const pageA = absoluteFrame(after.nodes, a)!;
+    const pageB = absoluteFrame(after.nodes, b)!;
+    expect(pageA.x).toBeCloseTo(98, 6);
+    expect(pageA.y).toBeCloseTo(2, 6);
+    expect(pageB.x).toBeCloseTo(141.3043478, 6);
+    // 141.3043478 + 39.6956522 = 181, the page less its own margin.
+    expect(pageB.x + pageB.width).toBeCloseTo(181, 6);
+  });
+
+  it('puts a grouped panel’s letter beside where the panel actually is', () => {
+    /*
+     * A `panel-label` is a top-level node, so it is positioned in page space —
+     * but it was placed from `panel.frame`, which for a grouped panel is the
+     * group's local space. Asserted in both orders because two different
+     * mechanisms are involved: relabel-then-layout goes through `resizeGroup`'s
+     * position snapshot, layout-then-relabel through the creation path.
+     */
+    const { doc, newId, a, b, c } = groupedFigure();
+    const label = (nodes: FigureDocument['nodes'], panelId: NodeId) =>
+      Object.values(nodes).find(
+        (n): n is Extract<FigureNode, { type: 'panel-label' }> =>
+          n.type === 'panel-label' && n.panelId === panelId,
+      )!;
+
+    const layoutFirst = editDocument(doc, (draft) => {
+      applyAutoLayout(draft, OPTS);
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const relabelFirst = editDocument(doc, (draft) => {
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+      applyAutoLayout(draft, OPTS);
+    });
+
+    for (const nodes of [layoutFirst.nodes, relabelFirst.nodes]) {
+      // A sits at page (98, 2), so its letter is 4 mm to the left of that.
+      expect(label(nodes, a).frame.x).toBeCloseTo(94, 6);
+      expect(label(nodes, a).frame.y).toBeCloseTo(2, 6);
+      // Two panels in one group still get two letters, in page order.
+      expect(label(nodes, c).text).toBe('a');
+      expect(label(nodes, a).text).toBe('b');
+      expect(label(nodes, b).text).toBe('c');
+    }
+  });
+
+  it('scales a group uniformly when something inside it needs a shape', () => {
+    /*
+     * `resizeGroupGeometry` scales sx and sy independently and
+     * `resizePanelGeometry` does not enforce a member's `aspectLock` — it
+     * assigns the frame and re-tiles. So a non-uniform scale does not bend the
+     * lock, it hands the member a wrong-shaped frame: round 41's dead strip,
+     * with the group as the cause. Pinning the group to its own ratio is what
+     * forces sx === sy.
+     */
+    const { doc, a, b, g } = groupedFigure();
+    const locked = editDocument(doc, (draft) => {
+      const panel = draft.nodes[a];
+      if (panel?.type === 'panel') panel.aspectLock = 2;
+    });
+    const before = locked.nodes[g]!.frame;
+    const after = editDocument(locked, (draft) => {
+      applyAutoLayout(draft, OPTS);
+    });
+
+    const now = after.nodes[g]!.frame;
+    expect(now.width / before.width).toBeCloseTo(now.height / before.height, 10);
+    // And the members really did scale by that one factor.
+    const sx = now.width / before.width;
+    expect(after.nodes[a]!.frame.width).toBeCloseTo(55 * sx, 6);
+    expect(after.nodes[b]!.frame.x).toBeCloseTo(60 * sx, 6);
+  });
+
+  it('leaves a group carrying no panel exactly where it is', () => {
+    /*
+     * The layout arranges panels. A group of annotations is no more part of the
+     * grid than a loose shape is, and moving one would need a rule about what
+     * it belongs to that the document does not carry.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    let doc = editDocument(base, (draft) => {
+      addPanel(draft, newId, { frame: { x: 5, y: 5, width: 50, height: 40 }, name: 'A' });
+      addPanel(draft, newId, { frame: { x: 70, y: 5, width: 50, height: 40 }, name: 'B' });
+      addShape(draft, newId, { frame: { x: 10, y: 90, width: 20, height: 10 }, shape: 'rect' });
+      addShape(draft, newId, { frame: { x: 40, y: 90, width: 20, height: 10 }, shape: 'rect' });
+    });
+    const shapes = Object.values(doc.nodes).filter((n) => n.type === 'shape').map((n) => n.id);
+    doc = editDocument(doc, (draft) => {
+      addGroup(draft, newId, shapes);
+    });
+    const g = Object.values(doc.nodes).find((n) => n.type === 'group')!.id;
+    expect(layoutUnits(doc.nodes).map((u) => u.kind)).toEqual(['panel', 'panel']);
+
+    const before = doc.nodes[g]!.frame;
+    const after = editDocument(doc, (draft) => {
+      applyAutoLayout(draft, OPTS);
+    });
+    expect(after.nodes[g]!.frame).toEqual(before);
+  });
+
+  it('lays out a figure with no groups exactly as it always did', () => {
+    /*
+     * The guard for the whole round, with the numbers written out rather than
+     * compared against a freshly computed reference — a reference would shift
+     * with the code it is meant to be checking.
+     *
+     *   suggestGrid(4) = 2 × 2
+     *   usable width  183 − 4 − 5 = 174 -> 87 each, xs at 2 and 94
+     *   usable height 120 − 4 − 5 = 111 -> 55.5 each, ys at 2 and 62.5
+     *   label gutter 4 off each cell's left
+     */
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      for (const name of ['A', 'B', 'C', 'D']) {
+        addPanel(draft, newId, { frame: { x: 5, y: 5, width: 20, height: 20 }, name });
+      }
+      applyAutoLayout(draft, OPTS);
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const frames = Object.values(doc.nodes)
+      .filter((n) => n.type === 'panel')
+      .map((n) => n.frame);
+    expect(frames).toEqual([
+      { x: 6, y: 2, width: 83, height: 55.5 },
+      { x: 98, y: 2, width: 83, height: 55.5 },
+      { x: 6, y: 62.5, width: 83, height: 55.5 },
+      { x: 98, y: 62.5, width: 83, height: 55.5 },
+    ]);
+    const labels = Object.values(doc.nodes)
+      .filter((n) => n.type === 'panel-label')
+      .map((n) => ({ x: n.frame.x, y: n.frame.y }));
+    expect(labels).toEqual([
+      { x: 2, y: 2 },
+      { x: 94, y: 2 },
+      { x: 2, y: 62.5 },
+      { x: 94, y: 62.5 },
+    ]);
   });
 });
 
@@ -5048,6 +5421,242 @@ describe('group labels', () => {
     expect(label.edge).toBe('left');
   });
 
+  /*
+   * Two lettered panels stacked with a generous gap, on a page with room to
+   * spare, so each test below can choose whether it wants the shrink path.
+   */
+  function twoLetteredPanels(heightMm: number, gapMm = 20) {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      addPanel(draft, newId, { frame: { x: 2, y: 2, width: 60, height: 40 }, name: 'Top' });
+      addPanel(draft, newId, {
+        frame: { x: 2, y: 42 + gapMm, width: 60, height: 40 },
+        name: 'Bottom',
+      });
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const panels = Object.values(doc.nodes)
+      .filter((n) => n.type === 'panel')
+      .sort((a, b) => a.frame.y - b.frame.y);
+    return { doc, newId, panels };
+  }
+
+  const letterOf = (doc: FigureDocument, panelId: string) =>
+    Object.values(doc.nodes).find(
+      (n): n is Extract<FigureNode, { type: 'panel-label' }> =>
+        n.type === 'panel-label' && n.panelId === panelId,
+    )!;
+
+  it('reserves against the page edge for a heading with no panel above it', () => {
+    /*
+     * The reported defect. `reserveSpaceForGroupLabels` measured the gap to the
+     * nearest panel on the heading's side and gave up when there was none —
+     * which is exactly the top row, so the case that most needs space reserved
+     * reserved none and the heading was drawn above the page's own top edge.
+     *
+     * The band required is the heading's extent *plus* the panel letter's line
+     * height, because the letter is lifted to sit above the heading.
+     */
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const top = panels[0]!;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [top.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    const letter = letterOf(after, top.id);
+    const needed =
+      groupLabelClearanceMm(undefined, false, undefined) +
+      panelLetterHeightMm(letter.style.fontSizePt);
+    // The panel moved down by exactly the shortfall — its top was at the page
+    // margin, so the whole band had to be made.
+    expect(after.nodes[top.id]!.frame.y).toBeCloseTo(top.frame.y + needed, 6);
+  });
+
+  it('puts the panel letter above the heading, and the heading above the graph', () => {
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const top = panels[0]!;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [top.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    const letter = letterOf(after, top.id);
+    const heading = Object.values(after.nodes).find(
+      (n) => n.type === 'group-label',
+    ) as GroupLabelNode;
+    const panel = after.nodes[top.id]!;
+
+    // Reading down the page: letter, heading, graph — and nothing off the page.
+    expect(letter.frame.y).toBeGreaterThanOrEqual(0);
+    expect(letter.frame.y + panelLetterHeightMm(letter.style.fontSizePt)).toBeLessThanOrEqual(
+      heading.frame.y + 1e-6,
+    );
+    expect(heading.frame.y + heading.frame.height).toBeLessThanOrEqual(panel.frame.y + 1e-6);
+    // The letter itself did not move: it was already at the top, and it is the
+    // page below it that was pushed down.
+    expect(letter.frame.y).toBeCloseTo(letterOf(doc, top.id).frame.y, 6);
+  });
+
+  it('reserves once and then leaves the page alone', () => {
+    // Every from-scratch layout path runs this, so a second pass that moved
+    // anything would creep the figure down the page on every import or delete.
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const once = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [panels[0]!.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+    const twice = editDocument(once, (draft) => {
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+    for (const panel of panels) {
+      expect(twice.nodes[panel.id]!.frame).toEqual(once.nodes[panel.id]!.frame);
+    }
+    expect(letterOf(twice, panels[0]!.id).frame).toEqual(letterOf(once, panels[0]!.id).frame);
+  });
+
+  it('puts the letter back exactly when the heading goes away', () => {
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const top = panels[0]!;
+    const before = letterOf(doc, top.id).frame.y;
+
+    const withLabel = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [top.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+    const heading = Object.values(withLabel.nodes).find((n) => n.type === 'group-label')!;
+    expect(letterOf(withLabel, top.id).liftMm).toBeGreaterThan(0);
+
+    const removed = editDocument(withLabel, (draft) => {
+      deleteNode(draft, heading.id);
+      reflowGroupLabels(draft);
+    });
+    // The panel stays where the reservation put it — nothing un-pushes a page —
+    // but the letter returns to its own panel's top, with no lift left over.
+    const letter = letterOf(removed, top.id);
+    expect(letter.liftMm).toBeUndefined();
+    expect(letter.frame.y).toBeCloseTo(removed.nodes[top.id]!.frame.y, 6);
+    expect(letter.frame.y).toBeGreaterThan(before);
+  });
+
+  it('keeps a letter that was nudged by hand', () => {
+    /*
+     * Why the lift is stored rather than recomputed. `reflowGroupLabels` runs
+     * after every canvas drag, so setting `frame.y` outright would snap a
+     * hand-placed letter back to its panel on the author's next move.
+     */
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const top = panels[0]!;
+
+    const caption = (source: FigureDocument) =>
+      editDocument(source, (draft) => {
+        addGroupLabel(draft, newId, { memberIds: [top.id], edge: 'top', title: 'Group' });
+        reserveSpaceForGroupLabels(draft);
+        reflowGroupLabels(draft);
+      });
+
+    const nudged = editDocument(doc, (draft) => {
+      const letter = Object.values(draft.nodes).find(
+        (n) => n.type === 'panel-label' && n.panelId === top.id,
+      )!;
+      letter.frame = { ...letter.frame, x: letter.frame.x - 3, y: letter.frame.y - 1 };
+    });
+
+    // Against the same figure captioned without the nudge: the difference
+    // between the two is exactly the nudge, on both axes, and nothing else.
+    const plain = letterOf(caption(doc), top.id).frame;
+    const moved = letterOf(caption(nudged), top.id).frame;
+    expect(moved.x).toBeCloseTo(plain.x - 3, 6);
+    expect(moved.y).toBeCloseTo(plain.y - 1, 6);
+  });
+
+  it('shrinks the pushed rows rather than walking them off the page', () => {
+    /*
+     * "Push the rest down, shrink only if needed" — and on a tight page the
+     * shrink is the common path, not a rare branch. Growing the page instead
+     * was refused: a caption silently making a figure taller can breach a
+     * journal's maximum.
+     */
+    const { doc, newId, panels } = twoLetteredPanels(90, 5);
+    const heightBefore = doc.page.heightMm;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [panels[0]!.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    const margin = 2;
+    const lowest = Math.max(
+      ...panels.map((p) => after.nodes[p.id]!.frame.y + after.nodes[p.id]!.frame.height),
+    );
+    expect(after.page.heightMm).toBe(heightBefore);
+    expect(lowest).toBeLessThanOrEqual(after.page.heightMm - margin + 1e-6);
+    for (const panel of panels) {
+      expect(after.nodes[panel.id]!.frame.height).toBeGreaterThanOrEqual(MIN_TILE_MM);
+      expect(after.nodes[panel.id]!.frame.height).toBeLessThan(panel.frame.height);
+    }
+  });
+
+  it('lifts no letter for a caption that sits inside its panel', () => {
+    // A montage cell caption is drawn in the panel's own grid gutter, below the
+    // panel's top edge, so the panel letter is not in its way.
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      const images = Array.from({ length: 2 }, (_, i) => {
+        const assetId = `asset-${i}`;
+        addAsset(draft, { id: assetId, filename: `t${i}.png`, mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+        return { assetId, naturalPx: { width: 100, height: 100 } };
+      });
+      addPanelWithImages(draft, newId, { frame: { x: 2, y: 2, width: 120, height: 60 }, name: 'Montage', images, gutterMm: 2 });
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const panel = Object.values(doc.nodes).find((n) => n.type === 'panel')!;
+    const tile = Object.values(doc.nodes).filter((n) => n.type === 'image').sort((a, b) => a.z - b.z)[0]!;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [tile.id], edge: 'top', title: 'Cell' });
+      fillPanelChildren(draft, panel.id, panel.frame);
+      reflowGroupLabels(draft);
+    });
+    expect(letterOf(after, panel.id).liftMm).toBeUndefined();
+    expect(letterOf(after, panel.id).frame.y).toBeCloseTo(letterOf(doc, panel.id).frame.y, 6);
+  });
+
+  it('knows which headings could be overlaid on their content', () => {
+    const newId = createIdFactory();
+    const base = createDocument({ widthMm: 183, heightMm: 120, idFactory: newId, now: () => '2026-01-01T00:00:00.000Z' });
+    const doc = editDocument(base, (draft) => {
+      addAsset(draft, { id: 'a1', filename: 't.png', mimeType: 'image/png', byteLength: 10, naturalPx: { width: 100, height: 100 } });
+      addPanelWithImage(draft, newId, { frame: { x: 2, y: 2, width: 60, height: 40 }, name: 'Pic', assetId: 'a1', naturalPx: { width: 100, height: 100 } });
+      addPanel(draft, newId, { frame: { x: 70, y: 2, width: 60, height: 40 }, name: 'Plain' });
+    });
+    const imagePanel = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'Pic')!;
+    const plainPanel = Object.values(doc.nodes).find((n) => n.type === 'panel' && n.name === 'Plain')!;
+    const image = Object.values(doc.nodes).find((n) => n.type === 'image')!;
+
+    expect(groupLabelMembersAreImages(doc.nodes, [image.id])).toBe(true);
+    expect(groupLabelMembersAreImages(doc.nodes, [imagePanel.id])).toBe(true);
+    // A panel with no image children has nothing to overlay a heading onto.
+    expect(groupLabelMembersAreImages(doc.nodes, [plainPanel.id])).toBe(false);
+    expect(groupLabelMembersAreImages(doc.nodes, [image.id, plainPanel.id])).toBe(false);
+    expect(groupLabelMembersAreImages(doc.nodes, [])).toBe(false);
+  });
+
   it('refuses a group-label with no members at the referential-integrity check', () => {
     const bad = {
       nodes: {
@@ -5850,27 +6459,153 @@ describe('montage auto-fit', () => {
   });
 
   it('shapes the panel so square tiles get square cells', () => {
+    /*
+     * Rewritten rather than merely repointed. The old form asserted that a
+     * 2 × 2 of squares gives a *panel ratio* of 1 — true, but for a reason that
+     * had nothing to do with the function being right: it is the one
+     * configuration where `fixedWidth == fixedHeight` and `cols·a/rows == 1`,
+     * i.e. exactly where a single ratio genuinely is scale-invariant. It would
+     * have kept passing through the defect this round removes.
+     *
+     * Asserted on the shape's parts instead, which are what the tiler reads:
+     *   contentAspect = 2 × 1 / 2      = 1
+     *   fixedWidth    = 1 gutter × 2   = 2   (= fixedHeight, by symmetry)
+     */
     const { doc, panel } = montageOf([[100, 100], [100, 100], [100, 100], [100, 100]]);
-    const aspect = montagePanelAspect(doc, panel.id)!;
-    // A 2 × 2 grid of square cells with equal gutters and padding is square.
-    expect(aspect).toBeCloseTo(1, 6);
+    const shape = montageShape(doc, panel.id)!;
+    expect(shape.contentAspect).toBeCloseTo(1, 6);
+    expect(shape.fixedWidthMm).toBeCloseTo(shape.fixedHeightMm, 6);
+    // And the panel really is square at every size, which is the property the
+    // old assertion was reaching for.
+    for (const w of [30, 60, 120]) {
+      expect(heightForWidth(shape, w)).toBeCloseTo(w, 6);
+    }
+  });
+
+  it('counts a group title as a band, not as part of the ratio', () => {
+    /*
+     * The reported figure: three 4:3 tiles in a row under one group title.
+     * `contentAspect` is the *cells'* combined ratio, 3 × (4/3) / 1 = 4, and
+     * the caption is a constant band on top of the padding the panel already
+     * had — 3.54 mm for a 6 pt heading with no rule.
+     */
+    // A wide cell, so the grid comes out 1 × 3 — the reported shape.
+    const { doc, panel, newId } = montageOf(
+      [[800, 600], [800, 600], [800, 600]],
+      { x: 0, y: 0, width: 180, height: 45 },
+    );
+    const tiles = Object.values(doc.nodes).filter((n) => n.type === 'image');
+    const captioned = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: tiles.map((t) => t.id), edge: 'top', title: 'Group title' });
+      reflowGroupLabels(draft);
+    });
+
+    const bare = montageShape(doc, panel.id)!;
+    const shape = montageShape(captioned, panel.id)!;
+    expect(shape.contentAspect).toBeCloseTo(4, 6);
+    // The caption adds a band and nothing else: the cells' own aspect and the
+    // width are untouched, where a single ratio rescaled everything.
+    expect(shape.fixedHeightMm - bare.fixedHeightMm).toBeCloseTo(3.54, 2);
+    expect(shape.fixedWidthMm).toBeCloseTo(bare.fixedWidthMm, 6);
+    expect(shape.contentAspect).toBeCloseTo(bare.contentAspect!, 6);
+  });
+
+  it('lets no tile letterbox, at any panel size', () => {
+    /*
+     * The whitespace itself, measured through the real tiler. Fitted with the
+     * single ratio `montagePanelAspect` returned (2.5761), the tiles kept their
+     * width and lost height at every size:
+     *
+     *   60.0 × 23.3  -> cell 19.33 × 19.75, picture 19.33 × 14.50,  101.5 mm² dead
+     *   120.0 × 46.6 -> cell 39.33 × 43.04, picture 39.33 × 29.50,  532.6 mm² dead
+     *   175.0 × 67.9 -> cell 57.67 × 64.39, picture 57.67 × 43.25, 1219.2 mm² dead
+     *
+     * × 3 tiles, all of it under the pictures because a montage tile is
+     * `alignY: 'start'`. At the affine height there is nothing left over.
+     */
+    const { doc, panel, newId } = montageOf(
+      [[800, 600], [800, 600], [800, 600]],
+      { x: 0, y: 0, width: 180, height: 45 },
+    );
+    const tiles = Object.values(doc.nodes).filter((n) => n.type === 'image');
+    const captioned = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: tiles.map((t) => t.id), edge: 'top', title: 'Group title' });
+      reflowGroupLabels(draft);
+    });
+    const shape = montageShape(captioned, panel.id)!;
+
+    for (const width of [60, 120, 175]) {
+      const height = heightForWidth(shape, width);
+      const laid = editDocument(captioned, (draft) => {
+        fillPanelChildren(draft, panel.id, { x: 0, y: 0, width, height });
+      });
+      for (const tile of montageTiles(laid.nodes, panel.id)) {
+        const ink = imageContentRect(tile as Extract<FigureNode, { type: 'image' }>);
+        expect(ink.width).toBeCloseTo(tile.frame.width, 6);
+        expect(ink.height).toBeCloseTo(tile.frame.height, 6);
+      }
+    }
+  });
+
+  it('reserves the strip a below-placed scale bar needs, inside the grid', () => {
+    /*
+     * A bar below its picture is drawn outside the tile's own frame, so unless
+     * the *grid* holds the room open the tiler fills it with picture and the
+     * bar lands on whatever is beneath. Nothing in the solver's demand path
+     * read a scale bar at all before this.
+     *
+     *   band = 1 mm gap + 0.6 mm bar + a 6 pt label ≈ 4.14 mm
+     */
+    const { doc, panel, newId } = montageOf(
+      [[800, 600], [800, 600], [800, 600]],
+      { x: 0, y: 0, width: 180, height: 45 },
+    );
+    const tiles = Object.values(doc.nodes).filter((n) => n.type === 'image');
+    const withBar = editDocument(doc, (draft) => {
+      addScaleBar(draft, newId, { imageId: tiles[2]!.id, length: 10, unitLabel: 'µm', pixelsPerUnit: 2 });
+      const bar = Object.values(draft.nodes).find((n) => n.type === 'scale-bar')!;
+      if (bar.type === 'scale-bar') bar.placement = 'below';
+      resyncScaleBars(draft);
+    });
+    const bar = Object.values(withBar.nodes).find((n) => n.type === 'scale-bar')!;
+    const band = scaleBarBelowExtentMm(bar as Extract<FigureNode, { type: 'scale-bar' }>);
+    expect(band).toBeCloseTo(4.14, 2);
+
+    // The band is in the panel's fixed extent, so it is real to the tiler and
+    // to the solver at once — not stated in one and forgotten by the other.
+    const before = montageShape(doc, panel.id)!;
+    const after = montageShape(withBar, panel.id)!;
+    expect(after.fixedHeightMm - before.fixedHeightMm).toBeCloseTo(band, 6);
+    expect(after.contentAspect).toBeCloseTo(before.contentAspect!, 6);
+    // The pictures are unchanged: the panel grew by the band, the tiles did not
+    // shrink to make room for it.
+    expect(heightForWidth(after, 175) - heightForWidth(before, 175)).toBeCloseTo(band, 6);
   });
 
   it('shapes it wider for wide tiles', () => {
     const { doc, panel } = montageOf([[200, 100], [200, 100], [200, 100], [200, 100]]);
     const square = montageOf([[100, 100], [100, 100], [100, 100], [100, 100]]);
-    const wide = montagePanelAspect(doc, panel.id)!;
-    const plain = montagePanelAspect(square.doc, square.panel.id)!;
-    expect(wide).toBeGreaterThan(plain);
+    const wide = montageShape(doc, panel.id)!;
+    const plain = montageShape(square.doc, square.panel.id)!;
+    expect(wide.contentAspect).toBeGreaterThan(plain.contentAspect!);
   });
 
-  it('sets aspectLock, which is what auto-layout already honours', () => {
+  it('locks the ratio the panel really got, not one from some other size', () => {
+    /*
+     * The test that pinned the defect. It asserted `aspectLock` equalled
+     * `montagePanelAspect`, which probed at a 5 mm cell and returned a ratio no
+     * frame of the panel ever had — so the lock was self-consistently wrong and
+     * the assertion could not see it.
+     *
+     * The lock is now read off the fitted frame, which is exact at the size the
+     * panel actually has.
+     */
     const { doc, panel } = montageOf([[200, 100], [200, 100]]);
     const locked = doc.nodes[panel.id]!;
-    expect(locked.type === 'panel' && locked.aspectLock).toBeCloseTo(
-      montagePanelAspect(doc, panel.id)!,
-      6,
-    );
+    const shape = montageShape(doc, panel.id)!;
+    const fitted = fitShape(panel.frame, shape, 'start', 'start');
+    expect(locked.type === 'panel' && locked.aspectLock).toBeCloseTo(fitted.width / fitted.height, 6);
+    expect(fitted.height).toBeCloseTo(heightForWidth(shape, fitted.width), 6);
   });
 
   it('leaves a montage with autoFit off exactly as it was', () => {

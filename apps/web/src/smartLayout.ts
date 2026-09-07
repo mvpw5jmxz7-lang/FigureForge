@@ -19,10 +19,12 @@ import {
   absoluteFrame,
   applySmartLayout,
   editDocument,
-  readingOrder,
+  layoutUnits,
   relabelPanels,
   reflowGroupLabels,
+  reserveLayoutSpace,
   rescoreCandidate,
+  unitDemands,
   solveSmartLayout,
   type RectMm,
 } from '@figureforge/doc-model';
@@ -87,11 +89,17 @@ export function solveForDocument(
     maxRows: PROBE_MAX_ROWS,
   };
 
-  const panels = readingOrder(doc.nodes).filter((n) => n.type === 'panel');
+  /*
+   * Units, not panels: a group is laid out as one thing and its members scale
+   * with it. A unit is top-level by construction, so its own frame is already
+   * page space — but `absoluteFrame` is still what asks the question, rather
+   * than an assumption about parentage restated here.
+   */
+  const units = layoutUnits(doc.nodes);
   const currentFrames = new Map<NodeId, RectMm>();
-  for (const panel of panels) {
-    const frame = absoluteFrame(doc.nodes, panel.id);
-    if (frame) currentFrames.set(panel.id, frame);
+  for (const unit of units) {
+    const frame = absoluteFrame(doc.nodes, unit.id);
+    if (frame) currentFrames.set(unit.id, frame);
   }
 
   const scales = measureScaleInputs(
@@ -102,7 +110,8 @@ export function solveForDocument(
   );
 
   const solved = solveSmartLayout({
-    order: panels.map((p) => p.id),
+    units,
+    doc,
     scales,
     options: basics,
     currentFrames,
@@ -115,12 +124,20 @@ export function solveForDocument(
     const nextTheme = resolveTheme(doc.themeId, applied.themeOverrides);
     const demands = measurePanelDemands(applied, nextTheme, demandOptions, candidate.fontScale);
 
+    // Re-derived from the *applied* document, so a group whose members were
+    // just scaled reports the demand it now has rather than the one it had.
+    const appliedUnits = layoutUnits(applied.nodes);
     const frames = new Map<NodeId, RectMm>();
     for (const id of candidate.order) {
       const frame = absoluteFrame(applied.nodes, id);
       if (frame) frames.set(id, frame);
     }
-    return rescoreCandidate(candidate, frames, [...demands.values()], basics);
+    return rescoreCandidate(
+      candidate,
+      frames,
+      unitDemands(applied, appliedUnits, [...demands.values()]),
+      basics,
+    );
   });
 
   // Re-scoring can reorder them, and the list must be shown best-first.
@@ -157,6 +174,12 @@ export function applyCandidate(
     fontSizePt: nextTheme.type.panelLabelPt,
     offsetMm: LABEL_GUTTER_MM,
   });
+  /*
+   * A from-scratch layout, which is exactly the case this function's own
+   * contract says it is safe for — and without it a smart layout applied over a
+   * figure that carries a heading puts the heading back on top of its panel.
+   */
+  reserveLayoutSpace(draft);
   reflowGroupLabels(draft);
   reflowBrackets(draft, nextTheme);
   return true;

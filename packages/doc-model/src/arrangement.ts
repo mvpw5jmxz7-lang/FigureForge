@@ -21,7 +21,7 @@
  * a row's panel makes that panel absorb an extra gutter, which shifts every
  * position after it, which moves the boundaries being placed. It terminates only
  * by iterating, and layout here refuses convergence loops (`requiredMargin`'s
- * "exactly two passes", `montagePanelAspect`'s closed form). Solving each band on
+ * "exactly two passes", `montageShape`'s closed form). Solving each band on
  * its own is exact and terminates by construction.
  *
  * ## Pure geometry
@@ -32,8 +32,8 @@
  * owns everything that decides what those numbers should be.
  */
 
-import type { RectMm } from './geometry.js';
-import { fitAspectAligned } from './geometry.js';
+import type { RectMm, ShapeMm } from './geometry.js';
+import { fitShape, heightForWidth, widthForHeight } from './geometry.js';
 import type { NodeId } from './nodes.js';
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,12 @@ export interface PanelSizeDemand {
   wantWidthMm: number;
   wantHeightMm: number;
   /** Width/height the panel must keep, or null to fill its cell. */
-  aspect: number | null;
+  /**
+   * The shapes this panel can take; `FREE_SHAPE` to fill whatever cell it is
+   * given. Not a bare ratio: a montage's height is affine in its width, so no
+   * single number is right at more than one size — see `ShapeMm`.
+   */
+  shape: ShapeMm;
 }
 
 export interface ArrangementLayoutOptions {
@@ -389,14 +394,27 @@ const demandsFor = (
  * The per-band width solve is the feature: row 2's panels divide the full page
  * width by their own demands with no reference to row 1's.
  *
+ * Every band is then clamped to what it wants, and the height that frees is
+ * taken off the page rather than left as a strip under the shortest panel —
+ * `shareOut` spends its whole total by design, so without the clamp a
+ * free-height panel stretches past its own comfortable height to whatever the
+ * page has spare. Measured before the clamp: a plot wanting 42 mm came out 46,
+ * 56 and 76 mm tall on 50, 60 and 80 mm pages while the montage beside it
+ * stayed at 28.6 mm throughout.
+ *
+ * The realised page height is returned rather than left for the caller to
+ * recompute: one that kept only the frames would write the *unreduced* height
+ * onto the document and move the reclaimed strip to the bottom of the page,
+ * which is the whole defect this exists to remove.
+ *
  * Returns null when the arrangement cannot be realised at this page size.
  */
-export function arrangementFrames(
+export function arrangementLayout(
   arrangement: Arrangement,
   order: readonly NodeId[],
   demands: readonly PanelSizeDemand[],
   options: ArrangementLayoutOptions,
-): Map<NodeId, RectMm> | null {
+): { frames: Map<NodeId, RectMm>; pageHeightMm: number } | null {
   const solved = solveBands(arrangement, order, demands, options);
   if (!solved) return null;
   const { cells, bandWidths, bandMin, bandWant } = solved;
@@ -412,7 +430,9 @@ export function arrangementFrames(
   let y = marginMm;
   arrangement.bands.forEach((band, b) => {
     const widths = bandWidths[b]!;
-    const height = bandHeights[b]!;
+    // Lever 2: never taller than the band actually wants. Safe against the
+    // feasibility check below because both operands are at least `bandMin[b]`.
+    const height = Math.min(bandHeights[b]!, bandWant[b]!);
     let x = marginMm;
 
     band.columns.forEach((column, c) => {
@@ -427,6 +447,15 @@ export function arrangementFrames(
       const wants = stacked.map((index, i) =>
         Math.max(mins[i]!, demands[index]!.wantHeightMm),
       );
+      /*
+       * No second clamp here, deliberately. A column filling a band that a
+       * neighbour genuinely needs is what makes a row flush, and it costs
+       * nothing — the space would otherwise be dead. It is only the *page's*
+       * spare height that must not be spent, and the band clamp above is what
+       * refuses that. Clamping here as well was tried and it made rows ragged
+       * rather than tight: a single panel beside a stack of two stopped at its
+       * own want and left the stack's full height beside it as a strip.
+       */
       const heights = shareOut(height - gutters, mins, wants);
       if (!heights) return;
 
@@ -438,16 +467,11 @@ export function arrangementFrames(
           width: inner,
           height: heights[i]!,
         };
-        const demand = demands[index]!;
         // Top-left, never centred — `autoLayout`'s own rule, and for its stated
         // reason: `readingOrder` bands rows on `frame.y`, so a centred panel
-        // sorts into the wrong row and takes the wrong letter.
-        frames.set(
-          order[index]!,
-          demand.aspect && demand.aspect > 0
-            ? fitAspectAligned(cell, demand.aspect, 'start', 'start')
-            : cell,
-        );
+        // sorts into the wrong row and takes the wrong letter. `fitShape`
+        // returns the cell untouched for a free panel, so no branch is needed.
+        frames.set(order[index]!, fitShape(cell, demands[index]!.shape, 'start', 'start'));
         cellY += heights[i]! + gutterMm;
       });
 
@@ -457,7 +481,10 @@ export function arrangementFrames(
     y += height + gutterMm;
   });
 
-  return frames.size === order.length ? frames : null;
+  if (frames.size !== order.length) return null;
+  // `y` has one trailing gutter on it; the page is the last band's bottom plus
+  // the margin. Equal to the input height minus every band's reclaimed slack.
+  return { frames, pageHeightMm: y - gutterMm + marginMm };
 }
 
 /**
@@ -486,8 +513,117 @@ export function arrangementHeightDemand(
 
 /** A panel's least acceptable height at a given width, aspect included. */
 function impliedMinHeight(demand: PanelSizeDemand, widthMm: number): number {
-  const implied = demand.aspect && demand.aspect > 0 ? widthMm / demand.aspect : 0;
-  return Math.max(demand.minHeightMm, implied);
+  return Math.max(demand.minHeightMm, heightForWidth(demand.shape, widthMm));
+}
+
+/**
+ * The height at which a panel is neither squashed nor stretched, at the width
+ * it has just been given.
+ *
+ * For a panel holding an aspect that is *exactly* the implied height, and
+ * asking for `wantHeightMm` on top would be asking for millimetres the fit
+ * below immediately throws away: `fitAspectAligned` caps the height at
+ * `width / aspect`, so the surplus becomes a dead strip under the picture and a
+ * free-height neighbour stretches to fill it.
+ *
+ * Measured before this distinction existed: a montage's `wantHeightMm` is
+ * derived at *full page width*, so one placed 126 mm wide still asked for the
+ * 40.2 mm that 177 mm would have implied against the 28.6 mm it can use. On a
+ * short plot beside it that inflated the band by 11.9 mm and the offered "tight"
+ * page from 34.0 to 44.5 mm.
+ *
+ * A picture's wish to be *bigger* is not lost by this — it lives on the width
+ * axis, where `wantWidthMm` already carries it into pass 1, and
+ * `refineBandWidths` then spends any leftover band height on width rather than
+ * discarding it.
+ */
+function columnWantHeight(demand: PanelSizeDemand, widthMm: number): number {
+  const implied = impliedMinHeight(demand, widthMm);
+  return demand.shape.contentAspect ? implied : Math.max(implied, demand.wantHeightMm);
+}
+
+/**
+ * Widen a picture toward the height the rest of its band wants, taking the
+ * width from free-height neighbours.
+ *
+ * A panel holding an aspect can only get taller by getting wider, so where a
+ * band is set by a plot beside it the leftover height is spendable rather than
+ * merely wasted — the picture grows into it and the two finish level. What is
+ * left over after this is what lever 2 (`arrangementLayout`'s clamp) reclaims.
+ *
+ * **One reallocation, and a second pass could not find anything.** Write
+ * `H0 = max_c columnWant(c)` for the band's target before the move. A donor's
+ * want is `wantHeightMm`, which does not depend on its width, so it is
+ * unchanged. A receiver's was strictly below `H0` and its `need` is capped at
+ * exactly `H0`, so it cannot overshoot. `H0` was attained by some column that is
+ * neither, so `max_c columnWant(c)` is the same number afterwards — the target
+ * this aimed at did not move. Forward-only by construction, the same argument
+ * `montageShape`'s closed form and the two-pass margin rule rest on,
+ * rather than a loop that happens to be bounded.
+ *
+ * The affine form adds one obligation to that proof: capping `need` at the
+ * target needs `heightForWidth(shape, widthForHeight(shape, H0)) === H0`, which
+ * holds only for `H0 >= fixedHeightMm` — below its own bands a shape has no
+ * width that produces that height and the round trip overshoots. It is
+ * discharged by the receiver test itself: a receiver needs
+ * `columnWant(c) < target`, and `columnWant(c) >= fixedHeightMm`
+ * unconditionally, so `target > fixedHeightMm` for every receiver there is.
+ *
+ * That proof is why donors must be free-height columns: an aspect-locked donor
+ * would shrink its own implied height, lowering `H0` and merely moving the dead
+ * strip to another column. And why receivers are single-panel columns: solving
+ * the inner width for a stack of two aspect panels inverts
+ * `gutter + Σ max(inner/aᵢ, wantHᵢ) = H0`, a piecewise-linear function whose
+ * case split is iteration in disguise.
+ *
+ * Growth stops at `wantWidthMm`, which for a picture is its dpi-derived ceiling
+ * clamped to the page, so this can never push a panel past the resolution its
+ * pixels support — `overResolution` measures exactly that overshoot and stays
+ * at zero.
+ */
+function refineBandWidths(
+  widths: readonly number[],
+  columns: readonly (readonly number[])[],
+  demands: readonly PanelSizeDemand[],
+  labelGutterMm: number,
+): number[] {
+  const inner = (c: number): number => Math.max(0, widths[c]! - labelGutterMm);
+  const columnWant = (c: number): number => {
+    const stacked = columns[c] ?? [];
+    if (stacked.length === 0) return 0;
+    return stacked.reduce((sum, index) => sum + columnWantHeight(demands[index]!, inner(c)), 0);
+  };
+
+  const target = Math.max(0, ...columns.map((_, c) => columnWant(c)));
+  if (target <= 0) return [...widths];
+
+  const need = columns.map((stacked, c) => {
+    if (stacked.length !== 1) return 0;
+    const demand = demands[stacked[0]!]!;
+    if (!demand.shape.contentAspect || demand.shape.contentAspect <= 0) return 0;
+    if (columnWant(c) >= target - 0.01) return 0;
+    const toReachTarget = widthForHeight(demand.shape, target) + labelGutterMm - widths[c]!;
+    const toCeiling = Math.max(0, demand.wantWidthMm + labelGutterMm - widths[c]!);
+    return Math.max(0, Math.min(toReachTarget, toCeiling));
+  });
+
+  const slack = columns.map((stacked, c) => {
+    if (need[c]! > 0 || stacked.length === 0) return 0;
+    // Only a column that will not get shorter for it: see the proof above.
+    if (stacked.some((index) => (demands[index]!.shape.contentAspect ?? 0) > 0)) return 0;
+    const floor =
+      Math.max(...stacked.map((index) => demands[index]!.minWidthMm)) + labelGutterMm;
+    return Math.max(0, widths[c]! - floor);
+  });
+
+  const needSum = need.reduce((a, b) => a + b, 0);
+  const slackSum = slack.reduce((a, b) => a + b, 0);
+  const moved = Math.min(needSum, slackSum);
+  if (moved <= 0.01) return [...widths];
+
+  // Pro-rata both ways, so the band's total width is preserved exactly and it
+  // still fills the page.
+  return widths.map((w, c) => w + (need[c]! * moved) / needSum - (slack[c]! * moved) / slackSum);
 }
 
 interface SolvedBands {
@@ -507,7 +643,7 @@ interface SolvedBands {
  * height only once its width is known. The coupling really is one-way — a wider
  * column implies a taller band and nothing flows back — so a single pass is the
  * whole answer and there is no loop to oscillate, the same
- * termination-by-construction argument `montagePanelAspect` and the two-pass
+ * termination-by-construction argument `montageShape` and the two-pass
  * margin rule already rest on.
  *
  * The per-band width solve is the feature: row 2's panels divide the full page
@@ -584,6 +720,19 @@ function solveBands(
   }
   if (bandWidths.some((w) => w === null)) return null;
 
+  /*
+   * --- Pass 1b: spend a band's leftover height on the width of a picture ---
+   *
+   * Skipped for an aligned arrangement: it has one width division shared by
+   * every band, and reallocating per band is exactly the property that option
+   * exists to prevent. Levers 0 and 2 still apply there — both are heights.
+   */
+  if (!arrangement.aligned) {
+    bandWidths = bandWidths.map((widths, b) =>
+      refineBandWidths(widths!, cells[b]!, demands, labelGutterMm),
+    );
+  }
+
   // --- Pass 2: band heights, now that widths are known ---------------------
 
   const bandMin: number[] = [];
@@ -615,7 +764,7 @@ function solveBands(
          * handed the hungriest panel the shortest row.
          */
         columnMin += impliedMinHeight(demand, inner);
-        columnWant += Math.max(impliedMinHeight(demand, inner), demand.wantHeightMm);
+        columnWant += columnWantHeight(demand, inner);
       }
       min = Math.max(min, columnMin);
       want = Math.max(want, columnWant);

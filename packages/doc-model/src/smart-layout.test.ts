@@ -12,6 +12,7 @@ import { editDocument } from './store.js';
 import { readingOrder } from './layout.js';
 import { hasStack } from './arrangement.js';
 import type { RectMm } from './geometry.js';
+import { FREE_SHAPE } from './geometry.js';
 import {
   addAsset,
   addPanel,
@@ -33,6 +34,7 @@ import {
   type SmartLayoutInput,
   type SmartLayoutOptions,
   type SmartLayoutResult,
+  type UnitDemand,
 } from './smart-layout.js';
 import type { FigureDocument, NodeId } from './index.js';
 
@@ -55,12 +57,31 @@ function demand(panelId: NodeId, over: Partial<PanelDemand> = {}): PanelDemand {
     comfortWidthMm: 50,
     comfortHeightMm: 40,
     aspect: null,
+    fixedWidthMm: 0,
+    fixedHeightMm: 0,
     aspectFromContent: false,
     priority: 0.5,
     rejectAboveWidthMm: Number.POSITIVE_INFINITY,
     cappedByPage: false,
     fontScale: 1,
     ...over,
+  };
+}
+
+/**
+ * A panel's demand as the unit it forms on its own — which is what every test
+ * here means, since none of these fixtures groups anything.
+ */
+function unitOf(d: PanelDemand): UnitDemand {
+  const { panelId, ...rest } = d;
+  return {
+    ...rest,
+    unitId: panelId,
+    panelIds: [panelId],
+    shape:
+      d.aspectFromContent && d.aspect
+        ? { contentAspect: d.aspect, fixedWidthMm: d.fixedWidthMm, fixedHeightMm: d.fixedHeightMm }
+        : FREE_SHAPE,
   };
 }
 
@@ -85,8 +106,23 @@ function input(demands: readonly PanelDemand[], over: Partial<SmartLayoutOptions
   const currentFrames = new Map(
     demands.map((d) => [d.panelId, { x: 0, y: 0, width: 40, height: 40 }] as const),
   );
+  // A document holding one top-level panel per demand, so `layoutUnits` finds
+  // exactly the units these tests are about.
+  const nodes = Object.fromEntries(
+    demands.map((d) => [
+      d.panelId,
+      { id: d.panelId, type: 'panel', parentId: null, frame: currentFrames.get(d.panelId)! },
+    ]),
+  ) as unknown as FigureDocument['nodes'];
+
   return {
-    order: demands.map((d) => d.panelId),
+    units: demands.map((d) => ({
+      id: d.panelId,
+      kind: 'panel' as const,
+      frame: currentFrames.get(d.panelId)!,
+      panelIds: [d.panelId],
+    })),
+    doc: { nodes } as FigureDocument,
     scales: [{ fontScale: 1, typeScale: { tickLabelPt: 6 }, minPt: 6, demands }],
     options: { ...OPTIONS, ...over },
     currentFrames,
@@ -392,12 +428,46 @@ describe('rejections', () => {
     const atSize = new Map([['a', { x: 0, y: 0, width: 27, height: 40 }]]);
     const blownUp = new Map([['a', { x: 0, y: 0, width: 100, height: 40 }]]);
 
-    const kept = scoreCandidate(atSize, [image], 120, 1, OPTIONS);
-    const enlarged = scoreCandidate(blownUp, [image], 120, 1, OPTIONS);
+    const kept = scoreCandidate(atSize, [unitOf(image)], 120, 1, OPTIONS);
+    const enlarged = scoreCandidate(blownUp, [unitOf(image)], 120, 1, OPTIONS);
 
     expect(kept.terms.overResolution).toBe(0);
     expect(enlarged.terms.overResolution).toBeGreaterThan(0);
     expect(enlarged.score).toBeLessThan(kept.score);
+  });
+
+  it('tells a flush row from a ragged one at the same page and coverage', () => {
+    /*
+     * The discriminating test for `bandWaste`, built so no other term can
+     * separate the two: identical covered area (7920 mm²) so `whitespace` is
+     * equal, both fully satisfied so `unmetDemand` is equal, no finite
+     * resolution ceiling so `overResolution` is zero in both, same page, same
+     * font. Only the raggedness differs.
+     *
+     *   ragged  row box 174 × 60 = 10440 → 1 − 7920/10440 = 0.2414
+     *   flush   row box 132 × 60 =  7920 → 0
+     */
+    const demands = [
+      demand('a', { comfortWidthMm: 90, comfortHeightMm: 60 }),
+      demand('b', { comfortWidthMm: 42, comfortHeightMm: 30 }),
+    ];
+    const ragged = new Map<NodeId, RectMm>([
+      ['a', { x: 0, y: 0, width: 90, height: 60 }],
+      ['b', { x: 95, y: 0, width: 84, height: 30 }],
+    ]);
+    const flush = new Map<NodeId, RectMm>([
+      ['a', { x: 0, y: 0, width: 90, height: 60 }],
+      ['b', { x: 95, y: 0, width: 42, height: 60 }],
+    ]);
+
+    const a = scoreCandidate(ragged, demands.map(unitOf), 120, 1, OPTIONS);
+    const b = scoreCandidate(flush, demands.map(unitOf), 120, 1, OPTIONS);
+
+    expect(a.terms.bandWaste).toBeCloseTo(0.2414, 3);
+    expect(b.terms.bandWaste).toBe(0);
+    expect(a.terms.whitespace).toBeCloseTo(b.terms.whitespace, 6);
+    expect(a.terms.unmetDemand).toBeCloseTo(b.terms.unmetDemand, 6);
+    expect(b.score).toBeGreaterThan(a.score);
   });
 
   it('reports what blocked it rather than offering a broken best', () => {
@@ -627,5 +697,93 @@ describe('applying', () => {
     });
     expect(applied).toBe(false);
     expect(next.page.heightMm).toBe(120);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('band refinement, through the solver', () => {
+  /**
+   * The reported figure in miniature: a wide micrograph montage beside a bar
+   * chart. `aspectFromContent` is what makes the solver treat the aspect as its
+   * own to write, which is the montage case rather than an author-set lock.
+   */
+  const reported = (): PanelDemand[] => [
+    demand('a', { comfortWidthMm: 45, comfortHeightMm: 42, minWidthMm: 30, minHeightMm: 28 }),
+    demand('b', {
+      kind: 'montage',
+      aspect: 4.4,
+      aspectFromContent: true,
+      minWidthMm: 20,
+      minHeightMm: 5,
+      comfortWidthMm: 177,
+      comfortHeightMm: 40.2,
+      priority: 0.9,
+    }),
+    demand('c'),
+    demand('d'),
+  ];
+
+  it('either aligns the picture with its neighbour or gives it a band of its own', () => {
+    /*
+     * Stated as that disjunction on purpose, because measurement shows the
+     * first is sometimes unreachable: to match a 42 mm plot a 4.4:1 montage
+     * needs 185 mm of width, and the plot is already at its own minimum. Where
+     * the width lever runs out, the answer the design intends is the *other*
+     * one — an arrangement that does not pair them at all.
+     *
+     * A regression guard on the delivered figure, not a test of `bandWaste`:
+     * on these demands the winning shape is four points clear and the term is
+     * worth about one, so it is not what decides this particular solve. The
+     * term itself is pinned where it can be isolated, by the two frame maps in
+     * 'tells a flush row from a ragged one' above.
+     */
+    const best = solveSmartLayout(input(reported())).candidates[0]!;
+    const montage = best.frames.get('b')!;
+
+    const sameRow = [...best.frames.entries()].filter(
+      ([id, f]) => id !== 'b' && Math.abs(f.y - montage.y) <= 5,
+    );
+    const worst = Math.max(
+      0,
+      ...sameRow.map(([, f]) => f.y + f.height - (montage.y + montage.height)),
+    );
+    expect(sameRow.length === 0 || worst <= 1.5).toBe(true);
+  });
+
+  it('does not shrink a page of plain plots into a strip', () => {
+    /*
+     * Clamping every band to its want now happens on every path, not only when
+     * a short page was enumerated — so `COMFORT_PLOT_HEIGHT_MM` is the only
+     * thing standing between the solver and the failure `panel-demand.ts`
+     * records: "the solver promptly drove a two-plot figure's page down to a
+     * 36 mm-tall strip and scored it 99".
+     */
+    const best = solveSmartLayout(input([demand('a'), demand('b')])).candidates[0]!;
+    for (const frame of best.frames.values()) {
+      expect(frame.height).toBeGreaterThanOrEqual(demand('a').comfortHeightMm - 1e-6);
+    }
+  });
+
+  it('keeps an aligned figure on offer even though it now scores raggeder', () => {
+    /*
+     * Sharing one width division across bands is exactly what leaves a row
+     * ragged, so aligned candidates lose ground on `bandWaste` — honestly. They
+     * need their own bucket in the offered list, or the plain variant takes the
+     * slot on a point of score and a shipped option quietly disappears.
+     */
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const result = solveSmartLayout(input(ids.map((id) => demand(id))));
+    expect(result.candidates.some((c) => c.arrangement.aligned)).toBe(true);
+  });
+
+  it('offers no two candidates that are the same figure at the same page', () => {
+    /*
+     * Two enumerated heights can now realise as one page, and `id` is the key
+     * the offered list renders on.
+     */
+    const result = solveSmartLayout(input([demand('a'), demand('b'), demand('c'), demand('d')]));
+    const ids = result.candidates.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

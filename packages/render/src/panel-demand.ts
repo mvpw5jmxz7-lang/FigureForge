@@ -181,6 +181,10 @@ function plotPanelDemand(
     comfortWidthMm: Math.max(minWidthMm, marginX + comfortAreaW),
     comfortHeightMm: Math.max(minHeightMm, marginY + comfortAreaH),
     aspect: null,
+    // A plot declares no shape: it takes whatever cell it is given, and has no
+    // bands of its own outside the margins already in `min`/`comfort`.
+    fixedWidthMm: 0,
+    fixedHeightMm: 0,
     aspectFromContent: false,
     // A dense scatter is doing more work than a two-bar chart and should
     // outrank it, but no plot outranks a detailed micrograph: the ceiling here

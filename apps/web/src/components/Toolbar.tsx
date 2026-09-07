@@ -18,7 +18,7 @@ import {
   reflowGroupLabels,
   relabelPanels,
   reorderNode,
-  reserveSpaceForGroupLabels,
+  reserveLayoutSpace,
   suggestGrid,
   templatesForPanelCount,
   findLayoutTemplate,
@@ -206,7 +206,7 @@ export function Toolbar({
       if (soleParent?.type === 'panel' && soleParent.contentGrid) {
         fillPanelChildren(draft, soleParent.id, soleParent.frame);
       } else {
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
       }
       reflowGroupLabels(draft);
       onSelectionChange([label.id]);
@@ -229,7 +229,7 @@ export function Toolbar({
         gutterMm: 2,
       });
       applyAutoLayout(draft, layoutOptions);
-      reserveSpaceForGroupLabels(draft);
+      reserveLayoutSpace(draft);
       relabelPanels(draft, newId, {
         uppercase: theme.panelLabelCase === 'upper',
         fontSizePt: theme.type.panelLabelPt,
@@ -304,7 +304,7 @@ export function Toolbar({
         applyAutoLayout(draft, layoutOptions);
         // A from-scratch grid recompute, so — unlike a manual align/resize —
         // it is safe to grow a gap for a cross-panel heading here.
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
         // Brackets sit in absolute page space, so nothing else moves them with
         // the panels they annotate.
         reflowGroupLabels(draft);
@@ -320,7 +320,7 @@ export function Toolbar({
     api.transaction(label, () => {
       commit('Arrange panels', (draft) => {
         applyAutoLayout(draft, { ...layoutOptions, template });
-        reserveSpaceForGroupLabels(draft);
+        reserveLayoutSpace(draft);
       });
       // Panels may have changed order, so the letters must follow.
       commit('Reletter panels', (draft) => {

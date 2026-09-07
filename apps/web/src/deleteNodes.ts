@@ -4,7 +4,7 @@ import {
   fitMontageToImages,
   reflowGroupLabels,
   relabelPanels,
-  reserveSpaceForGroupLabels,
+  reserveLayoutSpace,
   type NodeId,
 } from '@figureforge/doc-model';
 import { reflowBrackets } from '@figureforge/render';
@@ -54,7 +54,7 @@ export function deleteNodesWithLayout(api: DocumentApi, theme: Theme, ids: reado
       gutterMm: theme.spacing.panelGutterMm,
       labelGutterMm: 4,
     });
-    reserveSpaceForGroupLabels(draft);
+    reserveLayoutSpace(draft);
     relabelPanels(draft, api.newId, {
       uppercase: theme.panelLabelCase === 'upper',
       fontSizePt: theme.type.panelLabelPt,

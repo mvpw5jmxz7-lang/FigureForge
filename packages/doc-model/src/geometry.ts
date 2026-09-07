@@ -88,6 +88,98 @@ function alignOffset(free: number, align: FitAlign): number {
 }
 
 /**
+ * The shapes a panel can take: height is **affine** in width, not a ratio of
+ * it.
+ *
+ * A montage's frame is its cells plus bands that do not scale with them —
+ * gutters, padding, a group-label strip, a scale-bar strip. Only the cells
+ * block has a true aspect; the bands are constant offsets. So
+ *
+ *   height(w) = fixedHeightMm + (w − fixedWidthMm) / contentAspect
+ *
+ * and the *panel*'s own width/height ratio is a different number at every
+ * size. `montagePanelAspect` used to return one such number and the solver
+ * locked panels to it: measured on a 1 × 3 montage of 4:3 tiles under one
+ * group title (`fixedWidth` 2.00, `fixedHeight` 3.54), the panel's ratio runs
+ * 2.5761 at a 5 mm cell to 3.7207 at 40 mm, and the 2.5761 it picked left
+ * 21 mm of dead page under every picture at 175 mm of width.
+ *
+ * `contentAspect: null` is "fill the cell"; the fixed terms are then ignored,
+ * so a free-height panel is exactly what it always was.
+ */
+export interface ShapeMm {
+  readonly contentAspect: number | null;
+  readonly fixedWidthMm: number;
+  readonly fixedHeightMm: number;
+}
+
+/** A panel with no shape constraint at all. */
+export const FREE_SHAPE: ShapeMm = {
+  contentAspect: null,
+  fixedWidthMm: 0,
+  fixedHeightMm: 0,
+};
+
+/** A plain ratio as a shape: the degenerate case with no fixed bands. */
+export const aspectShape = (aspect: number | null): ShapeMm => ({
+  contentAspect: aspect,
+  fixedWidthMm: 0,
+  fixedHeightMm: 0,
+});
+
+/**
+ * The height a shape implies at a given width — 0 for a free panel, so a
+ * caller can `Math.max(minHeightMm, …)` unconditionally.
+ */
+export function heightForWidth(shape: ShapeMm, widthMm: number): number {
+  if (!shape.contentAspect || shape.contentAspect <= 0) return 0;
+  return shape.fixedHeightMm + Math.max(0, widthMm - shape.fixedWidthMm) / shape.contentAspect;
+}
+
+/**
+ * The exact inverse of `heightForWidth` for any height at or above the bands.
+ *
+ * Below `fixedHeightMm` there is no width that produces that height — the
+ * bands alone are already taller — so it clamps at `fixedWidthMm` and the
+ * round trip overshoots. Callers relying on the round trip must know their
+ * height is at least `fixedHeightMm`; `refineBandWidths` says why its is.
+ */
+export function widthForHeight(shape: ShapeMm, heightMm: number): number {
+  if (!shape.contentAspect || shape.contentAspect <= 0) return 0;
+  return shape.fixedWidthMm + Math.max(0, heightMm - shape.fixedHeightMm) * shape.contentAspect;
+}
+
+/**
+ * Largest correctly-*shaped* rect inside `r`, placed by `alignX`/`alignY`.
+ *
+ * The generalisation of `fitAspectAligned`, which is now one case of it — with
+ * both bands zero every expression below is the one it used to evaluate, so
+ * the two cannot drift and no figure without bands moves.
+ */
+export function fitShape(
+  r: RectMm,
+  shape: ShapeMm,
+  alignX: FitAlign,
+  alignY: FitAlign,
+): RectMm {
+  if (!shape.contentAspect || shape.contentAspect <= 0) return r;
+  let width = r.width;
+  let height = heightForWidth(shape, width);
+  if (height > r.height) {
+    height = r.height;
+    // Never wider than the rect: reached only when the rect is proportionally
+    // wider than the shape, so the inverse is already inside it.
+    width = Math.min(r.width, widthForHeight(shape, height));
+  }
+  return {
+    x: r.x + alignOffset(r.width - width, alignX),
+    y: r.y + alignOffset(r.height - height, alignY),
+    width,
+    height,
+  };
+}
+
+/**
  * Largest rect of the given aspect ratio (w/h) that fits inside `r`, placed
  * by `alignX`/`alignY` rather than always centred.
  *
@@ -102,19 +194,7 @@ export function fitAspectAligned(
   alignX: FitAlign,
   alignY: FitAlign,
 ): RectMm {
-  if (aspect <= 0) return r;
-  let width = r.width;
-  let height = width / aspect;
-  if (height > r.height) {
-    height = r.height;
-    width = height * aspect;
-  }
-  return {
-    x: r.x + alignOffset(r.width - width, alignX),
-    y: r.y + alignOffset(r.height - height, alignY),
-    width,
-    height,
-  };
+  return fitShape(r, aspectShape(aspect), alignX, alignY);
 }
 
 /** Largest rect of the given aspect ratio (w/h) that fits inside `r`, centred. */

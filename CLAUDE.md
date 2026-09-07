@@ -256,6 +256,140 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 42 (group-aware layout):** 1102 TypeScript tests (1096 +
+6 new in a `group-aware layout` suite in `doc-model.test.ts`), 190 Python tests
+unchanged (nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, and live checks in each of
+light and dark. **Measured, not assumed** — reproduced against the real code
+with three panels, two of them grouped at the bottom of the page: reading order
+came back **`A C B`** where the page reads `C A B`; the applied layout put panel
+A's frame at `(6, 2)` against a true page position of `(11, 62)`, and B's right
+edge at **186 mm on a 183 mm page**; a grouped panel's letter landed in the
+group's local space; and the group's own box stayed at its old
+`(5, 60, 115, 40)`. **Plain Auto Layout was broken identically** — same panel,
+same 186 mm. After the fix the same figure reads `C A B`, B's right edge is
+**181.0 mm** (the page less its margin), A's letter is at `(94, 2)` and the
+group's box is `(98, 2, 83, 116)`. Driven live: grouping two sample panels and
+running smart layout keeps every mark inside `6.00 … 181.00 mm`, letters
+`a`–`g`, no console errors in either theme, and a single-page export at exactly
+183.0000 mm wide; grouping an *arrow* with a panel and laying out moves the
+arrow with it. Each of the three mechanisms was reverted alone and only its own
+guards fail. **One honest consequence, measured**: keeping a group together
+scales its internal gap with it (10 → 3.6 mm against a 9 mm page gutter), so
+`uneven-gutters` fires and readiness reads 95 against 96. See "Round 42" below.
+
+**Verified after round 41 (a montage panel's shape is affine, not a ratio):**
+1096 TypeScript tests (1089 + 7 new: 3 in a new `affine shapes` suite and 1 in
+`band refinement` in `arrangement.test.ts`, 3 in `doc-model.test.ts` for the
+caption band, the letterboxing and the scale-bar strip; plus two existing tests
+rewritten because they were pinning the defect), 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, and live checks in each of light and
+dark. **Measured, not assumed**: `montagePanelAspect`'s claim that "any positive
+cell height gives the same ratio" is false — on a 1 × 3 montage of 4:3 tiles
+under one group title the true ratio runs **2.5761 → 3.7207** as the cell grows,
+and it probed at the 5 mm end. Running the real tiler at frames of that ratio
+left **101.5 / 532.6 / 1219.2 mm² dead per tile** at 60 / 120 / 175 mm of width —
+21 mm of blank page under every picture, which is the reported whitespace. After
+the fix the same three frames give **0.0 mm² at all three**, and driving the
+reported scenario live (group title over the sample montage's tiles, its scale
+bar switched to "Below the image", then smart layout) gives cells of
+**45.00 × 33.75 mm holding 45.00 × 33.75 mm pictures — 0.00 mm dead** in both
+themes, lettering still `a`–`g`, readiness 96, and a single-page export at
+exactly 183.0000 × 144.1169 mm. Each of the two mechanisms was reverted alone
+and only its own guards fail; the arrangement-level guard was additionally
+re-run against the literal ratio the solver used before (2.576112) and fails by
+exactly the predicted 21.40625 mm. See "Round 41" below.
+
+**Verified after round 40 (a band refinement pass for smart layout):** 1089
+TypeScript tests (1078 + 11 new: 7 in a new `band refinement` suite in
+`arrangement.test.ts` covering the width reallocation's worked arithmetic, the
+width-conditioned height want, the page-agreement property over the whole
+enumeration, the no-donor and aligned cases and the resolution ceiling; 4 in
+`smart-layout.test.ts` for the discriminating score test, the delivered figure,
+the strip hazard and id uniqueness), 190 Python tests unchanged (nothing here
+touches `services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected, and live checks in each of light and dark.
+**Measured, not assumed** — the synthetic reproduction through the real solver
+went from a plot stretching to **46 / 56 / 76 mm** on 50 / 60 / 80 mm pages
+(against a montage stuck at 28.6) to a flat **page 46 mm and plot 42 mm at every
+one**, with the montage widened 125.9 → 136.0 mm; on a short plot beside the
+same montage the misalignment is **11.9 → 0.0 mm** and the offered page
+**44.5 → 34.0 mm**. On the real sample the montage grew **126.6 → 137.0 mm**
+wide and **28.8 → 31.1 mm** tall, its bar-chart neighbour's overhang fell
+**11.6 → 10.1 mm**, lettering still reads `a`–`g`, readiness stays 96 and the
+export is a single page at exactly 183.0000 × 144.1169 mm with 3 image XObjects
+and no console errors. Each of the three levers was reverted alone and only its
+own tests fail. **Two things the plan got wrong, both caught by tests rather
+than by reading**: a second clamp at column level made rows *raggeder*, not
+tighter, and a test asserting the new score term picks the arrangement was
+vacuous — it passes with the weight at zero. Both are written up below. See
+"Round 40" below.
+
+**Verified after round 39 (the scale bar's label colour):** 1078 TypeScript
+tests (1075 + 3 new: 2 in `parity.test.tsx` for an explicit label colour
+reaching the drawn caption independently of the bar, and for an absent one
+still falling to the theme; 1 in `doc-model.test.ts` for the archive
+round-trip), 190 Python tests unchanged (nothing here touches `services/api`),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run unaffected,
+and **18 live-browser checks in each of light and dark**. **No model or
+renderer change at all** — `TextStyle.color` has been rendered and schema'd
+since phase 1, and a `TextNode` has had a swatch writing it since then; the
+scale bar's caption was the node that never got one, despite its *bar* having
+had a colour control all along. **Measured, not assumed**: the caption redrew at `rgb(255,0,0)` off its own
+`scale-bar-label` element while the bar's fill stayed put, the bar then went
+white with the label still red, and switching to "Below the image" turned both
+black with one Ctrl+Z restoring placement and both colours together. Both new
+guards were confirmed to fail when their own mechanism was reverted — the
+render one with `...node.style` dropped from the label's attrs, the round-trip
+one with `color` deleted from `textStyleSchema`. **Two live-test traps, both
+mine**: a synthetic `input` event does not drive a React controlled input
+(`fill()` does), and Ctrl+Z with focus still in the colour input correctly
+reaches nothing — blur rather than clicking the canvas, which would clear the
+selection and take the Inspector away. See "Round 39" below.
+
+**Verified after round 38 (a scale bar below the picture, in black):** 1075
+TypeScript tests (1067 + 8 new: 5 in `doc-model.test.ts` for the below-frame,
+the unchanged inside frame, the push, the bottom-row shrink and reserving
+nothing for an inside bar; 2 in `parity.test.tsx` for the clip; and one existing
+test rewritten because it was pinning a bug), 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, and **13 live-browser checks in each
+of light and dark** plus a PDF export. **Measured, not assumed**: switching the
+sample's montage bar to "Below the image" put it at y = 14.89 against a picture
+bottom of 13.89, right edge 83.651 against the picture's own 83.649, converted
+from `#ffffff` to `#000000`, with no other panel disturbed, the page height
+unchanged at 180 mm and one Ctrl+Z restoring placement and colour together;
+readiness stays 96 with no error-severity finding and the export is a single
+page at 183.0000 × 180.0000 mm. **A false alarm worth recording**: the
+right-alignment check first read 0.46 mm out, because `getBoundingClientRect()`
+on an `<image>` returns the *element box*, not the painted picture — a 4:3 tile
+letterboxes inside its 1.41-aspect box. The bar was already exact. **And a real
+bug found in the function being touched**: `scaleBarWidthMm` divided by
+`frame.width`, so on any letterboxed image the bar was drawn longer than the
+distance it claims — on the test fixture, exactly twice. See "Round 38" below.
+
+**Verified after round 37 (room for a group title over a graph; Placement
+hidden where it means nothing):** 1067 TypeScript tests (1059 + 8 new in
+`doc-model.test.ts`: reserving against the page edge, the letter/heading/graph
+order, idempotence, the letter returning exactly when the heading goes, a
+hand-nudged letter surviving, the shrink path, a montage cell caption lifting
+nothing, and `groupLabelMembersAreImages`), 190 Python tests unchanged (nothing
+here touches `services/api`), `tsc --build --force` and `eslint .` clean,
+46-check acceptance run unaffected, and **15 live-browser checks in each of
+light and dark**. **Measured, not assumed**: before the fix, adding a group
+title to the sample's top-row panel *a* moved nothing at all and drew the
+heading at **y = −1.27 mm** — above the page's own top edge and higher than the
+letter `a` at y = 2.26; after it the page reads letter (2.26 → 5.39), heading
+(5.66 → 7.93), graph (11.93), with the page height unchanged at 180 mm, the
+captioned panel shrunk 50.7 → 47.06 mm, the lowest panel ending at 172.37 of a
+178 mm limit, and one Ctrl+Z restoring every frame and every letter together.
+The Inspector shows no Placement control over a graph and still shows it over
+the micrograph montage; readiness stays 96 with no error-severity finding and
+the export is a single page at exactly 183.0000 × 180.0000 mm. Each of the
+three fixes was checked by reverting it alone and confirming only its own tests
+fail. See "Round 37" below.
+
 **Verified after round 36 (ragged rows and L-shapes for smart layout):** 1059
 TypeScript tests (1036 + 23 new: 20 in a new `arrangement.test.ts` covering the
 enumeration's rules, per-band width solving, the stacked column, the height
@@ -5258,6 +5392,11 @@ tight against the picture, tiles filling their cells.
   `montagePanelAspect` solves the panel shape in **closed form**: cell height
   cancels out of the ratio, so it terminates by construction rather than
   converging, the same argument the two-pass margin rule rests on.
+  **That last claim was wrong and round 41 replaced the function** — cell height
+  cancels only when `fixedWidth/fixedHeight == cols·tileAspect/rows`, so a
+  captioned montage was locked to a ratio no frame of it ever had. See
+  "Round 41"; the closed form is now `montageShape`/`heightForWidth`, which
+  needs no probe height at all.
   `fitMontageToImages` sets the lock; `applyAutoLayout` then gives the panel the
   largest correctly-shaped rect in its page cell and `fillPanelChildren` fills
   every cell edge to edge. `contentGrid.autoFit` gates all of it and is absent
@@ -5556,7 +5695,7 @@ boundary at the union of both; but a boundary interior to a row's panel makes
 that panel absorb an extra gutter, which shifts every position after it, which
 moves the boundaries being placed. It terminates only by iterating, and layout
 here refuses convergence loops (`requiredMargin`'s "exactly two passes",
-`montagePanelAspect`'s closed form).
+`montageShape`'s closed form).
 
 So `packages/doc-model/src/arrangement.ts` is a new module and a candidate
 carries an `Arrangement` plus explicit `frames`. It is pure geometry over four
@@ -5666,6 +5805,643 @@ against the measured demand. Round 35's "no free-form span search" note is
 partly superseded — spans *down* now exist as the stacked column; spans across
 several columns still do not.
 
+### Round 37 — room for a group title over a graph, and a Placement control that only appears where it applies
+
+Two reports against the round 31–33 group-title surface.
+
+#### A heading on the top row was drawn off the page
+
+Reproduced before changing anything: selecting the sample's panel *a* and
+clicking "Add group title" left the page height at 180 mm, moved **nothing**,
+and drew the heading at **y = −1.27 mm** — above the page's own top edge, and
+higher up the page than the letter `a` at y = 2.26.
+
+**The cause was one line.** `reserveSpaceForGroupLabels` measures the gap
+between the members and the nearest panel on the heading's side, and did
+`if (neighborEdge === null) continue` when there was none — which is exactly
+the top row. So the one case that most needs space reserved reserved none. A
+heading further down the page was already fine: the 5 mm gutter above it exceeds
+the ~3.3 mm a bare 6 pt heading needs, so nothing had to move, which is why this
+only ever showed up on the first row.
+
+The fix measures against the **page's own margin edge** when there is no panel
+to push against. `marginMm(draft)` derives that from the smallest inset any
+top-level panel actually sits at, rather than from `theme.spacing.marginMm`
+which `doc-model` may not import — a figure dragged inward simply reports a
+larger margin, which is the honest answer to "how much room is there above the
+top row".
+
+#### The panel letter stays topmost, and it is the letter that moves
+
+Confirmed with the user: the order down the page is **letter, heading, graph**.
+The letter identifies the panel and belongs outside everything else.
+
+- **The heading's geometry is untouched** — it still sits in the band
+  immediately above its members. What changes is that the *letter* is lifted
+  above it. The alternative, insetting the panel's content so the heading fits
+  inside the frame below the letter, would have meant changing `groupLabelFrame`
+  and `fillPanelChildren` for every heading — including the montage and
+  single-image cases verified in rounds 31–33 — to fix something that only
+  arises for panels.
+- **`PanelLabelNode.liftMm?: number`** records the lift, and
+  `reflowPanelLetterLifts` (called from `reflowGroupLabels`, so all ~25 existing
+  call sites get it free) adjusts `frame.y` by the *difference*. Storing it is
+  load-bearing rather than tidy: `reflowGroupLabels` runs after every canvas drag
+  (`Canvas.tsx:672`), so setting `frame.y` outright would snap a hand-nudged
+  letter back to its panel on the author's next move. Adjusting by
+  `next − previous` leaves the nudge intact and puts the letter back exactly when
+  the heading is resized or deleted. Same "automatic base beside a stored delta"
+  shape as `BracketNode.userOffsetMm`, with the automatic half stored instead —
+  here it is the automatic part that has to be undone precisely.
+- **A letter is lifted only by a heading drawn above its panel's own top edge.**
+  That one test is what separates a heading over the panel from a montage *cell*
+  caption, which lives inside the panel's grid: the cell caption's frame starts
+  below the panel top, so it fails the test without this code knowing anything
+  about montages.
+- `panelLetterHeightMm` joins the other clearance helpers in `grouplabel.ts`,
+  read from the label node's own `style.fontSizePt` — the size actually drawn —
+  so `doc-model` still needs no theme. `reserveSpaceForGroupLabels` adds it to
+  the band it reserves, or the letter would have nowhere to go.
+
+#### Push the page down, and shrink only if it would overflow
+
+The user's choice, and on the sample the shrink is the **common path, not a rare
+branch**: the required band is about 6.4 mm against 3.6 mm of slack.
+`pushPanelsFrom` translates every panel at or beyond the boundary (the loop that
+was already there, with its `snapshotPanelAbsolutePositions`/
+`syncPanelLabelsFromSnapshot` pair so letters follow), then measures the
+overflow past `pageHeight − margin` and takes it back out of the pushed rows'
+heights in proportion, re-stacking them so the gutters survive. Rows are banded
+on `y` with the same 5 mm tolerance `readingOrder` uses to decide what a row is —
+the banding round 36 introduced.
+
+- **Growing the page instead was refused**: a caption silently making a figure
+  taller can breach a journal's maximum, and the page is not this function's to
+  spend.
+- **No panel goes below `MIN_TILE_MM`.** Where the overflow cannot be fully
+  absorbed the rows take what they can and the remainder is left on the page — a
+  figure slightly over its page is recoverable, a row collapsed to nothing is
+  not.
+- **Idempotent by construction**, which matters because
+  `reserveSpaceForGroupLabels` runs on every from-scratch layout: after one pass
+  the gap equals the clearance, so the next call computes a shortfall of ≤ 0.
+  Pinned by a test, since a creeping figure would only show up after several
+  imports.
+
+#### A caller that should already have been doing this
+
+`applyCandidate` (`apps/web/src/smartLayout.ts`) called `reflowGroupLabels` but
+not `reserveSpaceForGroupLabels`, so applying a smart layout over a figure
+carrying a heading put the heading straight back on top of its panel. Smart
+layout is a from-scratch layout — the exact case that function's contract says
+it is safe for — so the call was added. Round 35's header comment claiming the
+re-scoring pass exists *because* `reserveSpaceForGroupLabels` moves panels after
+the grid is solved is true again as a result; it had quietly stopped being so.
+
+#### Placement, offered only where it applies
+
+`placement: 'overlay'` draws the heading *on* the content in white with a dark
+outline — a micrograph convention that over a plot paints a white caption across
+the axes. The control was rendered unconditionally. `groupLabelMembersAreImages`
+gates it: every member must be an `image` node, or a panel whose own content
+children are images. This is the standing "a control that visibly does nothing is
+a defect" rule in its sharper form — here it did something, and that something
+was wrong.
+
+The control still appears when the heading is *already* `overlay`, so a value on
+an older document stays reachable rather than stranded behind a hidden control.
+Nothing is rewritten on load: hiding a control is presentation, changing a stored
+`placement` would be a migration, and this is not one.
+
+#### An observed consequence, recorded rather than papered over
+
+Captioning **one** panel of a row staggers that row's letters: the captioned
+panel's letter is lifted clear of its heading while its neighbours' stay at their
+own panels' tops (measured: `a` at 2.26 mm, `b` and `c` at 9.19 mm). That follows
+from the panel's own content — only it carries a heading — and reading order is
+unaffected, since `readingOrder` sorts *panels*, not letters. A live check
+asserting letter order by rendered position failed on this and was corrected to
+assert panel order, which is the property that actually governs lettering. No
+cross-panel letter-alignment rule was invented for it.
+
+**No version bump.** `PanelLabelNode.liftMm` is optional, and is mirrored into
+`schema.ts` as well as the TS type — a field present only in the type is dropped
+on save.
+
+### Round 38 — a scale bar below the picture, in black
+
+Requested: an option to place a scale bar below the image, bottom right, in
+black. Until now every bar was drawn *on* the picture, inset 2 mm from its
+bottom-right corner — right over a dark micrograph, and the only thing offered.
+
+**Measured before designing anything, because it decided the shape of the
+work**: the sample's montage tiles are 16.78 × 11.89 mm pictures in 16.78 ×
+11.89 mm frames. `autoFit` matched the panel's aspect to the tiles, so there is
+**no spare strip beneath a picture at all** — a below-placed bar falls outside
+the image node's frame and the room has to be made for it. The user chose to
+reserve it by pushing the rows below and shrinking if the page would overflow,
+reusing round 37's `pushPanelsFrom`, with the owning panel shrinking where there
+is no row below to push.
+
+- **`ScaleBarNode.placement?: 'inside' | 'below'`**, absent reading as
+  `'inside'`, so no saved figure moves. `scaleBarFrame` gains the one branch,
+  and because `addScaleBar` and `resyncScaleBars` both already go through that
+  function, placement and re-placement cannot disagree. The bar aligns to the
+  **picture's** right edge with no inset — it is outside the picture now, so
+  insetting it would pull it off the edge it is meant to line up with.
+- **Switching to `'below'` writes black in the same commit.** Not cosmetic:
+  outside the picture the bar sits on the white page, and white — the right
+  choice over a dark micrograph, and what an author will often have set — is
+  then invisible. The Colour control beside it still applies, so it is a
+  starting point rather than a lock. Verified live by setting the sample's bar
+  white first and watching the switch convert it.
+- **`reserveSpaceForScaleBars`** is the sibling of `reserveSpaceForGroupLabels`,
+  sharing `pushPanelsFrom` rather than a second copy of push-then-shrink, and
+  under the same contract: never live during a manual drag, resize, align or
+  distribute. On the bottom row there is nothing to push, so the panel that
+  gained the bar pays out of its own height and the page is untouched.
+- **`reserveLayoutSpace`** now runs both reservations and is what the app calls;
+  the ~10 former `reserveSpaceForGroupLabels` call sites switch to it. One name
+  is what stops a new call site remembering one reservation and forgetting the
+  other — editing ten sites to call two functions each is how that drift starts.
+  Both halves stay exported for the tests.
+
+#### The clip that would have eaten it
+
+`renderImage`'s **cropped** branch clips the picture *and its overlays* at the
+frame, deliberately — an annotation in the letterbox margin should survive, one
+outside the frame should not. A bar below the picture is outside the frame by
+construction, so it was clipped away. The uncropped branch emits no clip at all,
+so this would have looked right until the author cropped the micrograph and then
+silently vanished — and cropping a micrograph is routine.
+
+The overlays now get their own clip, taller by exactly the band the bar needs.
+They cannot share one with the picture: on that branch the `<image>` is
+*deliberately* larger than the frame — that is how a crop is drawn — so a clip
+stretched to hold the bar would also reveal the region the author cropped away.
+Emitted only where there is such a bar, so every other cropped figure keeps the
+markup it had, which a second parity test pins.
+
+#### A false measurement in the same function
+
+`scaleBarWidthMm` computed `mmPerPixel = parent.frame.width / visiblePx`. Those
+`visiblePx` source pixels are drawn across the **picture**, and on a letterboxed
+image the picture is narrower than its frame — so the bar was drawn longer than
+the distance it claims. It reads `imageContentRect(parent).width` instead.
+
+**An existing test was pinning the bug.** "doubles when the image is cropped to
+half its width" asserted 2.0 mm, reasoning that "half as many source pixels span
+the same millimetres". They do not: with `preserveAspect` on, halving the crop
+width changes the kept region's aspect to 0.625, so `renderImage` letterboxes it
+and draws those 500 pixels across 25 mm, not 50. A pixel is still 0.05 mm and
+the bar — 10 µm at 2 px/µm, so 20 source pixels — is still 1.0 mm. The old code
+said 2.0: exactly twice the distance it claims, which is the class of defect
+`checkScaleBarCalibration` exists to keep out of a published figure. The test now
+asserts 1.0 with the arithmetic written out, and a second test covers the case it
+was reaching for — `preserveAspect: false`, where the kept region really is
+stretched across the full frame and the bar really does double.
+
+#### A live-test trap worth recording
+
+The right-alignment check read 0.46 mm out and looked like a placement bug. It
+was the measurement: `getBoundingClientRect()` on an `<image>` returns the
+**element box**, not the painted picture, and with `preserveAspectRatio="…meet"`
+a 4:3 tile letterboxes inside its 1.41-aspect box. Computing the picture rect the
+way `imageContentRect` does put the bar's right edge at 83.651 against the
+picture's 83.649. The same distinction the code comments are about, caught from
+the other side.
+
+**No version bump.** `placement` is optional and is mirrored into `schema.ts` as
+well as the TS type — a field present only in the type is dropped on save.
+
+**Not done, deliberately:** the bar stays a child of the image node —
+`scaleBarWidthMm` and `checkScaleBarCalibration` both read the parent image, so
+re-parenting it to the panel to "get it outside" would break the calibration it
+exists to express. The label's above/below control is unchanged and the reserved
+band covers either. `'below'` does not become the default for new bars: inside
+the picture is still right for a dark micrograph, and the request was for an
+option.
+
+### Round 39 — the scale bar's label colour
+
+Requested straight after round 38: let the label's colour be changed, as the bar
+already can be. **No model or renderer work at all** — `ScaleBarNode.style` is a
+`TextStyle`, `textStyleSchema` has carried an optional `color` since phase 1, and
+`renderScaleBar` has always drawn the caption through
+`textAttrs(...)`'s `style.color ?? theme.foreground`. The whole gap was one
+missing control: a `TextNode` has had a Colour swatch writing this exact field
+since phase 1 (`TextFields`), and the scale bar — the one node type that most
+needs it, since a white bar over a dark micrograph is the case its own fill
+control exists for — never got one. So that caption has always drawn in the
+theme's black with no way to fix it.
+
+- **A "Label colour" swatch beside the bar's own**, in the Appearance row. Its
+  value is `node.style.color ?? theme.foreground`, rather than `TextFields`'
+  hardcoded `?? '#000000'`: a colour input cannot express "unset", and a literal
+  would misreport what is drawn on a theme whose foreground is not black. The
+  two agree today — `foreground` is `#000000` and no preset overrides it — so
+  this is the safer spelling of the same value, not a fix.
+  `GroupLabelFields`' own `labelColor ?? …` control is the closer precedent, and
+  `theme` is now a prop for the same reason it is one there.
+- **The existing swatch is relabelled "Bar colour".** Two controls called
+  "Colour" in one row is how the wrong one gets set — the same reasoning already
+  written beside the calibration field, which is "That distance is (µm)" rather
+  than a second "Length".
+- **Hidden when `labelPosition === 'none'`**, since colouring text nobody draws
+  is the standing "a control that visibly does nothing is a defect" rule.
+- **Switching to `'below'` converts the label too, but only if it is explicitly
+  set.** Round 38 turns the bar black on that switch because outside the picture
+  a white bar is invisible on the page, and a caption the author has coloured
+  white needs the identical treatment. An *absent* colour is deliberately left
+  absent: it already resolves to `theme.foreground`, so writing black over it
+  would change nothing today and freeze the caption against a later theme
+  change. The fill has no such option — `Fill.color` is required, so it is always
+  explicit and always converted.
+
+Driven in a real browser, light **and** dark, **18 checks each**: the label
+redrawn at `rgb(255,0,0)` off its own `scale-bar-label` element while the bar's
+fill was untouched; the bar then set white with the label still red, proving the
+two are independent; switching to "Below the image" turning *both* black and the
+swatch reporting the conversion; one undo restoring placement, bar colour and
+label colour together; and the control disappearing with the label and returning
+with it. No console errors in either theme.
+
+**Two live-test traps, both mine, both fixed in the harness rather than the
+code.** A synthetic `input`/`change` event does not drive a React controlled
+input — an already-recorded trap, hit again, and it made the first run report
+that *nothing* changed, including the bar colour that had worked all along;
+`fill()` goes through the native setter React tracks. And Ctrl+Z pressed with
+focus still in the colour input reaches nothing, which is correct and
+deliberate — `useUndoShortcuts` never steals it from a form field and the canvas
+handler ignores anything focused inside `.side-panel`. Confirmed by printing
+`document.activeElement` before assuming. The fix is to blur, *not* to click the
+canvas: a canvas click clears the selection and takes the Inspector's controls
+away with it.
+
+**No version bump, and no schema change** — `color` was already there. Nothing
+had ever *round-tripped* it though, on any node type, so the test added here is
+the first to prove zod keeps it: the standing hazard is usually the other way
+round (a field in the type but not the schema is dropped on save), and an
+unexercised schema field is the same risk from the far side. Verified by
+deleting `color` from `textStyleSchema` and confirming only that test fails.
+
+### Round 40 — a band refinement pass for smart layout
+
+Reported against a real figure produced by round 36's solver: panel *a* (a bar
+chart) runs well below panel *b* (a three-tile montage) in the same row, leaving
+a dead strip under the pictures; same for *g*/*h*. Suggested as *"an automatic
+refinement process once the optimal layout is chosen"*.
+
+**Measured before anything was designed, and it reframed the job.** This is not
+an arithmetic bug. The two panels genuinely want different heights, they are
+top-aligned, and the difference becomes whitespace under the shorter one. What
+*was* a defect is next to it: `shareOut` spends its whole total by design, and
+`arrangementFrames` advanced `y` by the **allotted** band height, so a
+free-height plot stretched past its own comfortable height to whatever the page
+had spare. Reproduced through the real solver: a plot wanting 42 mm came out
+46, 56 and 76 mm tall on 50, 60 and 80 mm pages while the montage beside it
+stayed at 28.6 mm throughout.
+
+Three decisions taken with the user: widen the picture first and shrink the band
+second; squeeze a free-height panel no further than its comfortable height; and
+add a score term for wasted height so a tight figure genuinely scores better.
+
+- **Lever 0 — an aspect panel's height *want* is what it can use at the width it
+  gets.** `columnWant` took `max(implied, wantHeightMm)`, and a picture's
+  `wantHeightMm` is derived at *full page width* — so a montage placed 126 mm
+  wide still asked for the 40.2 mm that 177 mm would have implied, height
+  `fitAspectAligned` immediately throws away. `columnWantHeight` returns the
+  implied height outright for a panel holding an aspect. A picture's wish to be
+  bigger is not lost: it lives on the width axis, where `wantWidthMm` already
+  carries it into pass 1. **Measured on a short plot beside that montage:
+  misalignment 11.9 → 1.4 mm and the offered "tight" page 44.5 → 34.0 mm, from
+  this one change.** It is also what makes lever 2 mean anything — afterwards
+  `bandWant` really is "every picture at its implied height, every plot at its
+  comfortable height", which is exactly the squeeze floor the user chose.
+- **Lever 1 — `refineBandWidths` widens a picture toward the height the rest of
+  its band wants**, taking the width from free-height neighbours down to their
+  own minimums, pro-rata both ways so the band's total width is preserved
+  exactly. One reallocation, and **a second pass could not find anything**: a
+  donor's want is width-independent so it is unchanged, a receiver's was
+  strictly below the target and its `need` is capped at exactly the target, and
+  the target was attained by a column that is neither — so the number this aimed
+  at did not move. Forward-only by construction, the same argument
+  `montagePanelAspect`'s closed form rests on, rather than a loop that happens
+  to be bounded. That proof is *why* donors must be free-height columns (an
+  aspect donor would shrink its own implied height and merely move the strip)
+  and why receivers are single-panel columns (a stack of two aspect panels
+  inverts a piecewise-linear function, which is iteration in disguise). Growth
+  stops at `wantWidthMm`, a picture's dpi-derived ceiling clamped to the page,
+  so this can never make `overResolution` fire. Skipped for an `aligned`
+  arrangement, whose one shared width division is the property that option
+  exists for.
+- **Lever 2 — the band is clamped to what it wants and the page reclaims the
+  rest.** `arrangementFrames` became **`arrangementLayout`**, returning
+  `{ frames, pageHeightMm }`. Renamed rather than wrapped so every call site is
+  revisited: one that kept only the frames would write the *unreduced* height
+  onto the document and move the strip to the bottom of the page.
+  `arrangementHeightDemand` needed no change and now agrees *provably* — at any
+  page at or above `wantMm` the clamp is a no-op, so the realised page is
+  exactly `wantMm`, which is asserted as a property over the whole enumeration
+  rather than left as the prose claim it was.
+- **`bandWaste`, weight 0.5**, measuring how much of each row's own box no panel
+  covers, width-weighted inside a row and height-weighted across rows. Derived
+  from the **frames**, never the band structure: the finalists are re-scored
+  against a document each candidate was actually applied to, after
+  `reserveLayoutSpace` has moved panels, and a structure-derived term could not
+  be recomputed there — the same reason `whitespace` counts fitted frames.
+  `wastedArea / usableArea` was worked out first and rejected as too blunt: the
+  reported strip is 0.043 of the page, under a point of score where
+  arrangements here are separated by a couple, against 0.165 of its own row.
+  `explainCandidate` names it, or a term that reorders the list would never be
+  visible to the author.
+- **`rowBands` in `layout.ts`** is now the one grouping by `readingOrder`'s 5 mm
+  tolerance, shared by `pushPanelsFrom` and the new term.
+  `readingOrder`/`readsInOrder` are deliberately *not* routed through it — they
+  need an ordering and already share a comparator with each other, so those are
+  two different algorithms over one constant rather than two copies of one.
+- **`aligned` joined the offered-list bucket key.** An aligned arrangement now
+  scores honestly worse on `bandWaste` — sharing one width division across bands
+  is exactly what leaves a row ragged — so without its own bucket it would lose
+  its slot to the plain variant on a point of score, quietly removing a shipped
+  option.
+- **Candidates are deduped on the *realised* page height.** Every enumerated
+  height at or above `wantMm` now realises as the same page, so two of the three
+  would otherwise appear as identical candidates under different ids — and `id`
+  is the key the offered list renders on.
+
+#### Two things the plan got wrong, both caught by tests
+
+- **A second clamp at column level made rows raggeder, not tighter.** It was in
+  the design so a stacked column would "behave like a band of its own", and the
+  existing stacked-column test failed on it immediately: a single panel beside a
+  stack of two stopped at its own want and left the stack's full height beside
+  it as a strip. A column filling a band a *neighbour genuinely needs* is what
+  makes a row flush and costs nothing; only the **page's** spare height must not
+  be spent, and the band clamp already refuses that. Removed, with the reason
+  written where it was.
+- **A test asserting the new term picks the arrangement was vacuous.** It passed
+  with the weight at zero. Probing the real candidates shows why: on those
+  demands the winning shape is four points clear and `bandWaste` is worth about
+  one, so it is not what decides that solve. The claim was removed rather than
+  reworded — the term is pinned where it can be isolated, by two frame maps with
+  identical coverage, satisfaction and page that differ only in raggedness
+  (0.2414 against 0), verified by zeroing the weight and confirming that one
+  fails.
+
+#### What it actually delivers, measured
+
+On the real sample the montage grew **126.6 → 137.0 mm** wide and **28.8 →
+31.1 mm** tall — the plot beside it gave up width to its own floor — and the
+bar chart's overhang fell **11.6 → 10.1 mm**. Honest about the size of that: the
+residual is structural for that pairing. To match a 38.2 mm plot a 4.405:1
+montage needs 168 mm of width and only ~147 mm can be freed, so **full alignment
+in that row is reachable only by taking the plot about 4.7 mm below its
+comfortable height** — the one thing the chosen rule forbids. The larger win is
+elsewhere: the page no longer stretches a plot past its comfort at all, which
+was 34 mm of dead height on an 80 mm page.
+
+**Not done, deliberately:** shrinking an over-wide *aspect* panel to lower a
+band, which fights priority head-on; stacked or aspect-locked columns as
+lever-1 participants; and the width-axis analogue — `shareOut` spends its whole
+usable width too, which is `overResolution`'s territory. The realised page
+height is left unrounded rather than snapped to the half millimetre like
+`arrangementHeightDemand`'s own answer: re-adding half a millimetre of slack to
+make the number tidy is the opposite of what this round is for.
+
+### Round 41 — a montage panel's shape is affine, not a ratio
+
+Reported against `reference-and-test-files/test2.png`: *"when I add group titles
+and scale bars, the autolayout still leaves whitespace (see panel a versus b)"*.
+Round 40 had just addressed the band-height side of the same figure; this is a
+different and larger cause underneath it.
+
+**`montagePanelAspect` returned a single ratio, and a montage panel does not
+have one.** Its comment claimed *"Any positive cell height gives the same ratio;
+use one that keeps the fixed terms from dominating"* and it probed at
+`cellHeight = max(MIN_TILE_MM, fixedHeight)`. The claim holds only when
+`fixedWidth / fixedHeight == cols·tileAspect / rows`:
+
+    aspect(h) = (cols·tileAspect·h + fixedWidth) / (rows·h + fixedHeight)
+
+Measured on the reported shape — a 1 × 3 montage of 4:3 tiles under one group
+title, `fixedWidth` 2.00 mm of gutters and `fixedHeight` 3.54 mm of label band:
+
+| cell height | true panel ratio |
+|---|---|
+| 5 mm | **2.5761** ← what it returned |
+| 10 mm | 3.1019 |
+| 20 mm | 3.4834 |
+| 40 mm | 3.7207 |
+
+So panels were locked far too tall. Running the **real tiler** at frames of that
+ratio and reading `imageContentRect`:
+
+| frame | cell | picture drawn | dead per tile |
+|---|---|---|---|
+| 60.0 × 23.3 | 19.33 × 19.75 | 19.33 × 14.50 | 101.5 mm² |
+| 120.0 × 46.6 | 39.33 × 43.04 | 39.33 × 29.50 | 532.6 mm² |
+| 175.0 × 67.9 | 57.67 × 64.39 | 57.67 × 43.25 | **1219.2 mm²** |
+
+A tile is `alignY: 'start'`, so each keeps its width, loses height, and leaves
+the difference as blank page *below* the picture — 21 mm per tile at 175 mm, ×3.
+The error is present with no caption at all (4.40 at h=5 against 4.05 at h=40,
+~9%); a group label is simply the only thing that makes `fixedHeight` large.
+
+- **Only the *cells block* has an aspect; the bands are constant offsets.** So a
+  montage's height is an exact affine function of its width — `gridCells`
+  divides the residual evenly, giving `cellHeight = (H − fixedH)/rows` exactly:
+
+      height(w) = fixedHeightMm + (w − fixedWidthMm) / (cols·tileAspect / rows)
+
+  `ShapeMm` in `geometry.ts` carries the three numbers, with `heightForWidth`,
+  `widthForHeight` (its exact inverse) and `fitShape`. Still closed form, and
+  more strictly so than what it replaced: there is no probe height to pick,
+  because the answer is right at every width rather than at one.
+- **`fitAspectAligned` is now literally `fitShape(r, aspectShape(a), …)`.** That
+  is what turns "byte-identical when the bands are zero" from a claim into a
+  structural fact rather than two implementations that agree today.
+- **`PanelSizeDemand.aspect` became `shape: ShapeMm`, renamed rather than
+  redefined.** Redefining a field in place is the one change the compiler cannot
+  catch — every literal keeps compiling and silently means something else.
+  Required, not optional, since it is never persisted and required is what makes
+  each construction site a compile error. `sizeDemand` emits the whole shape or
+  `FREE_SHAPE`, so a `contentAspect` with no bands — a panel with no gutters, no
+  padding and no caption — is unrepresentable rather than merely avoided.
+- **`refineBandWidths`' one-pass proof acquires an obligation and keeps it.**
+  Capping `need` at the target needs
+  `heightForWidth(shape, widthForHeight(shape, H0)) === H0`, true only for
+  `H0 ≥ fixedHeightMm` — below its own bands a shape has no width that produces
+  that height and the round trip overshoots. Discharged by the receiver test
+  itself: a receiver needs `columnWant(c) < target` and `columnWant(c) ≥
+  fixedHeightMm` unconditionally, so `target > fixedHeightMm` for every receiver
+  there is. Written into the docstring, because it is a new precondition the
+  affine form creates and it is not obvious.
+
+#### The scale bar, and why it goes in the tiler
+
+`grep -n "scaleBar" packages/doc-model/src/smart-layout.ts` returned **nothing**:
+a below-placed bar's 4.14 mm was invisible to the solver, and only
+`reserveSpaceForScaleBars` made room afterwards by shrinking the owning panel.
+
+Putting it in the demand alone would have been worse than useless — the demand
+would claim a taller panel while `fillPanelChildren` still tiled the full frame,
+so the tiles would absorb the band and the two would disagree, which is the exact
+failure `montageFixedExtentMm`'s own docstring exists to prevent. It goes into
+`montageGutterExtras` (renamed from `groupLabelGutterExtras`) as one more
+boundary extra, `rowExtra[row + 1]`. `gridCells`' extras run `0..rows` inclusive,
+so a bar under the last row reserves its strip inside the panel; and all three
+consumers already read that one function, so `montageCellRects`,
+`montageFixedExtentMm` and `montageShape` each pick it up with no further change.
+
+`fillPanelChildren`'s **no-grid** branch needs the same band, or the lone-image
+case is the one that double-counts: `imageContentRect` centres by default, so
+half the band would land above the picture and the reservation pass would shrink
+the panel anyway.
+
+#### `aspectLock` is now the ratio the panel really got
+
+It was built once per font scale, *before* the arrangement loop, from the demand's
+nominal aspect — 2.5761 on the fixture, the ratio of no frame any candidate
+produced. It is now read off `layout.frames` inside the loop, exact at the size
+the author is about to see; the same move round 40 made for the page height.
+
+A single lock still cannot express an affine shape, which is why
+`applyAutoLayout` passes the **shape** for an auto-fitting montage
+(`PanelLayoutInput.shape`, gated strictly on `contentGrid.autoFit`) and
+`aspectLock` is demoted to the manual-resize fallback it should always have
+been. Without that, plain Auto Layout kept producing the strip even once smart
+layout had stopped.
+
+#### A test that passed for the wrong reason
+
+`doc-model.test.ts`'s *"shapes the panel so square tiles get square cells"*
+asserted a 2 × 2 of square tiles gives a panel ratio of 1 — true, and true for a
+reason unrelated to the function being right: that is the one configuration
+where `fixedWidth == fixedHeight` and `cols·a/rows == 1`, i.e. exactly where a
+single ratio genuinely *is* scale-invariant. It would have kept passing through
+this defect and the next. Rewritten against the shape's parts, plus the property
+it was reaching for — the panel is square at every size. *"sets aspectLock, which
+is what auto-layout already honours"* was the other one: it compared the lock
+against the very function that produced it, so the lock was self-consistently
+wrong and the assertion could not see it.
+
+**No schema change.** `ShapeMm`, `PanelSizeDemand` and `PanelDemand` never
+round-trip; the only persisted field touched is `PanelNode.aspectLock`, whose
+value changes but not its type. `SCHEMA_VERSION` stays 1.
+
+**Not done, deliberately:** `fitMontageToImages` writes the realised lock but
+does **not** also reshape `panel.frame` — it runs from five call sites and
+silently changing a panel's height on each is a larger behaviour change than the
+defect, and the next layout pass gets the shape right regardless. The width axis
+is untouched: `shareOut` spends its whole usable width too, which is
+`overResolution`'s territory.
+
+### Round 42 — group-aware layout
+
+Reported: smart layout "fails" when panels are grouped, or when an object is
+grouped with a panel — offered with the fallback of just warning the author.
+Investigating found it is neither one bug nor smart-layout-specific, and the
+fallback was not needed.
+
+**Four defects, all in the same family: a grouped panel's `frame` is relative to
+its group, and the layout treated it as page space.**
+
+1. **`readingOrder` sorted on `frame`.** Measured on three panels with two
+   grouped at the *bottom* of the page: `A C B`, because A and B's group-local
+   `y` of 0 put them inside C's 5 mm row band. The page plainly reads `C A B`,
+   and `relabelPanels` shares the function, so the figure was lettered to match
+   the wrong answer *and* the arrangement was solved for a sequence the author
+   never sees.
+2. **`placePanels` wrote page coordinates into `panel.frame`.** A's frame read
+   `(6, 2)` against a true page position of `(11, 62)`; B's right edge landed at
+   **186 mm on a 183 mm page**.
+3. **`relabelPanels` placed a new label at `panel.frame.x - offset`** while a
+   `panel-label` is top-level, so a grouped panel's letter went to the group's
+   local space.
+4. **`GroupNode.frame` was never recomputed** — still `(5, 60, 115, 40)` after
+   the layout had moved both members. It is also the child coordinate origin,
+   so the next `resizeGroup` would scale against a box bounding nothing.
+
+**Plain `applyAutoLayout` had all four**, so every import, delete and Auto
+layout press hit them too. Both paths are fixed, because the bug lives in the
+code they share.
+
+- **The layout's subject is now a `LayoutUnit`** — every top-level panel, plus
+  every top-level group carrying at least one panel — sorted by
+  `compareReadingOrder`, extracted so `readingOrder`, `layoutUnits` and the
+  solver's `readsInOrder` genuinely share one rule. (Round 40's note claimed the
+  first and last already did; they did not, the last inlined a hard-coded
+  tolerance.) `layoutUnits` iterates raw `Object.values` rather than
+  `childrenOf`, which sorts by `z` and would change the tie-break between two
+  coincident panels — an ungrouped figure has to come out in exactly the order
+  it used to.
+- **`placePanels` → `placeUnits`**, renamed rather than extended: both callers
+  pass a panel list today and a signature change that still reads plausibly is
+  how one caller comes to place units and the other panels. A panel unit keeps
+  today's body character for character — sound because a panel unit is
+  top-level by construction, which is precisely what a grouped panel was not.
+  A group is placed with **`resizeGroup` (round 21)**, which already scales
+  panels, shapes, arrows and nested groups, already assigns the group's own
+  frame (closing defect 4), and already brackets the work with the
+  panel-position snapshot, so every descendant's letter follows at any depth.
+- **A group's demand is rolled up from its members.** `resizeGroupGeometry`
+  applies one `(sx, sy)` at every depth — a nested group recurses with
+  `sx' = target.width / old.width` and `target.width = child.frame.width · sx`,
+  so `sx' === sx` — which makes `Gw · maxᵢ(minWidthᵢ / wᵢ)` an **exact bound,
+  not an estimate**. `max` for comfort, since comfort is the size at which
+  nothing is compromised and the hungriest member sets it; `max` for priority
+  and never a sum, or five plots would outrank one 4000 px micrograph and invert
+  what the measurement says. Every ratio is dimensionless, so the aggregate is
+  scale-invariant — which is what keeps `rescoreCandidate` reporting the numbers
+  the solve did.
+- **A group takes a single ratio, and here that is exact.**
+  `resizePanelGeometry` does **not** honour `aspectLock` — verified, it assigns
+  the frame and re-tiles — so a non-uniform group scale does not bend a member's
+  lock, it hands a montage a wrong-shaped frame that `fillPanelChildren` fills:
+  round 41's dead strip, with the group as the cause. Pinning the group to its
+  own ratio forces `sx === sy`. The trigger is a descendant's lock **or** a
+  montage shape, because an `autoFit` montage has no stored lock after round 41
+  demoted it and is distorted just the same. And the group's fixed bands are
+  zero, which inverts round 41's lesson rather than ignoring it: under a uniform
+  scale every extent inside scales together, bands included, so this is the one
+  place a single ratio is right at every size.
+- **`marginMm` reads absolute frames over every panel.** It skipped
+  `parentId !== null`, so a figure whose panels were all grouped matched nothing
+  and reported a 0 mm margin — which let a heading be pushed into the bleed.
+
+#### Two levels of reading order, and why they may disagree
+
+Unit order and panel order are not two granularities of one answer: a tall group
+beside a short panel can order its lower member after the neighbour's panel, and
+that is correct output. So `readsInOrder` stays a **unit-level** guarantee with
+no panel-level analogue — adding one would silently refuse the first real
+grouped figure for a property the letters already satisfy. Lettering is whatever
+`relabelPanels` computes from absolute frames, which is by definition the order
+the page reads.
+
+#### An honest consequence, measured rather than hidden
+
+Keeping a group together means its internal spacing scales with it. Measured on
+the reproduction: the gap inside the group went 10 → 3.6 mm against a 9 mm page
+gutter, so `uneven-gutters` fires and readiness reads **95 against 96**. That is
+the figure the author asked for — a group is a unit whose internal arrangement
+is theirs — and the checker is right to say the gutters are now uneven. Not
+suppressed.
+
+**Not done, deliberately:** a group holding no panel at all is not a unit and is
+left where it is, exactly as a loose `shape` is — moving it would need a rule
+about what it belongs to that the document does not carry. The score cannot see
+*inside* a group beyond that gutter: `bandWaste` and `whitespace` read unit
+frames, which is right, since round 40's term measures the strip the *solver*
+creates. `reserveSpaceForGroupLabels` and `reserveSpaceForScaleBars` still
+filter to top-level panels, so a heading over a grouped panel still reserves
+nothing — pre-existing, and the next thing to do here.
+
+**No schema change.** `LayoutUnit` and `UnitDemand` are derived per call and
+never serialised; every document field written is one written today.
+`SCHEMA_VERSION` stays 1.
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -5708,6 +6484,12 @@ Phases 5–9, with the actual entry points:
 - **`alignFrames`/`distributeFrames`** belonged in this list since the smart-guide
   snapping machinery was built alongside them: pure, tested geometry with zero
   call sites in `apps/web`. Round 26 wired them up — see "Round 26".
+- **`TextStyle.color` is reachable on a `TextNode` and nowhere else**, though
+  `textAttrs` renders it for every text-bearing node. `TextFields` has had a
+  Colour swatch since phase 1; round 39 added the scale bar's. A panel label
+  and a bracket label still have none, so both always draw at
+  `theme.foreground` — each is one swatch in the matching Inspector block if
+  it is ever wanted.
 
 ### Declared-but-missing things — check before trusting the types
 
@@ -5734,7 +6516,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

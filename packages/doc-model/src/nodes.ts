@@ -851,6 +851,20 @@ export interface PanelLabelNode extends NodeBase {
   style: TextStyle;
   /** Which panel this labels; drives auto-relettering. */
   panelId: NodeId;
+  /**
+   * How far above its panel's own top edge this letter currently sits, because
+   * a group heading is drawn in the band between them.
+   *
+   * Recorded rather than re-derived so `reflowGroupLabels` can adjust the frame
+   * by the *difference* and put the letter back exactly when the heading is
+   * resized or deleted. Setting `frame.y` outright each reflow would be simpler
+   * and wrong: a reflow runs after every canvas drag, so it would snap a
+   * hand-nudged letter back to the panel on the author's next move. Same
+   * "stored delta beside an automatic base" shape as `BracketNode.userOffsetMm`,
+   * with the automatic half stored instead of the manual one — here it is the
+   * automatic part that has to be undone precisely.
+   */
+  liftMm?: number;
 }
 
 export interface ShapeNode extends NodeBase {
@@ -934,6 +948,18 @@ export interface ScaleBarNode extends NodeBase {
   fill: Fill;
   barHeightMm: number;
   labelPosition: 'above' | 'below' | 'none';
+  /**
+   * Whether the bar is drawn on the picture or in the space beneath it.
+   *
+   * Absent reads as `'inside'`, which is where every bar has been until now, so
+   * no saved figure moves. `'below'` clears the image data entirely — the
+   * convention plenty of published figures use — and needs the space beneath
+   * the picture reserved for it (`reserveSpaceForScaleBars`), since a picture
+   * routinely fills its frame exactly.
+   *
+   * Optional: post-dates SCHEMA_VERSION 1.
+   */
+  placement?: 'inside' | 'below';
   /** Optional: post-dates SCHEMA_VERSION 1. Absent reads as 'unknown'. */
   calibrationSource?: CalibrationSource;
 }
