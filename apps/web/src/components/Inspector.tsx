@@ -26,10 +26,12 @@ import {
   findAsset,
   findDataset,
   formatMm,
+  groupNodesByPanel,
   hasReplicatesAtX,
   isRangeFormatted,
   isTwoFactor,
   normaliseArrowFrame,
+  panelTitle,
   plainTextOfRuns,
   reconcileTextEdit,
   groupLabelMembersAreImages,
@@ -559,6 +561,67 @@ const ERROR_BARS = [
   { id: 'iqr', label: 'IQR' },
 ] as const;
 
+/**
+ * Jump anywhere in the figure, by panel.
+ *
+ * Every panel is a top-level option, so reaching one is a single pick; its own
+ * contents sit under the same `<optgroup>`, so a bracket or a montage tile is
+ * reachable without hunting for it on the canvas — which is what the Inspector
+ * was reported for. Built from `groupNodesByPanel`, the same partition the
+ * Layers list draws, so the two cannot disagree about what belongs where.
+ *
+ * Picking moves the *selection*, not a second notion of "current": the canvas
+ * outline, the Layers highlight and the Stats tab all follow, and there is only
+ * ever one answer to what is being edited.
+ */
+function PanelNavigator({
+  doc,
+  selectedId,
+  onSelectionChange,
+}: {
+  doc: FigureDocument;
+  selectedId: NodeId | null;
+  onSelectionChange: (ids: NodeId[]) => void;
+}) {
+  const { groups, unassigned } = groupNodesByPanel(doc.nodes);
+  if (groups.length === 0 && unassigned.length === 0) return null;
+
+  const entry = (node: FigureNode, indent: boolean) => (
+    <option key={node.id} value={node.id}>
+      {indent ? '· ' : ''}
+      {node.type === 'panel' ? panelTitle(node) : `${node.type} · ${node.name}`}
+    </option>
+  );
+
+  return (
+    <label className="field block">
+      Go to
+      <select
+        value={selectedId ?? ''}
+        onChange={(e) => {
+          if (e.target.value) onSelectionChange([e.target.value]);
+        }}
+      >
+        {/* Only while nothing is selected, and only then: a permanent blank
+            entry would be a way to select nothing that the canvas already has
+            a better one for (click the page). */}
+        {selectedId === null && <option value="">Nothing selected</option>}
+        {groups.map(({ panel, nodes }) => (
+          <optgroup key={panel.id} label={panelTitle(panel)}>
+            {entry(panel, false)}
+            {nodes.map((node) => entry(node, true))}
+          </optgroup>
+        ))}
+        {unassigned.length > 0 && (
+          <optgroup label="Not in a panel">
+            {unassigned.map((node) => entry(node, true))}
+          </optgroup>
+        )}
+      </select>
+    </label>
+  );
+}
+
 export interface InspectorProps {
   api: DocumentApi;
   theme: Theme;
@@ -593,13 +656,19 @@ export function InspectorTab({
 }: InspectorProps) {
   const { document: doc, commit } = api;
 
+  const navigator = (
+    <PanelNavigator doc={doc} selectedId={selectedIds[0] ?? null} onSelectionChange={onSelectionChange} />
+  );
+
   if (selectedIds.length === 0) {
     return (
       <section>
         <h3>Inspector</h3>
+        {navigator}
         <p className="hint">
           Select something on the canvas — a panel, a plot, a label or a bracket — to edit it
-          here. Double-click a label on the canvas to retype it directly.
+          here, or pick one from the list above. Double-click a label on the canvas to retype it
+          directly.
         </p>
       </section>
     );
@@ -609,6 +678,7 @@ export function InspectorTab({
     return (
       <section>
         <h3>Inspector</h3>
+        {navigator}
         <p className="hint">{selectedIds.length} nodes selected.</p>
         <button
           className="danger"
@@ -628,6 +698,7 @@ export function InspectorTab({
     return (
       <section>
         <h3>Inspector</h3>
+        {navigator}
         <p className="hint">That node no longer exists.</p>
       </section>
     );
@@ -640,8 +711,16 @@ export function InspectorTab({
   return (
     <section className="inspector">
       <h3>
-        {node.type} <span className="muted">{node.name}</span>
+        {node.type === 'panel' ? (
+          panelTitle(node)
+        ) : (
+          <>
+            {node.type} <span className="muted">{node.name}</span>
+          </>
+        )}
       </h3>
+
+      {navigator}
 
       <label className="field block">
         Name

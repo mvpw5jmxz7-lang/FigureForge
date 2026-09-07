@@ -256,6 +256,52 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 44 (the Stats tab shows one panel's result):** 1122
+TypeScript tests (1114 + 8 new in the `statistical annotation lifecycle` suite
+in `doc-model.test.ts`), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check acceptance
+run unaffected, and **12 + 19 live-browser checks in each of light and dark**
+reproducing both reported sequences exactly. **No schema change**;
+`SCHEMA_VERSION` stays 1. **Measured, not assumed**: running a t-test on panel
+*a* and then another on panel *g* leaves **one** result card on screen, tagged
+`g`, where before both stacked up; switching back to *a* brings its own card
+back unchanged; deleting a panel takes its analysis with it, leaving no
+stale-analysis error behind and readiness at 96, and one Ctrl+Z restores panel,
+brackets, letter and analysis together. **Two real defects found while
+implementing, both by measuring rather than reading**: `checkReferentialIntegrity`
+runs on **load**, not on save — so a stranded bracket writes a `.ffg` without
+complaint that then throws `ArchiveError: Project file has broken internal
+references.`, proven by removing the guard and watching the round trip fail —
+and `duplicateNode` shares a copied bracket's `analysisId` with the original
+while remapping its `plotId`, which makes that stranding reachable by
+duplicating a panel and deleting the original. **A second leak was reported
+after the list fix shipped and is included here**: the *run notice* is component
+state, so no document-level filter reached it — measured, the cards were already
+empty (`cards: []`) while the notice still read `2 brackets added to Panel a`.
+It is now keyed on `activePlot` and cleared, not hidden. See "Round 44" below.
+
+**Verified after round 43 (panel-first navigation):** 1114 TypeScript tests
+(1102 + 12 new in a new `ownership.test.ts`), 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, and **30 live-browser checks in each
+of light and dark** plus a 6-check second pass. **No model, schema or renderer
+change at all** — every panel letter this round displays is `PanelNode.label`,
+which `relabelPanels` has refreshed on every layout change since phase 1.
+**Measured, not assumed**: the sample's panel *b* had its material filed across
+**four** separate layer sections (Graphs, Images, Annotations, Labels) and
+appeared as one thing nowhere; the other six spanned two each. After the fix
+Layers reads seven banners `a`–`g` in reading order with panel *b*'s three
+tiles, its scale bar and its letter all under one heading; the Inspector
+navigator jumps between panels *and* into a plot with the canvas outline and
+the Layers highlight both following; the Stats dropdown reads
+`Panel a — Expression`; and the Data tab reads `used by panel a` and
+`on panel b` against the bare counts before. Each of the seven mechanisms was
+reverted alone and only its own guard failed. **One pre-existing bug closed**:
+the SidePanel held the bare selection setter while only the Canvas got the
+wrapper that closes crop/measure/label-pick, so clicking a Layers row mid-crop
+left the overlay up over a node no longer selected — confirmed fixed by
+cropping a montage tile and jumping away. See "Round 43" below.
+
 **Verified after round 42 (group-aware layout):** 1102 TypeScript tests (1096 +
 6 new in a `group-aware layout` suite in `doc-model.test.ts`), 190 Python tests
 unchanged (nothing here touches `services/api`), `tsc --build --force` and
@@ -6441,6 +6487,224 @@ nothing — pre-existing, and the next thing to do here.
 **No schema change.** `LayoutUnit` and `UnitDemand` are derived per call and
 never serialised; every document field written is one written today.
 `SCHEMA_VERSION` stays 1.
+
+### Round 43 — panel-first navigation
+
+Reported: it is hard to track a panel and the elements belonging to it once a
+figure has a few panels. Asked for everything relevant to a panel grouped under
+its banner, a panel title that matches the panel *letter* and reads the same in
+Layers, Inspector and Stats, a dropdown to jump between panels, the Data tab's
+"used by 1 panel" to name the panel, and the Layers list to say which panel each
+item belongs to.
+
+**No model, schema or renderer change whatever.** The letter is already
+`PanelNode.label`, refreshed by `relabelPanels` on every layout change, and
+`SCHEMA_VERSION` stays 1. This round is a `doc-model` query module plus the four
+surfaces that read it.
+
+#### The Layers tab could not have grouped by panel, and the reason is structural
+
+`DEFAULT_LAYERS` is **five** layers, and `layerId(draft, …)` files one panel's
+own material across up to four of them: its panel and plot in `Graphs`, its
+tiles in `Images`, its scale bar and arrows in `Annotations`, its brackets in
+`Statistics`, its letter and any heading in `Labels`. **Measured on the sample
+before anything was changed**: panel *b*, the micrograph montage, occupied
+**four** sections — Graphs, Images, Annotations, Labels — and appeared as one
+thing nowhere; the other six occupied two each. So panel grouping cannot nest
+*inside* layer grouping; the panel has to be the outer level, and the layers
+keep the only control that was ever theirs — show and lock — in a chip strip
+above the list. That was put to the user as a choice and is what they chose.
+
+#### One vocabulary, because there were five
+
+`packages/doc-model/src/ownership.ts` is the single answer to "which panel does
+this node belong to", which a figure reaches five different ways:
+
+| node | how it reaches its panel |
+|---|---|
+| `plot`, montage `image`, anything parented in | the `parentId` chain |
+| `scale-bar` | the same chain, **two** hops, through its image |
+| `panel-label` | its `panelId` — a letter is *top-level*, not a child |
+| `bracket` | `plotId` → that plot's parent, also from top level |
+| `group-label` | `memberIds`, which may name **several** panels |
+
+Before this, `provenance()` inside `LayersTab` was the only place unifying any
+of them — UI-local, returning a display string, and missing `group-label`
+entirely. Four decisions are written into the replacement:
+
+- **`panelsOwning` is a flat switch, never recursive.** A `group-label`'s
+  members resolve through `panelViaAncestors`, whose zeroth step is "the node
+  already *is* a panel", so nothing can descend into another group-label and it
+  terminates by construction.
+- **`groupNodesByPanel` is an exact partition**: a heading spanning two panels
+  is filed under the first only. `panelsOwning` still reports both — that is
+  what a row's subtitle reads — but a list showing one heading twice is a worse
+  answer than one that puts it somewhere definite. Pinned by a property test
+  over every node in the fixture.
+- **Order comes from `readingOrder`, not a second rule.** It already sorts on
+  `absoluteFrame`, so a grouped panel lands where the page reads it — round 42's
+  correction inherited rather than re-derived. `panelsInReadingOrder` is also
+  what ranks several letters correctly, since `a`…`z`, `aa` does not sort
+  lexicographically past 26 panels.
+- **`panelTitle` suppresses `addPanel`'s auto-generated name**, which is a
+  *number* (`Panel 3`) — so an unrenamed panel would otherwise read
+  `Panel a — Panel 3`, pairing the letter the figure is known by with a counter
+  it is not. A display-only heuristic, and safe as one because its false
+  positive is the better string anyway.
+
+**`panelsOf` (`document.ts`) was deleted in the same change.** Zero callers in
+`packages`, `apps` or `scripts`, no test, and it sorted on raw `frame` — the
+exact defect round 42 fixed in `readingOrder`, sitting unused and waiting for
+its first caller.
+
+#### What each surface now reads
+
+- **Layers** groups by panel, the banner *being* the panel's own row rather than
+  the panel appearing a second time as a child of itself. `<details open>` keyed
+  on the panel id, so the browser owns the open flag and no state hook is added.
+  Rows sort by `(layer z, node z)` — real draw order — and each row's `title`
+  names its layer, since the layer is what ▲/▼ reorder *within*.
+  `provenance()` loses its panel branches and keeps the rest: the panel is the
+  banner now, so repeating it per row is exactly the redundancy its own `image`
+  case has always refused ("six micrographs all reading 'panel a'"). It gained
+  the one fact a banner cannot carry — the other panels a spanning heading
+  covers.
+- **The Inspector** gains a `Go to` navigator: every panel a top-level option,
+  its contents indented under the same `<optgroup>`, built from the same
+  `groupNodesByPanel` the Layers list draws so the two cannot disagree. It moves
+  the *selection*, not a second notion of "current".
+- **Stats**'s existing dropdown is relabelled **Panel** and reads `panelTitle`.
+  A panel holding more than one plot gets one option per plot with the plot's
+  name appended — the label says Panel, so it must not silently annotate one of
+  two. Its options are also now in reading order rather than insertion order,
+  which is the same class of mistake that once let Run annotate panel *a* while
+  panel *c* was selected.
+- **Data** names the panel instead of counting. `plotsUsingDataset` returns
+  *plots*, so "used by 1 panel" was already counting the wrong thing; it now
+  reads `used by panel a` / `used by panels a, c`, each letter selecting that
+  panel. The asset list said *nothing* when an image was in use and now reads
+  `on panel b`.
+
+#### One pre-existing bug, closed because this round adds a second route to it
+
+`App.tsx` wrapped `onSelectionChange` for the **Canvas** alone so that selecting
+something else closes crop, measure and label-pick — *"leaving the overlay up
+over a node that is no longer selected is an invisible mode"*. The **SidePanel**
+and the **Toolbar** got the bare setter, so clicking a Layers row mid-crop
+already left the overlay up. Hoisted into one `selectNodes` callback and given
+to all three. Confirmed live in both directions: cropping a montage tile and
+then jumping away through the navigator closes the overlay.
+
+**Not done, deliberately:** the Quality tab's findings still name nodes rather
+than panels, and its "Select N affected" is unchanged — it was not reported and
+`Finding.nodeIds` can span panels, which needs its own wording. There is no
+"group by layer" toggle: the measurement above says the layer view cannot show a
+panel as one thing, and shipping both would be two answers to one question. The
+navigator lists every node in a panel rather than a filtered subset, which on a
+very large montage makes a long `<select>` — a real limit, and a scrolling
+native select with type-ahead is still better than what it replaces.
+
+### Round 44 — the Stats tab showed every panel's result at once
+
+Reported: run a test on one panel, then another on a different panel, and the
+first panel's result stays on screen. Only the selected panel's should show.
+
+**The tab was already scoped everywhere except this one line.** The Panel
+dropdown, the test list, every "there is no test to run here" notice, the
+volcano-test methods block and the run notice all follow `activePlot`. The
+results list read `const analyses = doc.analyses` — the whole document — so
+every test run in the session stacked up below the button, oldest first, told
+apart only by a small `.panel-tag` letter that had been added the day before as
+a mitigation for exactly this. Scoping it to `activePlot` is the actual fix, and
+`replaceAnalysisForPlot`'s one-analysis-per-plot rule makes it at most one card.
+
+Confirmed with the user: **nothing** is shown about other panels — the dropdown
+is the navigation — and an analysis whose plot is deleted is **deleted with it**
+rather than left invisible.
+
+- **Nothing usable was lost by hiding the rest.** `run()` always targets
+  `activePlot`, so another panel's card was displayed but never actionable: it
+  could not be re-run from where it was shown. It is now neither.
+- **Staleness stays figure-wide.** `checkStaleAnalyses` walks every analysis and
+  emits an **error**-severity finding per stale one, which also gates export.
+  That, not this list, is the surface that stops a stale result elsewhere going
+  unnoticed, and it is untouched.
+- **`.panel-tag` stays** even though the dropdown above now names the same
+  panel. The redundancy is the point: it is what confirms the card on screen
+  belongs to the panel named at the top, and it keeps a screenshot of the result
+  self-identifying.
+
+#### A second leak, reported after the first fix shipped
+
+Scoping the list was not the whole bug. Reported next: run a test on panel *a*,
+select the volcano panel, and *"it shows that 2 bars were added to panel a"*;
+run one on *e*, select *f*, and *e*'s details are still there.
+
+**Reproduced before changing anything, and the dump isolated it exactly**: after
+switching panel the cards really were empty — `cards: []` in every case, so
+round 44's own fix held — while `notice` still read
+`2 brackets added to Panel a — Expression.` The **run notice** is component
+state, not anything derived from the document, so nothing in a document-level
+filter could reach it. It says what one action did to one panel, and left
+standing under a different panel it reads as a result belonging to that panel.
+
+**A false lead, and what it actually meant.** The first reproduction appeared to
+show the notice clearing when the panel was changed on the canvas but not from
+the dropdown — an asymmetry that would have pointed at `selectionEcho`. It was
+an artefact of the test: reaching the canvas meant visiting the Layers tab,
+which **unmounts `StatsTab` and destroys its state**. The notice survived every
+in-tab route equally.
+
+The echo is therefore keyed on **`activePlot`**, not on the canvas selection —
+the dropdown reaches that and `selectionEcho` above it does not — and it
+*clears* rather than hides, so returning to panel *a* later does not resurrect
+confirmation of an action long finished. Same render-phase pattern as
+`selectionEcho` directly above it, so it needs no effect.
+
+#### Deleting a plot takes its analysis, and that needed the brackets too
+
+`deleteNode` never touched `draft.analyses`, and only the web app's
+`deleteNodesWithLayout` swept brackets. So deleting a panel left an `Analysis`
+naming a node that no longer existed — now invisible, unre-runnable, still
+written into the `.ffg`, and still able to raise a stale-analysis error with
+nowhere to act on it. The sweep went into `deleteNode` so all four delete
+pathways and every programmatic caller get it from one place. Two rules, and
+**measurement showed each reaches a case the other cannot**:
+
+- **A bracket follows its plot into the doomed set** — the missing sibling of
+  the `panel-label` and `group-label` rules beside it. It is the only one that
+  reaches a bracket carrying `analysisId: null`, which is legal: a bracket can
+  be placed by hand. It also closes a gap predating this round, where
+  `deleteNode` called directly left every bracket behind.
+- **Then any bracket still naming a removed analysis**, mirroring
+  `removeDataset`'s own sweep. This is *not* a defensive duplicate: **`duplicateNode`
+  remaps a copied bracket's `plotId` to the copy but deliberately shares its
+  `analysisId` with the original** (copying a figure element must not fork its
+  data), so deleting the original panel orphans an analysis the *copy's* bracket
+  still names — and the copy's plot is not doomed, so the structural rule cannot
+  see it.
+
+**The consequence is worse than "the save is refused", which is what the first
+draft of these comments claimed.** `checkReferentialIntegrity` runs on **load**
+(`archive.ts:275`), not on save. A stranded bracket therefore writes a `.ffg`
+without complaint and then throws `ArchiveError: Project file has broken
+internal references.` when the author tries to open it. Established by removing
+the backstop and watching a real `saveArchive` → `loadArchive` round trip throw,
+rather than by asserting the predicate — which is why that test asserts the
+round trip.
+
+An analysis with **no** `plotId` is named by nothing and is never doomed; it is
+also never shown by the scoped list. A narrow, stated consequence: the field is
+optional only so pre-`plotId` documents load unmigrated, every creation site in
+the repo sets it, and such a record was already unactionable before this round.
+Undo needed no work — `store.ts` records the array replacement and its inverse
+through `produceWithPatches`, exactly as for `removeDataset`.
+
+**Not done, deliberately:** `deleteNodesWithLayout`'s own bracket sweep stays as
+a backstop for any other route a plot can vanish by. Nothing collects an
+analysis already orphaned in an existing project — but such a record was
+undisplayable *and* unre-runnable before this round too, so no capability is
+lost, and any delete from now on cannot create one.
 
 ## What's next
 

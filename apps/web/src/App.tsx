@@ -165,6 +165,32 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   const [measuredPx, setMeasuredPx] = useState<number | null>(null);
   /** Volcano plot whose points are being picked directly on the canvas. */
   const [labelPickNodeId, setLabelPickNodeId] = useState<NodeId | null>(null);
+
+  /**
+   * The one way anything selects a node, so the three canvas modes are always
+   * closed by it.
+   *
+   * This wrapper used to be inline on the Canvas alone while the SidePanel got
+   * the bare setter — so clicking a Layers row mid-crop left the crop overlay
+   * up over a node that was no longer selected, which is exactly the invisible
+   * mode the comment below exists to prevent. The panel's own navigator would
+   * have been a second route to it.
+   */
+  const selectNodes = useCallback(
+    (ids: NodeId[]) => {
+      setSelectedIds(ids);
+      // Selecting something else ends the crop: leaving the overlay up over a
+      // node that is no longer selected is an invisible mode.
+      if (ids[0] !== cropNodeId) setCropNodeId(null);
+      if (ids[0] !== measureNodeId) {
+        setMeasureNodeId(null);
+        setMeasuredPx(null);
+      }
+      if (ids[0] !== labelPickNodeId) setLabelPickNodeId(null);
+    },
+    [cropNodeId, measureNodeId, labelPickNodeId],
+  );
+
   const [zoom, setZoom] = useState(() => fitZoom(api.document.page.widthMm));
   const [showGrid, setShowGrid] = useState(false);
   /** One spelling, read by both the toolbar's Fit button and the View menu. */
@@ -761,7 +787,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         api={api}
         theme={theme}
         selectedIds={selectedIds}
-        onSelectionChange={setSelectedIds}
+        onSelectionChange={selectNodes}
         zoom={zoom}
         onZoomChange={setZoom}
         onFit={fitToWindow}
@@ -788,17 +814,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
           api={api}
           theme={theme}
           selectedIds={selectedIds}
-          onSelectionChange={(ids) => {
-            setSelectedIds(ids);
-            // Selecting something else ends the crop: leaving the overlay up
-            // over a node that is no longer selected is an invisible mode.
-            if (ids[0] !== cropNodeId) setCropNodeId(null);
-            if (ids[0] !== measureNodeId) {
-              setMeasureNodeId(null);
-              setMeasuredPx(null);
-            }
-            if (ids[0] !== labelPickNodeId) setLabelPickNodeId(null);
-          }}
+          onSelectionChange={selectNodes}
           zoom={zoom}
           showGrid={showGrid}
           assetUrls={assets.urls}
@@ -813,7 +829,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
           api={api}
           theme={theme}
           selectedIds={selectedIds}
-          onSelectionChange={setSelectedIds}
+          onSelectionChange={selectNodes}
           onError={setError}
           setBusy={setBusy}
           assets={assets}

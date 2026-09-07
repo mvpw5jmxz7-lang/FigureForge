@@ -4353,6 +4353,146 @@ describe('statistical annotation lifecycle', () => {
     expect(rerun.analyses).toHaveLength(2);
   });
 
+  /*
+   * An analysis outliving its plot was invisible once the Stats tab began
+   * showing only the selected panel's result — a record naming a node that no
+   * longer exists, unre-runnable, still written into the archive, and still
+   * able to raise a stale-analysis error in the Quality tab with nowhere to go.
+   */
+  it('takes a plot’s analysis and brackets with it when the plot is deleted', () => {
+    const { doc, plotId } = annotatedDocument();
+    expect(doc.analyses).toHaveLength(1);
+    expect(Object.values(doc.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+
+    const after = editDocument(doc, (draft) => deleteNode(draft, plotId));
+    expect(after.analyses).toEqual([]);
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toEqual([]);
+  });
+
+  it('cascades the same way when the panel is deleted rather than the plot', () => {
+    const { doc, plotId } = annotatedDocument();
+    const panelId = doc.nodes[plotId]!.parentId!;
+
+    const after = editDocument(doc, (draft) => deleteNode(draft, panelId));
+    expect(after.analyses).toEqual([]);
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toEqual([]);
+  });
+
+  it('leaves another plot’s analysis and brackets alone', () => {
+    const { doc, newId, plotId, analysis } = annotatedDocument();
+    const otherPlot = Object.values(doc.nodes).find((n) => n.type === 'plot' && n.id !== plotId)!;
+
+    const withBoth = editDocument(doc, (draft) => {
+      const second = sampleAnalysis(newId(), otherPlot.id, analysis.spec.datasetId);
+      replaceAnalysisForPlot(draft, second);
+      addBracket(draft, newId, {
+        plotId: otherPlot.id,
+        analysis: second,
+        comparisonIndex: 0,
+        measurements: measurementsAt(10, 30),
+      });
+    });
+    expect(withBoth.analyses).toHaveLength(2);
+
+    const after = editDocument(withBoth, (draft) => deleteNode(draft, plotId));
+    expect(after.analyses).toHaveLength(1);
+    expect(after.analyses[0]!.plotId).toBe(otherPlot.id);
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+  });
+
+  it('takes a bracket carrying no analysis at all', () => {
+    /*
+     * `BracketNode.analysisId` is nullable — a bracket can be placed by hand.
+     * Such a bracket is reachable only through the structural rule (its plot is
+     * doomed, so it is), never through the integrity backstop, which keys on
+     * the analysis id. This is what separates the two rules: today's reference
+     * graph lets either one alone cover an ordinary bracket, and only this one
+     * covers a hand-placed one.
+     *
+     * It also closes a gap that predates this round: `deleteNode` on its own
+     * left every bracket behind, and only `deleteNodesWithLayout` in the web
+     * app swept them.
+     */
+    const { doc, plotId } = annotatedDocument();
+    const withManual = editDocument(doc, (draft) => {
+      for (const node of Object.values(draft.nodes)) {
+        if (node.type === 'bracket') node.analysisId = null;
+      }
+    });
+
+    const after = editDocument(withManual, (draft) => deleteNode(draft, plotId));
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toEqual([]);
+  });
+
+  it('leaves the document openable — the reason the brackets must go too', () => {
+    /*
+     * `checkReferentialIntegrity` refuses a bracket whose `analysisId` names a
+     * missing analysis. It runs on load, not on save, so dropping the analysis
+     * on its own would write a project that can never be opened again.
+     */
+    const { doc, plotId } = annotatedDocument();
+    const after = editDocument(doc, (draft) => deleteNode(draft, plotId));
+    expect(checkReferentialIntegrity(after)).toEqual([]);
+  });
+
+  it('takes a duplicate’s bracket, which shares the original’s analysis', () => {
+    /*
+     * The case the integrity backstop exists for, and it is reachable rather
+     * than hypothetical. `duplicateNode` remaps a copied bracket's `plotId` to
+     * the copy but *shares* its `analysisId` with the original, deliberately —
+     * copying a figure element must not fork its data. So deleting the
+     * original panel orphans an analysis the copy's bracket still names, and
+     * the structural rule cannot reach it: the copy's plot is not doomed.
+     *
+     * Measured: without the backstop the round trip below throws
+     * `ArchiveError: Project file has broken internal references.`
+     */
+    const { doc, newId, plotId } = annotatedDocument();
+    const panelId = doc.nodes[plotId]!.parentId!;
+
+    const withCopy = editDocument(doc, (draft) => {
+      duplicateNode(draft, newId, panelId);
+    });
+    const copied = Object.values(withCopy.nodes).filter((n) => n.type === 'bracket');
+    expect(copied).toHaveLength(2);
+    expect(new Set(copied.map((b) => b.analysisId)).size).toBe(1);
+
+    const after = editDocument(withCopy, (draft) => deleteNode(draft, panelId));
+    expect(after.analyses).toEqual([]);
+    expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toEqual([]);
+    expect(checkReferentialIntegrity(after)).toEqual([]);
+
+    // The check runs on *load*, not on save, so the real failure is a project
+    // that writes without complaint and can then never be opened again. Prove
+    // the round trip rather than the predicate.
+    expect(() => loadArchive(saveArchive(buildArchiveContents(after)))).not.toThrow();
+  });
+
+  it('restores the analysis, its brackets and the nodes in one undo', () => {
+    const { doc, plotId } = annotatedDocument();
+    const store = new DocumentStore(doc);
+    store.commit('Delete plot', (draft) => deleteNode(draft, plotId));
+    expect(store.getDocument().analyses).toEqual([]);
+
+    store.undo();
+    const restored = store.getDocument();
+    expect(restored.analyses).toHaveLength(1);
+    expect(restored.nodes[plotId]).toBeDefined();
+    expect(Object.values(restored.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+  });
+
+  it('never dooms an analysis that names no plot', () => {
+    // `plotId` is optional only so documents predating the field load
+    // unmigrated. Nothing here names such a record, so nothing may collect it.
+    const { doc, plotId, analysis } = annotatedDocument();
+    const detached = editDocument(doc, (draft) => {
+      draft.analyses = [{ ...analysis, plotId: null }];
+    });
+
+    const after = editDocument(detached, (draft) => deleteNode(draft, plotId));
+    expect(after.analyses).toHaveLength(1);
+  });
+
   it('moves brackets back onto the bars when the plot is resized', () => {
     const { doc, plotId } = annotatedDocument();
     const before = Object.values(doc.nodes).find((n) => n.type === 'bracket')!;

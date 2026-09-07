@@ -3679,10 +3679,64 @@ export function deleteNode(draft: FigureDocument, id: NodeId): void {
         doomed.add(node.id);
         grew = true;
       }
+      // A bracket is top-level too, joined to its plot only by `plotId` — the
+      // missing sibling of the panel-label rule above. Without it a deleted
+      // plot left its own significance brackets on the page (only the web
+      // app's `deleteNodesWithLayout` swept them, so a direct caller did not),
+      // and dropping the analysis below would strand their `analysisId`
+      // against `checkReferentialIntegrity`.
+      if (
+        node.type === 'bracket' &&
+        node.plotId != null &&
+        doomed.has(node.plotId) &&
+        !doomed.has(node.id)
+      ) {
+        doomed.add(node.id);
+        grew = true;
+      }
     }
   }
 
   for (const doomedId of doomed) delete draft.nodes[doomedId];
+
+  /*
+   * An analysis is a statement about one plot, so it goes when that plot does.
+   *
+   * Left behind it is a record naming a node that no longer exists: invisible
+   * in the Stats tab, which shows the selected panel's result, unre-runnable
+   * (`run()` always targets the selected plot), still written into the `.ffg`,
+   * and still able to raise a stale-analysis error in the Quality tab that the
+   * author cannot navigate to or act on.
+   *
+   * An analysis carrying no `plotId` is named by nothing here and is never
+   * doomed — the field is optional only so pre-`plotId` documents load
+   * unmigrated.
+   */
+  const orphaned = new Set(
+    draft.analyses.filter((a) => a.plotId != null && doomed.has(a.plotId)).map((a) => a.id),
+  );
+  if (orphaned.size === 0) return;
+  draft.analyses = draft.analyses.filter((a) => !orphaned.has(a.id));
+
+  /*
+   * And a bracket that named one of them from *another* plot.
+   *
+   * Not a defensive duplicate of the rule above — it reaches a case that one
+   * cannot. `duplicateNode` remaps a copied bracket's `plotId` to the copy but
+   * deliberately shares its `analysisId` with the original, since copying a
+   * figure element must not fork its data. So deleting the original panel
+   * orphans an analysis the *copy's* bracket still names, and the copy's plot
+   * is not doomed. `checkReferentialIntegrity` runs on **load**, not on save,
+   * so left alone this writes a `.ffg` without complaint that then cannot be
+   * opened at all.
+   *
+   * Same sweep, and the same reasoning, as `removeDataset` above.
+   */
+  for (const node of Object.values(draft.nodes)) {
+    if (node.type === 'bracket' && node.analysisId !== null && orphaned.has(node.analysisId)) {
+      delete draft.nodes[node.id];
+    }
+  }
 }
 
 /**

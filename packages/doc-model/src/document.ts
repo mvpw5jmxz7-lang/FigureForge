@@ -184,11 +184,14 @@ export function nodesInLayer(doc: FigureDocument, layerId: LayerId): FigureNode[
     .sort((a, b) => a.z - b.z);
 }
 
-export function panelsOf(doc: FigureDocument): Extract<FigureNode, { type: 'panel' }>[] {
-  return Object.values(doc.nodes)
-    .filter((n): n is Extract<FigureNode, { type: 'panel' }> => n.type === 'panel')
-    .sort((a, b) => a.frame.y - b.frame.y || a.frame.x - b.frame.x);
-}
+/*
+ * `panelsOf` was here, and is deliberately gone. It sorted on raw `frame`, so a
+ * panel inside a group sorted by its group-local origin rather than by where it
+ * sits on the page — the defect round 42 fixed in `readingOrder`, sitting
+ * unused and waiting for its first caller. It had none anywhere in `packages`,
+ * `apps` or `scripts`, and no test. `readingOrder` (layout.ts) is the answer it
+ * was reaching for.
+ */
 
 /**
  * Next z within a parent. Panels and their contents are ordered independently,

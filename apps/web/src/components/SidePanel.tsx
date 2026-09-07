@@ -20,7 +20,13 @@ import {
   couldHaveRowNames,
   dataBlocks,
   GROUPED_FORMATS,
+  groupNodesByPanel,
   imagesUsingAsset,
+  panelOwning,
+  panelShortTitle,
+  panelsInReadingOrder,
+  panelsOwning,
+  panelTitle,
   plotsUsingDataset,
   removeDataset,
   setDatasetReading,
@@ -50,6 +56,7 @@ import {
   type Delimiter,
   type FigureDocument,
   type NodeId,
+  type PanelNode,
   type PlotNode,
   type StatTest,
   describeArrangement,
@@ -265,6 +272,80 @@ export function SidePanel(props: SidePanelProps) {
         {tab === 'layers' && <LayersTab {...props} />}
       </div>
     </aside>
+  );
+}
+
+/**
+ * Which panels a set of nodes sits in, deduped and in reading order.
+ *
+ * `plotsUsingDataset` and `imagesUsingAsset` answer in *nodes*, and what an
+ * author needs is the letter they can see on the page. Two plots in one panel
+ * are one answer, not two — which is also why "used by 1 panel" was already
+ * counting the wrong thing: it was counting plots.
+ */
+function panelsUsing(
+  doc: FigureDocument,
+  nodes: readonly { id: NodeId }[],
+): { panels: PanelNode[]; loose: number } {
+  const found = new Set<NodeId>();
+  let loose = 0;
+  for (const node of nodes) {
+    const owners = panelsOwning(doc.nodes, node.id);
+    if (owners.length === 0) loose += 1;
+    for (const panel of owners) found.add(panel.id);
+  }
+  return {
+    panels: panelsInReadingOrder(doc.nodes).filter((p) => found.has(p.id)),
+    loose,
+  };
+}
+
+/**
+ * "used by panel a", "on panels b, d" — each letter selecting that panel.
+ *
+ * Naming the panel rather than counting them is the whole point: a count tells
+ * an author a dataset is in use and nothing about where to go and look at it.
+ */
+function PanelUses({
+  doc,
+  nodes,
+  verb,
+  onSelectionChange,
+}: {
+  doc: FigureDocument;
+  nodes: readonly { id: NodeId }[];
+  /** 'used by' for a dataset, 'on' for an image. */
+  verb: string;
+  onSelectionChange: (ids: NodeId[]) => void;
+}) {
+  const { panels, loose } = panelsUsing(doc, nodes);
+  if (panels.length === 0) {
+    // A plot or image outside any panel is legal — it is what an unattached
+    // import leaves behind — so say that rather than nothing.
+    if (loose === 0) return null;
+    return (
+      <span className="muted">
+        {verb} {loose} {loose === 1 ? 'item' : 'items'} not in a panel
+      </span>
+    );
+  }
+  return (
+    <span className="muted">
+      {verb} {panels.length === 1 ? 'panel' : 'panels'}{' '}
+      {panels.map((panel, i) => (
+        <span key={panel.id}>
+          {i > 0 && ', '}
+          <button
+            className="panel-link"
+            title={`Select ${panelTitle(panel)}`}
+            onClick={() => onSelectionChange([panel.id])}
+          >
+            {panel.label ?? panel.name}
+          </button>
+        </span>
+      ))}
+      {loose > 0 && `, and ${loose} not in a panel`}
+    </span>
   );
 }
 
@@ -1376,9 +1457,12 @@ function DataTab({
                   </span>
                 )}
                 {uses.length > 0 ? (
-                  <span className="muted">
-                    used by {uses.length} {uses.length === 1 ? 'panel' : 'panels'}
-                  </span>
+                  <PanelUses
+                    doc={doc}
+                    nodes={uses}
+                    verb="used by"
+                    onSelectionChange={onSelectionChange}
+                  />
                 ) : (
                   <>
                     {/* Offered only once nothing reads it. A plot pointing at a
@@ -1603,6 +1687,14 @@ function DataTab({
               </span>
               <div className="field-row">
                 <button onClick={() => insertAsset(asset.id)}>Insert as panel</button>
+                {uses.length > 0 && (
+                  <PanelUses
+                    doc={doc}
+                    nodes={uses}
+                    verb="on"
+                    onSelectionChange={onSelectionChange}
+                  />
+                )}
                 {uses.length === 0 && (
                   <>
                     {/* Deleting the last image that used an asset leaves it
@@ -1720,10 +1812,68 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     if (selectedPlotId) setPlotId(selectedPlotId);
   }
 
-  const plots = Object.values(doc.nodes).filter((n): n is PlotNode => n.type === 'plot');
+  /*
+   * Plots in reading order, named by their panel's letter.
+   *
+   * Insertion order is what the dropdown used to show — the same "not reading
+   * order" mistake that once let Run annotate panel a while panel c was
+   * selected. Grouping by panel fixes the order for free, since the panels
+   * themselves come back in the order the page reads.
+   */
+  const plotOptions = useMemo(() => {
+    const plotsIn = (panelId: NodeId | null): PlotNode[] =>
+      Object.values(doc.nodes).filter(
+        (n): n is PlotNode => n.type === 'plot' && panelOwning(doc.nodes, n.id)?.id === panelId,
+      );
+    const options: { id: NodeId; label: string }[] = [];
+    for (const panel of panelsInReadingOrder(doc.nodes)) {
+      const owned = plotsIn(panel.id);
+      for (const plot of owned) {
+        options.push({
+          id: plot.id,
+          label: owned.length > 1 ? `${panelTitle(panel)} · ${plot.name}` : panelTitle(panel),
+        });
+      }
+    }
+    for (const node of Object.values(doc.nodes)) {
+      if (node.type !== 'plot') continue;
+      if (options.some((o) => o.id === node.id)) continue;
+      options.push({ id: node.id, label: `${node.name} (not in a panel)` });
+    }
+    return options;
+  }, [doc.nodes]);
+
+  const plots = plotOptions
+    .map((o) => doc.nodes[o.id])
+    .filter((n): n is PlotNode => n?.type === 'plot');
   const activePlot = plots.find((p) => p.id === plotId) ?? plots[0];
   const dataset = activePlot ? doc.datasets.find((d) => d.id === activePlot.datasetId) : undefined;
   const series = dataset ? toSeries(dataset) : [];
+
+  /*
+   * The run notice belongs to the plot it was produced for, and goes when the
+   * panel does.
+   *
+   * It says things like "2 brackets added to Panel a — Expression", which is
+   * feedback about one action on one panel; left standing while panel c is
+   * selected it reads as a result belonging to c. Scoping the results list was
+   * not enough on its own, because the notice is component state rather than
+   * anything derived from the document.
+   *
+   * Keyed on `activePlot`, not on the canvas selection, so it clears whichever
+   * way the panel was changed — the dropdown reaches this and `selectionEcho`
+   * above it does not. Cleared rather than merely hidden: coming back to panel
+   * a later should not resurrect stale confirmation of an action long done.
+   *
+   * The same render-phase echo pattern as `selectionEcho`, which is why this
+   * needs no effect: React re-renders immediately with the new state.
+   */
+  const [noticeEcho, setNoticeEcho] = useState<NodeId | ''>('');
+  const activePlotId = activePlot?.id ?? '';
+  if (activePlotId !== noticeEcho) {
+    setNoticeEcho(activePlotId);
+    if (notice !== null) setNotice(null);
+  }
 
   /*
    * Group comparisons annotate a plot with a bracket spanning two categories.
@@ -2023,9 +2173,8 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 
       // Every one of these used to be silent, so "the test ran and nothing
       // appeared" was indistinguishable from a broken feature.
-      const panelName = activePlot.parentId
-        ? (doc.nodes[activePlot.parentId]?.name ?? activePlot.name)
-        : activePlot.name;
+      const owner = panelOwning(doc.nodes, activePlot.id);
+      const panelName = owner ? panelTitle(owner) : activePlot.name;
       if (xyCorrelation) {
         setNotice(
           `Correlation on ${panelName}: the result is in the table below. A numeric x axis has no ` +
@@ -2061,23 +2210,42 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     }
   };
 
-  const analyses = doc.analyses;
+  /*
+   * The selected panel's result, and only it.
+   *
+   * This list used to be the whole document, so every test run in the session
+   * stacked up below the button oldest-first and the panel each belonged to was
+   * a small letter tag. Everything else in this tab — the test list, each "no
+   * test applies here" notice, the volcano-test block, the run notice — has
+   * followed `activePlot` all along; this was the one hold-out.
+   *
+   * `replaceAnalysisForPlot` allows one analysis per plot, so this is at most
+   * one card. Nothing usable is lost by hiding the rest: `run()` always targets
+   * the selected plot, so another panel's card could never be re-run from where
+   * it was shown. Staleness stays figure-wide in the Quality tab, which reports
+   * every stale analysis at error severity and gates export on it.
+   */
+  const analyses = activePlot
+    ? doc.analyses.filter((a) => (a.plotId ?? null) === activePlot.id)
+    : [];
 
   return (
     <section>
       <h3>Analysis</h3>
 
+      {/* Named by the letter on the page, not by the panel's own name — one
+          spelling shared with the Layers banner and the Inspector, so the
+          three cannot come to call the same panel different things. Where a
+          panel holds more than one plot the plot's own name is appended: the
+          label says Panel, so it must not silently annotate one of two. */}
       <label className="field block">
-        Plot
+        Panel
         <select value={activePlot?.id ?? ''} onChange={(e) => setPlotId(e.target.value)}>
-          {plots.map((plot) => {
-            const parent = plot.parentId ? doc.nodes[plot.parentId] : undefined;
-            return (
-              <option key={plot.id} value={plot.id}>
-                {parent?.name ?? plot.name}
-              </option>
-            );
-          })}
+          {plotOptions.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
         </select>
       </label>
 
@@ -2610,38 +2778,22 @@ function QualityTab({ api, theme, onSelectionChange, exportDpi, report }: SidePa
 function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProps) {
   const { document: doc, commit } = api;
 
-  // Highest z first, so the top of the list is the top of the stack — the
-  // convention everywhere else, and the one the ▲/▼ buttons have to match.
-  const nodesByLayer = (layerId: string) =>
-    Object.values(doc.nodes)
-      .filter((n) => n.layerId === layerId)
-      .sort((a, b) => b.z - a.z);
-
   /**
-   * What a row belongs to — the dataset behind a plot, the panel a label or
-   * bracket annotates. Without it every plot reads "Plot" and two panels' worth
-   * of brackets are indistinguishable.
+   * What a row belongs to, beyond the panel its banner already names — the
+   * dataset behind a plot, the file behind an image, where a scale bar's
+   * calibration came from. Without it every plot reads "Plot".
+   *
+   * The panel used to be in here too, for a label, a bracket and anything
+   * parented into one. It is the banner now, so repeating it per row would be
+   * the very redundancy the `image` case has always refused: six micrographs
+   * all reading "panel a" is unreadable. What it gained instead is the one
+   * fact a banner *cannot* carry — the other panels a spanning heading covers.
    */
   const provenance = (node: (typeof doc.nodes)[string]): string | null => {
-    const panelOf = (id: NodeId | null | undefined): string | null => {
-      if (!id) return null;
-      const panel = doc.nodes[id];
-      if (!panel || panel.type !== 'panel') return null;
-      return panel.label ? `panel ${panel.label}` : panel.name;
-    };
-
     switch (node.type) {
       case 'plot':
         return findDataset(doc, node.datasetId)?.name ?? 'dataset missing';
-      case 'panel-label':
-        return panelOf(node.panelId);
-      case 'bracket': {
-        const plot = node.plotId ? doc.nodes[node.plotId] : undefined;
-        return panelOf(plot?.parentId);
-      }
       case 'image':
-        // The filename, not the panel: six micrographs all reading "panel a"
-        // is exactly the unreadability this column exists to fix.
         return findAsset(doc, node.assetId)?.filename ?? 'asset missing';
       case 'scale-bar': {
         // Calibration provenance is the point of the row. An uncalibrated bar
@@ -2652,26 +2804,136 @@ function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProp
         if (image?.type !== 'image') return 'not on an image';
         return source === 'unknown' ? 'uncalibrated' : `${source} calibration`;
       }
+      case 'group-label': {
+        // A heading spanning a row is filed under the first panel it covers,
+        // so this is where the rest of them are named.
+        const others = panelsOwning(doc.nodes, node.id).slice(1);
+        return others.length > 0
+          ? `also ${others.map((p) => panelShortTitle(p)).join(', ')}`
+          : null;
+      }
       case 'group':
         return `${childrenOf(doc.nodes, node.id).length} items`;
-      case 'panel':
-        return null;
       default:
-        return panelOf(node.parentId);
+        return null;
     }
   };
+
+  const layerZ = (node: (typeof doc.nodes)[string]): number =>
+    doc.layers.find((l) => l.id === node.layerId)?.z ?? 0;
+  const layerName = (node: (typeof doc.nodes)[string]): string =>
+    doc.layers.find((l) => l.id === node.layerId)?.name ?? 'no layer';
+
+  /*
+   * Real draw order, highest first — the convention the ▲/▼ buttons match.
+   * Under a panel banner a row's neighbours can come from different layers, so
+   * the layer's own z leads; within one layer it is the node's, exactly as
+   * before.
+   */
+  const drawOrder = (a: (typeof doc.nodes)[string], b: (typeof doc.nodes)[string]): number =>
+    layerZ(b) - layerZ(a) || b.z - a.z;
+
+  const row = (node: (typeof doc.nodes)[string]) => (
+    <li
+      key={node.id}
+      className={[
+        selectedIds.includes(node.id) ? 'selected' : '',
+        node.hidden ? 'node-hidden' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      // The layer is what ▲/▼ reorder within, so naming it here is what makes
+      // a press that appears to do nothing legible.
+      title={`${node.name} — ${layerName(node)} layer`}
+      onClick={() => onSelectionChange([node.id])}
+    >
+      <span className="node-type">{node.type}</span>
+      <span className="node-name">
+        {node.name}
+        {provenance(node) && <em className="provenance">{provenance(node)}</em>}
+      </span>
+      {/* Draw order among siblings. `nextZ` only ever appends, so before this
+          the only way to change what covered what was to delete a node and add
+          it back. */}
+      <button
+        className="icon"
+        title="Bring forward"
+        onClick={(e) => {
+          e.stopPropagation();
+          commit('Bring forward', (draft) => reorderNode(draft, node.id, 'forward'));
+        }}
+      >
+        ▲
+      </button>
+      <button
+        className="icon"
+        title="Send backward"
+        onClick={(e) => {
+          e.stopPropagation();
+          commit('Send backward', (draft) => reorderNode(draft, node.id, 'backward'));
+        }}
+      >
+        ▼
+      </button>
+      {/* Hiding is the reversible answer; deleting is not. Without this the
+          only way to take something out of the figure from here was to remove
+          it, and nothing put it back. */}
+      <button
+        className="icon"
+        title={node.hidden ? 'Show' : 'Hide'}
+        onClick={(e) => {
+          e.stopPropagation();
+          commit('Toggle visibility', (draft) => {
+            const target = draft.nodes[node.id];
+            if (target) target.hidden = !target.hidden;
+          });
+        }}
+      >
+        {node.hidden ? '◌' : '●'}
+      </button>
+      <button
+        className="icon danger"
+        title="Delete"
+        onClick={(e) => {
+          e.stopPropagation();
+          deleteNodesWithLayout(api, theme, [node.id]);
+          onSelectionChange(selectedIds.filter((id) => id !== node.id));
+        }}
+      >
+        ×
+      </button>
+    </li>
+  );
+
+  /*
+   * Grouped by panel, not by layer.
+   *
+   * `DEFAULT_LAYERS` is five, and one panel's own material is filed across up
+   * to four of them by construction — its plot in Graphs, its tiles in Images,
+   * its scale bar in Annotations, its brackets in Statistics, its letter and
+   * any heading in Labels. So a panel never appeared as one thing, which is
+   * what this tab was reported for. Panel grouping cannot nest *inside* layer
+   * grouping for the same reason; the panel has to be the outer level, and the
+   * layers keep the only control that was ever theirs — show and lock — in the
+   * strip above.
+   *
+   * The same `groupNodesByPanel` drives the Inspector's navigator, so the two
+   * cannot disagree about what belongs where.
+   */
+  const { groups, unassigned } = groupNodesByPanel(doc.nodes);
 
   return (
     <section>
       <h3>Layers</h3>
-      {[...doc.layers]
-        .sort((a, b) => b.z - a.z)
-        .map((layer) => (
-          <div key={layer.id} className="layer">
-            <div className="layer-head">
+
+      <div className="layer-strip">
+        {[...doc.layers]
+          .sort((a, b) => b.z - a.z)
+          .map((layer) => (
+            <span key={layer.id} className={layer.hidden ? 'layer-chip dim' : 'layer-chip'}>
               <button
                 className="icon"
-                title={layer.hidden ? 'Show layer' : 'Hide layer'}
+                title={layer.hidden ? `Show the ${layer.name} layer` : `Hide the ${layer.name} layer`}
                 onClick={() =>
                   commit('Toggle layer visibility', (draft) => {
                     const target = draft.layers.find((l) => l.id === layer.id);
@@ -2681,9 +2943,10 @@ function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProp
               >
                 {layer.hidden ? '◌' : '●'}
               </button>
+              {layer.name}
               <button
                 className="icon"
-                title={layer.locked ? 'Unlock layer' : 'Lock layer'}
+                title={layer.locked ? `Unlock the ${layer.name} layer` : `Lock the ${layer.name} layer`}
                 onClick={() =>
                   commit('Toggle layer lock', (draft) => {
                     const target = draft.layers.find((l) => l.id === layer.id);
@@ -2693,81 +2956,62 @@ function LayersTab({ api, theme, selectedIds, onSelectionChange }: SidePanelProp
               >
                 {layer.locked ? '🔒' : '🔓'}
               </button>
-              <strong>{layer.name}</strong>
-            </div>
+            </span>
+          ))}
+      </div>
 
-            <ul className="list nodes">
-              {nodesByLayer(layer.id).map((node) => (
-                <li
-                  key={node.id}
-                  className={[
-                    selectedIds.includes(node.id) ? 'selected' : '',
-                    node.hidden ? 'node-hidden' : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                  onClick={() => onSelectionChange([node.id])}
-                >
-                  <span className="node-type">{node.type}</span>
-                  <span className="node-name">
-                    {node.name}
-                    {provenance(node) && <em className="provenance">{provenance(node)}</em>}
-                  </span>
-                  {/* Draw order among siblings. `nextZ` only ever appends, so
-                      before this the only way to change what covered what was
-                      to delete a node and add it back. */}
-                  <button
-                    className="icon"
-                    title="Bring forward"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      commit('Bring forward', (draft) => reorderNode(draft, node.id, 'forward'));
-                    }}
-                  >
-                    ▲
-                  </button>
-                  <button
-                    className="icon"
-                    title="Send backward"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      commit('Send backward', (draft) => reorderNode(draft, node.id, 'backward'));
-                    }}
-                  >
-                    ▼
-                  </button>
-                  {/* Hiding is the reversible answer; deleting is not. Without
-                      this the only way to take something out of the figure from
-                      here was to remove it, and nothing put it back. */}
-                  <button
-                    className="icon"
-                    title={node.hidden ? 'Show' : 'Hide'}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      commit('Toggle visibility', (draft) => {
-                        const target = draft.nodes[node.id];
-                        if (target) target.hidden = !target.hidden;
-                      });
-                    }}
-                  >
-                    {node.hidden ? '◌' : '●'}
-                  </button>
-                  <button
-                    className="icon danger"
-                    title="Delete"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteNodesWithLayout(api, theme, [node.id]);
-                      onSelectionChange(selectedIds.filter((id) => id !== node.id));
-                    }}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+      {groups.map(({ panel, nodes }) => (
+        <details key={panel.id} className="panel-group" open>
+          {/* The banner *is* the panel's own row, buttons and all, rather than
+              the panel appearing a second time as a child of itself. */}
+          <summary className={selectedIds.includes(panel.id) ? 'selected' : ''}>
+            <span className="panel-group-title" onClick={() => onSelectionChange([panel.id])}>
+              {panelTitle(panel)}
+            </span>
+            <button
+              className="icon"
+              title={panel.hidden ? 'Show' : 'Hide'}
+              onClick={(e) => {
+                e.preventDefault();
+                commit('Toggle visibility', (draft) => {
+                  const target = draft.nodes[panel.id];
+                  if (target) target.hidden = !target.hidden;
+                });
+              }}
+            >
+              {panel.hidden ? '◌' : '●'}
+            </button>
+            <button
+              className="icon danger"
+              title="Delete this panel"
+              onClick={(e) => {
+                e.preventDefault();
+                deleteNodesWithLayout(api, theme, [panel.id]);
+                onSelectionChange(selectedIds.filter((id) => id !== panel.id));
+              }}
+            >
+              ×
+            </button>
+          </summary>
+          <ul className="list nodes">
+            {[...nodes].sort(drawOrder).map(row)}
+            {nodes.length === 0 && <li className="muted">(empty)</li>}
+          </ul>
+        </details>
+      ))}
+
+      {unassigned.length > 0 && (
+        <details className="panel-group" open>
+          <summary>
+            <span className="panel-group-title">Not in a panel</span>
+          </summary>
+          <ul className="list nodes">{[...unassigned].sort(drawOrder).map(row)}</ul>
+        </details>
+      )}
+
+      {groups.length === 0 && unassigned.length === 0 && (
+        <p className="hint">Nothing on the page yet — import a table or an image to start.</p>
+      )}
     </section>
   );
 }
