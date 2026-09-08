@@ -160,6 +160,24 @@ export const LABELLED_POINT_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType
 ]);
 
 /**
+ * The plot types that draw the fitted line from a correlation or regression
+ * analysis run on them.
+ *
+ * A registry rather than a plot-type test spelled at each gate, for the reason
+ * `LABELLED_POINT_PLOT_TYPES` is one: the renderer and the Inspector both ask
+ * the question and must not answer it differently.
+ *
+ * Deliberately not `line`: that type already draws a path through its own
+ * points, and a second, straight one beside it is a different question from
+ * the one this answers. PCA and UMAP panels are `scatter` nodes, so they are
+ * covered without being named.
+ */
+export const TREND_LINE_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
+  'scatter',
+  'fold-fold',
+]);
+
+/**
  * The plot types drawn as a dense row×column grid rather than marks against
  * an axis — neither dimension is a value axis, so these are excluded from
  * `CONTINUOUS_X_PLOT_TYPES` and from the categorical band-scale path both.
@@ -690,6 +708,44 @@ export interface PlotNode extends NodeBase {
    * it by hand.
    */
   foldFoldCutoffLines?: 'show' | 'hide';
+  /**
+   * Whether the fitted line from this plot's own correlation or regression
+   * analysis is drawn.
+   *
+   * Absent is `'show'`. The opposite default to every other optional on/off
+   * field here, and for a reason particular to this one: the line can only
+   * appear at all once somebody has explicitly run a correlation on the panel,
+   * so there is no figure it arrives on uninvited. Reading a correlation figure
+   * means reading its line; requiring a second opt-in after the test has
+   * already been run would make the common case the one that needs work.
+   *
+   * Read by `resolveTrendFit` in `packages/render`, which draws nothing at all
+   * unless an analysis carrying a `RegressionFit` is stored against this plot —
+   * so the field is inert on a plot that has never been tested. Honoured for
+   * the types in `TREND_LINE_PLOT_TYPES`; ignored, not approximated, elsewhere.
+   */
+  trendLine?: 'show' | 'hide';
+  /**
+   * Which interval band accompanies the fitted line.
+   *
+   * Absent is `'none'` — the band is opt-in, the same stance `showSurvivalCI`
+   * takes, because a band is a second claim on top of the line and reads as
+   * clutter until it is wanted. `'confidence'` is the interval on the fitted
+   * line itself (where the true line lies); `'prediction'` is the much wider
+   * interval on a new observation. Both come from the same stored terms, so
+   * offering both costs one more option and no further computation.
+   */
+  trendInterval?: 'none' | 'confidence' | 'prediction';
+  /**
+   * How far the fitted line and its band run.
+   *
+   * Absent is `'data'`: the line spans exactly the x range the fit was computed
+   * over and stops. Extending a regression past its own data draws a claim the
+   * data does not support, which is the same reasoning that stops this renderer
+   * marking a value the axis does not show. `'axis'` is offered because some
+   * figures do run the line edge to edge and that is the author's call.
+   */
+  trendExtent?: 'data' | 'axis';
   /**
    * Which points carry a drawn name, keyed on the LABEL STRING rather than a
    * row index.

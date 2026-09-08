@@ -15,6 +15,7 @@ confirm it survives the response, which no test calling `compute_*`/
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from figureforge.main import app
@@ -72,3 +73,58 @@ class TestSanitizeOr:
             assert row["pValue"] == 0.0
             assert row["qValue"] == 0.0
             assert row["category"] == "up"
+
+
+class TestFitSerialization:
+    """The fitted line has to survive `main.py` as well as be computed.
+
+    `AnalyzeResponse.fit` is a nested model, unlike every field the tests above
+    cover, so a missing entry in `_fit_out` would drop a term silently rather
+    than fail — the response would still validate and the client would draw a
+    band from an incomplete record.
+    """
+
+    ANSCOMBE_X = [10.0, 8.0, 13.0, 9.0, 11.0, 14.0, 6.0, 4.0, 12.0, 7.0, 5.0]
+    ANSCOMBE_Y = [8.04, 6.95, 7.58, 8.81, 8.33, 9.96, 7.24, 4.26, 10.84, 4.82, 5.68]
+
+    def _analyze(self, test: str) -> dict:
+        response = client.post(
+            "/analyze",
+            json={
+                "test": test,
+                "groups": [{"name": "y", "values": self.ANSCOMBE_Y}],
+                "x": {"name": "x", "values": self.ANSCOMBE_X},
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_regression_fit_reaches_the_wire_whole(self):
+        fit = self._analyze("linear-regression")["fit"]
+        assert fit is not None
+        # Every term the client needs to evaluate the line and either band.
+        assert set(fit) == {
+            "slope", "intercept", "n", "meanX", "sumSquaredDevX",
+            "residualSe", "tMultiplier", "confidenceLevel", "xMin", "xMax",
+        }
+        assert fit["intercept"] == pytest.approx(3.0001, abs=1e-3)
+        assert fit["sumSquaredDevX"] == pytest.approx(110.0, abs=1e-9)
+        assert fit["n"] == 11
+
+    def test_pearson_carries_a_fit_and_spearman_does_not(self):
+        assert self._analyze("pearson")["fit"] is not None
+        assert self._analyze("spearman")["fit"] is None
+
+    def test_a_test_that_fits_no_line_reports_null(self):
+        response = client.post(
+            "/analyze",
+            json={
+                "test": "ttest-welch",
+                "groups": [
+                    {"name": "A", "values": [1.0, 2.0, 3.0]},
+                    {"name": "B", "values": [4.0, 5.0, 6.0]},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["fit"] is None

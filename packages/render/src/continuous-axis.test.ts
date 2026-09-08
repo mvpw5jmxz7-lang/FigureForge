@@ -20,6 +20,7 @@ import {
   type FigureDocument,
   type PlotNode,
   type PlotType,
+  type RegressionFit,
 } from '@figureforge/doc-model';
 import { NATURE_THEME } from '@figureforge/theme';
 import { xyMarks } from '@figureforge/plots';
@@ -2169,5 +2170,254 @@ G3,3.5,4.0`;
 
   it('draws no label until one is asked for', () => {
     expect(collectByRole(scene(makeFoldFoldDocument()), 'point-label')).toEqual([]);
+  });
+});
+
+/**
+ * A fit consistent with the XY fixture's own x column (1..6): mean 3.5, and
+ * deviations -2.5..2.5 squaring to exactly 17.5. `t` is R's `qt(0.975, 4)`.
+ * The line runs y = 2x, so it enters at (1, 2) and leaves at (6, 12), both
+ * inside the fixture's own y range — nothing is clipped unless a test asks for
+ * it.
+ */
+const FIT: RegressionFit = {
+  slope: 2,
+  intercept: 0,
+  n: 6,
+  meanX: 3.5,
+  sumSquaredDevX: 17.5,
+  residualSe: 0.2,
+  tMultiplier: 2.776445,
+  confidenceLevel: 0.95,
+  xMin: 1,
+  xMax: 6,
+};
+
+/** Attach an analysis to the document's only plot, as running a test would. */
+function withAnalysis(
+  doc: FigureDocument,
+  { fit = FIT, test = 'linear-regression' as const }: { fit?: RegressionFit | null; test?: string } = {},
+): FigureDocument {
+  return editDocument(doc, (draft) => {
+    const plot = Object.values(draft.nodes).find((n) => n.type === 'plot');
+    if (!plot) throw new Error('fixture has no plot');
+    draft.analyses = [
+      {
+        id: 'analysis-1',
+        name: 'Dose vs Response',
+        test: test as never,
+        spec: { datasetId: draft.datasets[0]!.id, groups: ['Response'] },
+        plotId: plot.id,
+        options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+        inputHash: 'hash',
+        result: {
+          test: test as never,
+          omnibus: null,
+          comparisons: [],
+          fit,
+          methodsSentence: '',
+          warnings: [],
+          softwareVersions: {},
+        },
+        computedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+  });
+}
+
+/** The vertices of the single drawn trend line, in plot-area millimetres. */
+function trendVertices(doc: FigureDocument): { x: number; y: number }[] {
+  const paths = collectByRole(scene(doc), 'trend-line');
+  if (paths.length === 0) return [];
+  expect(paths).toHaveLength(1);
+  return [...String(paths[0]!.attrs?.['d']).matchAll(/[ML]([-\d.]+) ([-\d.]+)/g)].map((m) => ({
+    x: Number(m[1]),
+    y: Number(m[2]),
+  }));
+}
+
+describe('the fitted line from a correlation', () => {
+  it('draws nothing until an analysis with a fit is stored against the plot', () => {
+    // The field defaults to 'show', so this is the state that keeps a plot
+    // nobody has tested clean: there is no fit to draw, not a hidden one.
+    expect(collectByRole(scene(makeDocument(XY, 'scatter')), 'trend-line')).toHaveLength(0);
+    expect(trendVertices(withAnalysis(makeDocument(XY, 'scatter')))).not.toHaveLength(0);
+  });
+
+  it('draws nothing for an analysis that fitted no line', () => {
+    // Spearman: the service attaches no fit, so there is nothing to draw and
+    // no plot-type test is needed here to work that out.
+    const doc = withAnalysis(makeDocument(XY, 'scatter'), { fit: null, test: 'spearman' });
+    expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
+  });
+
+  it('is hidden by trendLine: hide', () => {
+    const doc = withAnalysis(makeDocument(XY, 'scatter', 80, { trendLine: 'hide' }));
+    expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
+  });
+
+  it('is withheld on a plot type outside the registry', () => {
+    // A line plot already draws a path through its own points; a second,
+    // straight one is a different question and is deliberately not offered.
+    const doc = withAnalysis(makeDocument(XY, 'line'));
+    expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
+  });
+
+  it('draws the stored slope and intercept, not a refit of the plotted points', () => {
+    /*
+     * The check that matters. The fixture's own points imply a slope near 2.03;
+     * the stored fit says exactly 2. Inverting the drawn endpoints back through
+     * the scales has to recover the STORED line, or the renderer is fitting
+     * something itself and the drawn line could disagree with the p-value
+     * printed beside it.
+     */
+    const doc = withAnalysis(makeDocument(XY, 'scatter'));
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(plot as PlotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const vertices = trendVertices(doc);
+    const first = vertices[0]!;
+    const last = vertices[vertices.length - 1]!;
+
+    const x0 = geometry.xScale.invert(first.x);
+    const x1 = geometry.xScale.invert(last.x);
+    const y0 = geometry.yScale.invert(first.y);
+    const y1 = geometry.yScale.invert(last.y);
+
+    // To four places, not more: path coordinates are rounded on the way out,
+    // so inverting them back cannot recover more precision than was written.
+    expect((y1 - y0) / (x1 - x0)).toBeCloseTo(FIT.slope, 4);
+    expect(y0 - FIT.slope * x0).toBeCloseTo(FIT.intercept, 4);
+  });
+
+  it('spans the fitted data by default and the whole axis on request', () => {
+    /*
+     * A deliberately flat fit, so the line stays inside the y range across the
+     * whole x axis and the two settings differ only in where they stop. With
+     * the steep FIT above, `'axis'` runs off the bottom of the panel and is
+     * clipped there, which would make this compare clipping to extent.
+     */
+    const flat = { ...FIT, slope: 0.5, intercept: 5 };
+    const withFlat = (patch: Partial<PlotNode> = {}): FigureDocument =>
+      withAnalysis(makeDocument(XY, 'scatter', 80, patch), { fit: flat });
+
+    const dataDoc = withFlat();
+    const data = trendVertices(dataDoc);
+    const axis = trendVertices(withFlat({ trendExtent: 'axis' }));
+    const plot = Object.values(dataDoc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(
+      plot as PlotNode,
+      dataDoc,
+      NATURE_THEME,
+    ) as ContinuousPlotGeometry;
+
+    // The domain is padded past the data, so 'axis' genuinely reaches further,
+    // and reaches the panel edges exactly.
+    expect(axis[0]!.x).toBeLessThan(data[0]!.x);
+    expect(axis[axis.length - 1]!.x).toBeGreaterThan(data[data.length - 1]!.x);
+    expect(axis[0]!.x).toBeCloseTo(0, 6);
+    expect(axis[axis.length - 1]!.x).toBeCloseTo(round(geometry.plotWidth), 6);
+
+    // And 'data' stops where the fit's own x range does, not short of it.
+    expect(geometry.xScale.invert(data[0]!.x)).toBeCloseTo(flat.xMin, 4);
+    expect(geometry.xScale.invert(data[data.length - 1]!.x)).toBeCloseTo(flat.xMax, 4);
+  });
+
+  it('is sampled rather than drawn as two endpoints, so a log axis curves', () => {
+    /*
+     * A straight line in data space is a curve on a log axis. Two endpoints
+     * would draw the chord instead — visibly wrong, and wrong in the direction
+     * that overstates the fit near the ends.
+     */
+    const doc = withAnalysis(
+      makeDocument(XY, 'scatter', 80, { y: { scale: 'log10' } as unknown as AxisSpec }),
+    );
+    const vertices = trendVertices(doc);
+    expect(vertices.length).toBeGreaterThan(2);
+    // Not collinear: the middle vertex sits off the chord joining the ends.
+    const first = vertices[0]!;
+    const last = vertices[vertices.length - 1]!;
+    const middle = vertices[Math.floor(vertices.length / 2)]!;
+    const chordY = first.y + ((last.y - first.y) * (middle.x - first.x)) / (last.x - first.x);
+    expect(Math.abs(middle.y - chordY)).toBeGreaterThan(0.1);
+  });
+
+  it('is withheld entirely on an axis carrying a break', () => {
+    // A break says a range is not shown; a line straight across the gap would
+    // claim a continuity the axis has already ruled out.
+    const doc = withAnalysis(
+      makeDocument(XY, 'scatter', 80, {
+        x: { scale: 'linear', breaks: [{ from: 3, to: 4 }] } as unknown as AxisSpec,
+      }),
+    );
+    expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
+  });
+
+  it('draws on a fold-vs-fold plot too', () => {
+    const doc = withAnalysis(makeFoldFoldDocument());
+    expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(1);
+  });
+});
+
+describe("the fitted line's interval band", () => {
+  const bandOf = (doc: FigureDocument) => collectByRole(scene(doc), 'trend-band');
+
+  it('is absent by default', () => {
+    expect(bandOf(withAnalysis(makeDocument(XY, 'scatter')))).toHaveLength(0);
+  });
+
+  it('is one closed polygon, not a ribbon per segment', () => {
+    // Two adjacent translucent shapes double their alpha where they meet and
+    // print as a seam, which is why the error band is one polygon as well.
+    const band = bandOf(withAnalysis(makeDocument(XY, 'scatter', 80, { trendInterval: 'confidence' })));
+    expect(band).toHaveLength(1);
+    const d = String(band[0]!.attrs?.['d']);
+    expect(d.endsWith('Z')).toBe(true);
+    expect(d.match(/M/g)).toHaveLength(1);
+  });
+
+  it('is wider for a prediction interval than a confidence one', () => {
+    const heightOf = (interval: 'confidence' | 'prediction'): number => {
+      const band = bandOf(withAnalysis(makeDocument(XY, 'scatter', 80, { trendInterval: interval })));
+      const ys = [...String(band[0]!.attrs?.['d']).matchAll(/[ML][-\d.]+ ([-\d.]+)/g)].map((m) =>
+        Number(m[1]),
+      );
+      return Math.max(...ys) - Math.min(...ys);
+    };
+    expect(heightOf('prediction')).toBeGreaterThan(heightOf('confidence'));
+  });
+
+  it('is clamped to the plot area rather than running off it', () => {
+    /*
+     * A prediction band on a narrow y range leaves the panel. Clamping each
+     * edge is exactly the region a rectangular clip would leave, because the
+     * band is x-simple; what must not happen is a polygon with vertices
+     * outside the panel, which would paint over the neighbouring one.
+     */
+    const doc = withAnalysis(
+      makeDocument(XY, 'scatter', 80, {
+        trendInterval: 'prediction',
+        y: { scale: 'linear', min: 5, max: 8 } as unknown as AxisSpec,
+      }),
+    );
+    const band = bandOf(doc);
+    expect(band).toHaveLength(1);
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(plot as PlotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const ys = [...String(band[0]!.attrs?.['d']).matchAll(/[ML][-\d.]+ ([-\d.]+)/g)].map((m) =>
+      Number(m[1]),
+    );
+    for (const y of ys) {
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(y).toBeLessThanOrEqual(round(geometry.plotHeight));
+    }
+  });
+
+  it('goes when the line goes', () => {
+    // The band annotates the line; a band with no line to sit on would be a
+    // shaded region the figure never explains.
+    const doc = withAnalysis(
+      makeDocument(XY, 'scatter', 80, { trendLine: 'hide', trendInterval: 'confidence' }),
+    );
+    expect(bandOf(doc)).toHaveLength(0);
   });
 });

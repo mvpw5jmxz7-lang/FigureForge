@@ -700,6 +700,16 @@ const checkStaleAnalyses: Rule = ({ document }) => {
     const brackets = Object.values(document.nodes).filter(
       (n) => n.type === 'bracket' && n.analysisId === analysis.id,
     );
+    /*
+     * The plot as well as its brackets. A correlation never gets a bracket — a
+     * numeric x axis has no categories to span — so this finding used to carry
+     * an empty `nodeIds` and its "Select N affected" button selected nothing at
+     * all. It matters more now that a correlation draws a fitted line: the plot
+     * IS the thing showing the stale result, and it has to be reachable from
+     * the finding that says so.
+     */
+    const plotId = analysis.plotId ?? null;
+    const affectsPlot = plotId !== null && document.nodes[plotId] !== undefined;
 
     findings.push({
       id: `stale-analysis-${analysis.id}`,
@@ -708,7 +718,7 @@ const checkStaleAnalyses: Rule = ({ document }) => {
       detail:
         'The values feeding this test have changed since it was run, so the ' +
         'annotated p-values may not reflect what is plotted. Re-run the test.',
-      nodeIds: brackets.map((b) => b.id),
+      nodeIds: [...brackets.map((b) => b.id), ...(affectsPlot ? [plotId] : [])],
     });
   }
 

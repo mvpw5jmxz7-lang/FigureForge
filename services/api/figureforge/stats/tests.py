@@ -49,10 +49,114 @@ class Omnibus:
 
 
 @dataclass
+class RegressionFit:
+    """The sufficient statistics of an ordinary least-squares fit of y on x.
+
+    Enough to reconstruct the fitted line *and* a pointwise confidence or
+    prediction interval at any x, without this module deciding where the plot's
+    axes happen to fall. A client evaluates
+
+        y(x)          = intercept + slope * x
+        halfWidth(x)  = tMultiplier * residualSe
+                        * sqrt(k + 1/n + (x - meanX)**2 / sumSquaredDevX)
+
+    with k = 0 for a confidence band on the fitted line and k = 1 for a
+    prediction band on a new observation.
+
+    Ten numbers rather than a sampled polyline, which is what the volcano
+    boundary has to store: that boundary needs an incomplete beta to evaluate,
+    whereas this needs only arithmetic once `tMultiplier` — the one quantity
+    requiring a t quantile — has been resolved here, beside SciPy.
+    """
+
+    slope: float
+    intercept: float
+    #: Pairs the fit was computed from, after dropping rows with a missing value.
+    n: int
+    meanX: float
+    #: Sum of (x - meanX)**2, the term that widens the interval away from the mean.
+    sumSquaredDevX: float
+    #: Residual standard error, sqrt(SSE / (n - 2)).
+    residualSe: float
+    #: Two-sided t multiplier at the caller's own alpha, df = n - 2.
+    tMultiplier: float
+    #: e.g. 0.95 — recorded so a reader of the fit alone knows what it covers.
+    confidenceLevel: float
+    #: The x range the fit actually used, so a line can span the data and no more.
+    xMin: float
+    xMax: float
+
+
+@dataclass
 class TestOutcome:
     comparisons: list[Comparison]
     omnibus: Omnibus | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Present only for tests that fit a line — see `_regression_fit`.
+    fit: RegressionFit | None = None
+
+
+def _regression_fit(
+    x: np.ndarray, y: np.ndarray, alpha: float, fit: object | None = None
+) -> RegressionFit | None:
+    """The OLS fit of y on x, or None where a line would be a fiction.
+
+    Refused rather than approximated in three cases, each of which produces a
+    number that looks like a fit and is not one:
+
+    * fewer than three pairs — df = n - 2 is zero or negative, so there is no
+      residual variance to estimate and the "fit" passes exactly through the
+      points by construction;
+    * every x identical — the line is vertical, `sumSquaredDevX` is zero and the
+      interval divides by it;
+    * any resulting term non-finite.
+
+    Returning None rather than a record with NaN in it is what keeps a caller
+    from drawing half a band.
+
+    The zero-variance test comes *before* `linregress`, which raises rather than
+    returning NaN on identical x. Pearson's own `pearsonr` returns NaN there
+    without complaint, so fitting first would turn a request that has always
+    succeeded into a 422 as a side effect of adding a line to draw.
+    """
+    n = len(x)
+    df = n - 2
+    if df <= 0:
+        return None
+
+    mean_x = float(np.mean(x))
+    sum_sq_dev_x = float(np.sum((x - mean_x) ** 2))
+    if not np.isfinite(sum_sq_dev_x) or sum_sq_dev_x <= 0:
+        return None
+
+    line = sps.linregress(x, y) if fit is None else fit
+    residuals = y - (line.intercept + line.slope * x)
+    residual_se = float(np.sqrt(np.sum(residuals**2) / df))
+    t_multiplier = float(sps.t.ppf(1 - alpha / 2, df))
+
+    result = RegressionFit(
+        slope=float(line.slope),
+        intercept=float(line.intercept),
+        n=int(n),
+        meanX=mean_x,
+        sumSquaredDevX=sum_sq_dev_x,
+        residualSe=residual_se,
+        tMultiplier=t_multiplier,
+        confidenceLevel=float(1 - alpha),
+        xMin=float(np.min(x)),
+        xMax=float(np.max(x)),
+    )
+    finite = (
+        result.slope,
+        result.intercept,
+        result.meanX,
+        result.sumSquaredDevX,
+        result.residualSe,
+        result.tMultiplier,
+        result.xMin,
+        result.xMax,
+    )
+    return result if all(np.isfinite(v) for v in finite) else None
 
 
 def _clean(values: Sequence[float]) -> np.ndarray:
@@ -626,12 +730,22 @@ def _dispatch(
             ci = None
 
         r = float(result.statistic)
-        return TestOutcome([
-            Comparison(
-                names[0], names[1], r, float(result.pvalue), float(result.pvalue),
-                float(len(a) - 2), ci, r * r, "r²", [len(a), len(b)],
-            )
-        ])
+        # Pearson carries the least-squares line as well: r measures how tightly
+        # the pairs sit on a straight line, so the line itself is what a reader
+        # is being asked to judge. Spearman does not — it measures a monotonic
+        # relationship between *ranks*, and a straight line through the raw
+        # values would claim a linearity the statistic never tested. Withheld
+        # rather than approximated, the stance Fisher's above 2x2 already takes.
+        fit = _regression_fit(a, b, alpha) if test == "pearson" else None
+        return TestOutcome(
+            [
+                Comparison(
+                    names[0], names[1], r, float(result.pvalue), float(result.pvalue),
+                    float(len(a) - 2), ci, r * r, "r²", [len(a), len(b)],
+                )
+            ],
+            fit=fit,
+        )
 
     if test == "linear-regression":
         if len(names) != 2:
@@ -647,12 +761,18 @@ def _dispatch(
             if np.isfinite(t_crit)
             else None
         )
-        return TestOutcome([
-            Comparison(
-                names[0], names[1], float(fit.slope), float(fit.pvalue), float(fit.pvalue),
-                float(df), ci, float(fit.rvalue ** 2), "R²", [len(x), len(y)],
-            )
-        ])
+        return TestOutcome(
+            [
+                Comparison(
+                    names[0], names[1], float(fit.slope), float(fit.pvalue), float(fit.pvalue),
+                    float(df), ci, float(fit.rvalue ** 2), "R²", [len(x), len(y)],
+                )
+            ],
+            # The same `linregress` result the comparison above reports, passed
+            # through rather than recomputed: one fit, so the drawn line can
+            # never disagree with the slope printed beside it.
+            fit=_regression_fit(x, y, alpha, fit),
+        )
 
     if test == "log-rank":
         assert events is not None  # run_test validates this before dispatch

@@ -256,6 +256,35 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 48 (the correlation line, with an optional confidence
+band):** 1200 TypeScript tests (1171 + 29: 10 in a new
+`packages/plots/src/regression.test.ts`, 12 in a `fitted line` pair of suites in
+`continuous-axis.test.ts`, 2 parity fixtures — one vector, one above
+`MAX_VECTOR_POINTS` — 1 archive round-trip in `doc-model.test.ts` and 2 in
+`quality.test.ts`), **204 Python tests (190 + 14** — this is the first round
+since round 19 to touch `services/api`), `tsc --build --force`, `eslint .` and
+`ruff check` clean, 46-check acceptance run unaffected, **54 live-browser checks
+in each of light and dark** plus a 22-check large-cloud and export run. **No
+schema version bump**: three optional `PlotNode` fields and one optional
+`StatResult.fit`. **Measured, not assumed** — the whole claim of this round is
+that the drawn line *is* the stored fit, so the harness converts the drawn path
+back to data coordinates through the plot's **own rendered tick labels** and
+never asks the app what its scale is: on Anscombe's first dataset the line
+measures **slope 0.5001 and intercept 3.0001**, which is R's published
+`lm(y1 ~ x1)` to four figures, spanning exactly **4.00 … 14.00** — the data's own
+x range — where "the whole axis" gives 3.20 … 14.80. The prediction band is
+**9.58 → 33.18 mm** thicker than the confidence band, and 2,500 proteins bake to
+one raster with the line still a **64-vertex vector path** over it, both
+surviving into a 315 KB SVG and a 255 KB PDF. **One real gap found by running it
+rather than reading it**: an x/y table imports as a **line** plot by default, a
+type this round deliberately does not draw a fit on, so the test succeeded and
+nothing appeared — now stated in the run notice. **And two harness traps of my
+own**, both caught by measuring: the band's *bounding box* height is dominated
+by the line's own rise, so confidence and prediction both measured 305 px until
+thickness was read off the polygon instead; and the plot-group lookup walked
+*down* to the axis title and returned the enclosing panel, whose id the Stats
+dropdown does not carry. See "Round 48" below.
+
 **Verified after round 47 (a fold-change vs fold-change plot for proteomics):**
 1171 TypeScript tests (1141 + 30 new: 10 in a new
 `packages/plots/src/fold-fold.test.ts`, 5 in `doc-model.test.ts` plus a
@@ -7121,6 +7150,160 @@ reference figure does not have; no density or contour shading of the cloud.
 
 ---
 
+### Round 48 — the correlation line, with an optional confidence band
+
+Reported: on scatter plots and the new fold-vs-fold plot, the correlation line
+from the stats analysis should be drawn, with confidence intervals as an option.
+
+Running Pearson or a regression put a p-value and an r² in the Stats table and a
+sentence in the methods block and **nothing whatever on the canvas**. The run
+notice said as much — *"the result is in the table below. A numeric x axis has no
+categories to span, so no bracket is drawn."* — which is right about brackets and
+wrong as a final answer: what a reader of a correlation figure looks for is the
+line.
+
+**Decisions taken with the user:** a None / Confidence / Prediction dropdown
+defaulting to None; **Spearman draws no line**, with the reason stated; line
+extent is a **control** (the data's x range, or the whole axis); and the equation
+stays in the Stats tab rather than becoming an on-plot label.
+
+#### The service was throwing the answer away
+
+`tests.py` has called `sps.linregress(x, y)` since phase 5 and kept only
+`fit.slope`, as the generic `Comparison.statistic`. **There is nowhere in that
+shape for an intercept**, so a stored `linear-regression` analysis was not
+sufficient to draw its own line — this could not have been a render-only change,
+and reading the code rather than assuming is what established that before any
+was written.
+
+- **`TestOutcome.fit`, a new optional `RegressionFit`** carrying ten *sufficient
+  statistics* — slope, intercept, n, meanX, sumSquaredDevX, residualSe,
+  tMultiplier, confidenceLevel, xMin, xMax. The client evaluates
+  `y = a + bx` and `t·s·√(k + 1/n + (x−x̄)²/Sxx)` (`k = 0` confidence, `k = 1`
+  prediction) exactly at any x.
+- **Ten numbers rather than a sampled polyline**, which is the shape
+  `volcanoSamCurve` is stuck with. That boundary needs an incomplete beta to
+  evaluate, so it can only travel as points; this needs nothing but arithmetic
+  once `tMultiplier` — the one term requiring a t quantile — is resolved
+  server-side beside SciPy. Two consequences worth having: the band is exact at
+  every x rather than to within a sampling interval, and it re-renders correctly
+  when the axis range changes.
+- **Pearson carries the same fit; Spearman carries none.** r measures how
+  tightly the pairs sit on a straight line, so the line is what the reader is
+  being asked to judge. Spearman measures a monotonic relationship between
+  *ranks*, and a least-squares line through the raw values would claim a
+  linearity the statistic never tested — withheld, never approximated, the
+  stance Fisher's above 2×2 already takes. `packages/plots/src/summary.ts`'s own
+  header is the rule this follows: *"inferential statistics come from the Python
+  service; nothing here decides significance."*
+- **`tMultiplier` is `t.ppf(1 − alpha/2, n−2)`**, the same call the slope CI
+  already makes, so the band follows the **analysis's own alpha** rather than a
+  hardcoded 95%.
+- **Refused whole, never partly.** No fit below three pairs (df ≤ 0: the line
+  passes through both points by construction), none when every x is identical,
+  and `main.py`'s `_fit_out` collapses the object to `None` if any term fails
+  `_sanitize` — mirroring how `ci` is already handled, because a band drawn from
+  a record with one NaN in it is not a narrower band but a wrong one.
+- **The zero-variance test runs *before* `linregress`, and that ordering is
+  load-bearing.** `linregress` *raises* on identical x while `pearsonr` returns
+  NaN quietly, so fitting first would have turned a Pearson request that has
+  always succeeded into a 422 as a side effect of adding a line to draw. Found
+  by a test failing, not by reading.
+
+#### The fit lives on the analysis, not the node
+
+`PlotNode.volcanoSamCurve` is the precedent for storing a server result on the
+node, and it exists precisely because a volcano test is deliberately **not** an
+`Analysis`. A correlation is one. Storing the fit on `StatResult` means it is
+already joined to the plot by `plotId`, already replaced rather than accumulated
+by `replaceAnalysisForPlot`, and already covered by `checkStaleAnalyses` — three
+mechanisms inherited rather than rebuilt. `renderPlot` has `doc` in scope, and
+`quality.ts` already reads `doc.analyses`, so nothing needed a new channel.
+
+#### Drawing it
+
+- **`resolveTrendFit` is the one place a stored fit becomes geometry**, called
+  once from `renderPlot` and its two halves spliced at two points of the
+  emission array: the **band before `renderContinuousMarks`** so the cloud reads
+  over it, the **line after** so the fit stays legible against a dense scatter.
+  One resolve, two placements — the discipline that has `resolvePointLabels`
+  serve both the drawing path and the drag hit-test.
+- **Sampled at 64 evenly spaced *millimetre* positions, inverted back to data.**
+  A straight line in data space is a curve on a log or symlog axis, and two
+  endpoints would draw the chord — wrong in the direction that overstates the
+  fit near the ends. Sampling in millimetres rather than in data gives uniform
+  on-page resolution whatever the scale kind, and the line and its band share
+  one sample set, so the line cannot appear to cross its own band.
+- **Withheld entirely on an axis carrying a break.** A break says a range is not
+  shown; a line straight across the gap asserts a continuity the axis has
+  already ruled out, and the fit was computed over the removed values too. One
+  condition, stated in the Inspector, rather than splitting both the line and the
+  band into runs for a combination nobody asked for.
+- **The band's y is clamped, not clipped.** It is x-simple — one vertical
+  interval per x — so intersecting it with the panel is exactly what clamping
+  each edge produces, and where the clamped edges cross the polygon closes on
+  itself and paints nothing. `clipPolylineToRect` handles open polylines only,
+  and an SVG `clipPath` would mean a `<defs>` block and per-node unique ids that
+  neither adapter emits anywhere today. The prediction band at n = 11 genuinely
+  reaches the panel edges, so this is the common path, not an edge case.
+- **Both are drawn in `theme.foreground`, not the series colour.** On a
+  fold-vs-fold plot the series colour is a palette entry the points never use —
+  they are coloured per category — so a "series colour" line would match nothing
+  on screen. The band's alpha is **0.15, not the error band's 0.25**: that band
+  is filled in a mid-tone series colour and this one in the foreground, and black
+  at the same value reads far heavier over a grey cloud. Confirmed by eye in both
+  themes rather than asserted.
+- **New roles `'trend-line'` and `'trend-band'`**, kept distinct from `'line'`
+  and `'error-bar'` so a count of a series' own drawn lines or intervals cannot
+  silently start including a fit. Both are outside `quality.ts`'s `MARK_ROLES`
+  allow-list without any change, which is the right answer: drawn in the
+  foreground colour, they would otherwise be compared against every series colour
+  and report a conflict between the data and the ink the axes use.
+- The line is **solid**. In this renderer a dashed stroke means a reference or a
+  threshold, and the fit is neither.
+
+#### One pre-existing gap closed, because this round makes it visible
+
+`checkStaleAnalyses` populated `nodeIds` with **brackets only** — and a
+correlation never gets one — so its error-severity finding carried an empty list
+and its "Select N affected" button selected nothing at all. It now includes the
+analysis's own `plotId`. The renderer deliberately does **not** re-hash and
+refuse to draw a stale fit: that would put a hash of every input value inside
+every render pass, and the checker already fires at error severity, which gates
+export.
+
+#### The gap found by running it
+
+**An x/y table imports as a `line` plot** (`defaultPlotTypeFor('simple-xy')`), a
+type this round deliberately does not draw a fit on — so the most ordinary path
+to a correlation ran the test successfully and put nothing on the page, with no
+Inspector block to explain it either. That silence is a defect whatever the
+scope, so the run notice now distinguishes three outcomes: the line was drawn;
+a fit was computed but this plot type does not draw one, *and here is what to
+change*; or no line was fitted at all. Invisible to 1,200 green tests.
+
+**Not done, deliberately:** `line` plots still draw no fit — the user named
+scatter and the proteomics plot, a straight fit beside an already-drawn
+connecting line is a different question, and `TREND_LINE_PLOT_TYPES` makes it a
+one-word change if wanted. No colour control for the line or band. No non-linear
+fits, no LOESS, no forced-through-origin. No on-plot equation label. And the
+confidence band is genuinely **invisible at large n** — at 2,500 proteins the
+line's position is known to about a hundredth of a unit — which is the statistic
+being honest, not a defect; an author wanting a visible band at that n wants the
+prediction band.
+
+**Also found, and NOT fixed** — a different defect from the one reported:
+`quality.ts` and `SidePanel.tsx`'s staleness displays both recompute
+`analysisInputHash` with **three** arguments while the run path passes a fourth
+(`events`) for `log-rank`. The function branches on `events !== undefined`, so
+**every log-rank analysis is reported permanently stale at error severity, which
+gates export**. Correlation is unaffected — its fourth argument is `undefined`,
+taking the same branch as the 3-arg call, which is why this feature does not
+arrive looking broken. Confirmed by reading both call sites; left for its own
+round.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -7198,7 +7381,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`) is **optional**, so old files still load. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line) is **optional**, so old files still load. Round 48's `trendLine` is the one optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

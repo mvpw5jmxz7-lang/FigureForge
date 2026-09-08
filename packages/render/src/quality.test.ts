@@ -22,7 +22,10 @@ import {
   relabelPanels,
   setImageCrop,
   stableStringify,
+  toSeries,
   updateNode,
+  analysisInputHash,
+  xForHash,
   type CalibrationSource,
   type Dataset,
   type FigureDocument,
@@ -33,6 +36,15 @@ import {
 import { NATURE_THEME, resolveTheme, type Theme } from '@figureforge/theme';
 import { MAX_VECTOR_POINTS, renderDocument } from './render-document.js';
 import { checkFigure, type Finding } from './quality.js';
+
+/** Paired x and y, the shape a correlation needs. */
+const XY_CSV = `Dose,Response
+1,2.1
+2,3.9
+3,6.2
+4,7.8
+5,10.1
+6,12.4`;
 
 /** Three replicates per group — the sample size biology actually runs. */
 const SMALL = `Treatment,Rep1,Rep2,Rep3
@@ -1216,5 +1228,65 @@ describe('what the checker claims it can fix', () => {
         expect(known, `unlisted finding without a fix: ${finding.id}`).toBe(true);
       }
     }
+  });
+});
+
+describe('a stale analysis', () => {
+  /** A scatter with a correlation stored against it, and no bracket. */
+  function withCorrelation(inputHash: string): FigureDocument {
+    const doc = makeDocument(XY_CSV, 'scatter');
+    return editDocument(doc, (draft) => {
+      const plot = Object.values(draft.nodes).find((n) => n.type === 'plot')!;
+      draft.analyses = [
+        {
+          id: 'analysis-1',
+          name: 'Dose vs Response',
+          test: 'linear-regression',
+          spec: { datasetId: draft.datasets[0]!.id, groups: ['Response'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash,
+          result: {
+            test: 'linear-regression',
+            omnibus: null,
+            comparisons: [],
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+  }
+
+  it('names the plot, so a correlation with no bracket is still selectable', () => {
+    /*
+     * A correlation never gets a bracket — a numeric x axis has no categories
+     * to span — so before this the finding carried an empty `nodeIds` and its
+     * "Select N affected" button selected nothing at all. It matters more now
+     * that a correlation draws a fitted line: the plot IS the thing showing
+     * the stale result.
+     */
+    const doc = withCorrelation('a-hash-that-cannot-match');
+    const finding = report(doc).findings.find((f) => f.id.startsWith('stale-analysis'));
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe('error');
+
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    expect(finding!.nodeIds).toEqual([plot.id]);
+    expect(Object.values(doc.nodes).some((n) => n.type === 'bracket')).toBe(false);
+  });
+
+  it('says nothing while the analysis still matches its data', () => {
+    const doc = makeDocument(XY_CSV, 'scatter');
+    const dataset = doc.datasets[0]!;
+    const current = analysisInputHash(
+      { test: 'linear-regression', correction: 'none' },
+      toSeries(dataset).map((s) => s.values),
+      xForHash(toSeries(dataset)),
+    );
+    const fresh = withCorrelation(current);
+    expect(report(fresh).findings.filter((f) => f.id.startsWith('stale-analysis'))).toEqual([]);
   });
 });

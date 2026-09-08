@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   LABELLED_POINT_PLOT_TYPES,
+  TREND_LINE_PLOT_TYPES,
   addAsset,
   addBracket,
   addPanelWithImage,
@@ -2197,9 +2198,32 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       const owner = panelOwning(doc.nodes, activePlot.id);
       const panelName = owner ? panelTitle(owner) : activePlot.name;
       if (xyCorrelation) {
+        /*
+         * The fitted line is the discoverability channel for the Inspector's
+         * own "Fitted line" block, which stays hidden until an analysis exists
+         * to draw from — so this sentence is where an author learns the control
+         * is now there.
+         *
+         * Three outcomes, and each is stated rather than left silent, the same
+         * reason every "why did no bracket appear" case above is spelled out.
+         * The middle one is easy to reach by accident: an x/y table imports as
+         * a LINE plot by default (`defaultPlotTypeFor`), which draws no fit, so
+         * an author who never changed the plot type would otherwise see the
+         * test succeed and nothing at all happen on the page.
+         */
+        const fitted = result.fit != null;
+        const drew = fitted && TREND_LINE_PLOT_TYPES.has(activePlot.plotType);
+        const aboutTheLine = drew
+          ? ' The fitted line is now drawn on the panel — the Inspector adds a confidence or ' +
+            'prediction band.'
+          : fitted
+            ? ` A fitted line was computed but this panel is a ${activePlot.plotType} plot, which ` +
+              'does not draw one; switch it to a scatter in the Inspector to see it.'
+            : '';
         setNotice(
           `Correlation on ${panelName}: the result is in the table below. A numeric x axis has no ` +
-            'categories to span, so no bracket is drawn.',
+            'categories to span, so no bracket is drawn.' +
+            aboutTheLine,
         );
       } else if (survivalLogRank) {
         setNotice(

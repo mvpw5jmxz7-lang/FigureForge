@@ -4311,6 +4311,108 @@ describe('.figureforge archive', () => {
     expect(untouchedPlot?.type === 'plot' && 'gridlineStyle' in untouchedPlot).toBe(false);
   });
 
+  it('round-trips the fitted-line fields and the analysis fit, absent when never set', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X\tY\n1\t2\n2\t4\n3\t6', newId()) };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Fit',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'scatter';
+        plotNode.trendLine = 'hide';
+        plotNode.trendInterval = 'prediction';
+        plotNode.trendExtent = 'axis';
+      }
+      draft.analyses = [
+        {
+          id: newId(),
+          name: 'X vs Y',
+          test: 'linear-regression',
+          spec: { datasetId: ds.id, groups: ['Y'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'linear-regression',
+            omnibus: null,
+            comparisons: [],
+            // Every term matters: the band is unusable if any one is dropped,
+            // which a `toEqual` on the whole document would not localise.
+            fit: {
+              slope: 2,
+              intercept: 0.5,
+              n: 3,
+              meanX: 2,
+              sumSquaredDevX: 2,
+              residualSe: 0.25,
+              tMultiplier: 12.706,
+              confidenceLevel: 0.95,
+              xMin: 1,
+              xMax: 3,
+            },
+            methodsSentence: 'Fitted by ordinary least squares.',
+            warnings: [],
+            softwareVersions: { scipy: '1.15.0' },
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.trendLine).toBe('hide');
+    expect(plot?.type === 'plot' && plot.trendInterval).toBe('prediction');
+    expect(plot?.type === 'plot' && plot.trendExtent).toBe('axis');
+
+    // Field by field, so a schema entry dropped one at a time is caught here
+    // rather than only by the whole-document comparison above.
+    const fit = loaded.document.analyses[0]?.result?.fit;
+    expect(fit).toEqual({
+      slope: 2,
+      intercept: 0.5,
+      n: 3,
+      meanX: 2,
+      sumSquaredDevX: 2,
+      residualSe: 0.25,
+      tMultiplier: 12.706,
+      confidenceLevel: 0.95,
+      xMin: 1,
+      xMax: 3,
+    });
+
+    const untouched = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('X\tY\n1\t2\n2\t4', newId()) };
+      draft.datasets = [ds];
+      addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Fit',
+      });
+    });
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find(
+      (n) => n.type === 'plot',
+    );
+    expect(untouchedPlot?.type === 'plot' && 'trendLine' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'trendInterval' in untouchedPlot).toBe(false);
+    expect(untouchedPlot?.type === 'plot' && 'trendExtent' in untouchedPlot).toBe(false);
+  });
+
   it('leaves an ordinary line plot without the offset fields at all', () => {
     const newId = createIdFactory();
     const base = createDocument({

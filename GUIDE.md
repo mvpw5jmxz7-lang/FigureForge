@@ -70,7 +70,12 @@ between "this is broken" and "this hasn't been built yet."
   chi-square, Fisher's exact, correlation (Pearson/Spearman), linear
   regression, and a log-rank test for survival curves — with correction for
   multiple comparisons, an effect size, and a ready-to-paste sentence for your
-  methods section. (A few combinations are *deliberately* refused with an
+  methods section. On a scatter or a fold-change-vs-fold-change plot, running
+  Pearson or linear regression also **draws the fitted line on the panel**, and
+  the Inspector can add a 95% confidence band (where the true line lies) or a
+  prediction band (where a new observation would fall). Spearman deliberately
+  draws no line: it measures how consistently the ranks move together, not how
+  closely the points sit on a straight one. (A few combinations are *deliberately* refused with an
   on-screen explanation rather than run anyway — for example, a nested design
   needs a hierarchical model this tool doesn't fit, and a count table doesn't
   support a t-test. That's a stated statistical guardrail, not a missing

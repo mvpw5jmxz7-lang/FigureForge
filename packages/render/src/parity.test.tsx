@@ -826,6 +826,176 @@ describe('adapter parity', () => {
     expect(collectByRole(baked, 'zero-line')).toHaveLength(2);
   });
 
+  it('draws a fitted line and its confidence band identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8\n5,10.1\n6,12.4');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-fit',
+        name: 'Dose response',
+        format: 'simple-xy',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/fit.csv',
+        sourceFilename: 'fit.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Dose response',
+        datasetId: dataset.id,
+        plotType: 'scatter',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.trendInterval = 'confidence';
+      draft.analyses = [
+        {
+          id: 'analysis-fit',
+          name: 'Dose vs Response',
+          test: 'linear-regression',
+          spec: { datasetId: dataset.id, groups: ['Response'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'linear-regression',
+            omnibus: null,
+            comparisons: [],
+            fit: {
+              slope: 2.0486,
+              intercept: -0.0067,
+              n: 6,
+              meanX: 3.5,
+              sumSquaredDevX: 17.5,
+              residualSe: 0.2151,
+              tMultiplier: 2.776445,
+              confidenceLevel: 0.95,
+              xMin: 1,
+              xMax: 6,
+            },
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // Both parts present and distinguishable by role — the assertion that
+    // stops a future change folding the fit into 'line' or 'error-bar', where
+    // a count of a series' own drawn lines or intervals would swallow it.
+    expect(collectByRole(scene, 'trend-line')).toHaveLength(1);
+    expect(collectByRole(scene, 'trend-band')).toHaveLength(1);
+    expect(collectByRole(scene, 'line')).toHaveLength(0);
+    expect(collectByRole(scene, 'error-bar')).toHaveLength(0);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('keeps the fitted line vector when the cloud beneath it is rasterized', () => {
+    /*
+     * The case a real gene list always hits. The points bake to one raster;
+     * the fit and its band are two paths regardless of how many observations
+     * went into them, so a figure does not lose its line to a large table.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const rows = Array.from({ length: MAX_VECTOR_POINTS + 500 }, (_, i) => {
+      const x = -3 + (6 * i) / (MAX_VECTOR_POINTS + 500);
+      return `G${i},${x.toFixed(4)},${(0.8 * x + (i % 7) * 0.05).toFixed(4)}`;
+    });
+    const parsed = parseDelimited(`Gene,A,B\n${rows.join('\n')}`);
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-fit-cloud',
+        name: 'Two contrasts',
+        format: 'fold-fold',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/fit-cloud.csv',
+        sourceFilename: 'fit-cloud.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Fold cloud',
+        datasetId: dataset.id,
+        plotType: 'fold-fold',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.trendInterval = 'confidence';
+      draft.analyses = [
+        {
+          id: 'analysis-fit-cloud',
+          name: 'A vs B',
+          test: 'pearson',
+          spec: { datasetId: dataset.id, groups: ['B'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'pearson',
+            omnibus: null,
+            comparisons: [],
+            fit: {
+              slope: 0.8,
+              intercept: 0.15,
+              n: MAX_VECTOR_POINTS + 500,
+              meanX: 0,
+              sumSquaredDevX: 7500,
+              residualSe: 0.1,
+              tMultiplier: 1.961,
+              confidenceLevel: 0.95,
+              xMin: -3,
+              xMax: 3,
+            },
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const baked = renderDocument(doc, {
+      theme: NATURE_THEME,
+      pointRasters: new Map([[plotNode.id, 'data:image/png;base64,AAAA']]),
+    });
+    expect(collectByRole(baked, 'point-cloud')).toHaveLength(1);
+    expect(collectByRole(baked, 'point')).toEqual([]);
+    expect(collectByRole(baked, 'trend-line')).toHaveLength(1);
+    expect(collectByRole(baked, 'trend-band')).toHaveLength(1);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(baked)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(baked)));
+  });
+
   it('rasterizes a volcano plot above MAX_VECTOR_POINTS with per-point colour surviving the bake', () => {
     const newId = createIdFactory();
     const base = createDocument({

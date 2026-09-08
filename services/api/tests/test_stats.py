@@ -8,7 +8,8 @@ generated itself would only prove it is self-consistent, not that it is right.
 Reference values:
   sleep       Student (1908); R `t.test(extra ~ group, data = sleep)`
   PlantGrowth R `summary(aov(weight ~ group, data = PlantGrowth))`
-  anscombe    Anscombe (1973); R `cor.test(anscombe$x1, anscombe$y1)`
+  anscombe    Anscombe (1973); R `cor.test(anscombe$x1, anscombe$y1)` and
+              `summary(lm(y1 ~ x1, anscombe))` for the fitted line's terms
   gender/party Agresti (2007) p.39, via R's `?chisq.test` example
   Hamilton depression scale  Hollander & Wolfe (1973) 29f, via R's
               `?wilcox.test` paired example
@@ -293,6 +294,107 @@ class TestCorrelation:
     def test_x_rejected_for_non_correlation_test(self):
         with pytest.raises(ValueError, match="does not accept a separate x series"):
             run_test("ttest-welch", {"y": ANS_Y}, x=ANS_X)
+
+
+class TestRegressionFit:
+    """The fitted line and its interval, against R's own `summary(lm)` output.
+
+    R: summary(lm(y1 ~ x1, anscombe)) ->
+        (Intercept)  3.0001   Std. Error 1.1247
+        x1           0.5001   Std. Error 0.1179
+        Residual standard error: 1.237 on 9 degrees of freedom
+
+    Two of the stored terms are exact integers for Anscombe's x1
+    (10,8,13,9,11,14,6,4,12,7,5): the mean is 99/11 = 9, and the deviations
+    1,-1,4,0,2,5,-3,-5,3,-2,-4 square and sum to 110. Asserting those exactly
+    rather than approximately is what would catch a fit computed over the wrong
+    array or after a silent reordering.
+    """
+
+    def test_fit_matches_r(self):
+        fit = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}).fit
+        assert fit is not None
+        assert fit.slope == pytest.approx(0.5001, abs=1e-3)
+        assert fit.intercept == pytest.approx(3.0001, abs=1e-3)
+        assert fit.residualSe == pytest.approx(1.2366, abs=1e-3)
+        assert fit.n == 11
+        assert fit.meanX == pytest.approx(9.0, abs=1e-12)
+        assert fit.sumSquaredDevX == pytest.approx(110.0, abs=1e-12)
+        assert fit.xMin == pytest.approx(4.0)
+        assert fit.xMax == pytest.approx(14.0)
+        assert fit.confidenceLevel == pytest.approx(0.95)
+        # R: qt(0.975, 9) = 2.262157
+        assert fit.tMultiplier == pytest.approx(2.262157, abs=1e-5)
+
+    def test_slope_standard_error_is_recoverable(self):
+        """SE(slope) = residualSe / sqrt(sumSquaredDevX), which R reports as
+        0.1179. The stored terms are only sufficient if that identity holds, so
+        this is the check that they really do determine the interval."""
+        fit = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}).fit
+        assert fit is not None
+        assert fit.residualSe / math.sqrt(fit.sumSquaredDevX) == pytest.approx(0.1179, abs=1e-4)
+
+    def test_confidence_half_width_at_the_mean(self):
+        """At x = meanX the (x - meanX)² term vanishes and the half-width
+        collapses to t * s / sqrt(n) — 2.262157 * 1.23660 / sqrt(11) = 0.84341.
+        A closed-form value, so it pins the arithmetic a client will run."""
+        fit = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}).fit
+        assert fit is not None
+        half = fit.tMultiplier * fit.residualSe * math.sqrt(1 / fit.n)
+        assert half == pytest.approx(0.84341, abs=1e-4)
+
+    def test_pearson_carries_the_same_fit_as_the_regression(self):
+        """r and the least-squares line describe one relationship; the two tests
+        must not report two lines for it."""
+        pearson = run_test("pearson", {"x": ANS_X, "y": ANS_Y}).fit
+        regression = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}).fit
+        assert pearson is not None and regression is not None
+        assert pearson.slope == pytest.approx(regression.slope, abs=1e-12)
+        assert pearson.intercept == pytest.approx(regression.intercept, abs=1e-12)
+        assert pearson.residualSe == pytest.approx(regression.residualSe, abs=1e-12)
+
+    def test_spearman_carries_no_fit(self):
+        """A rank correlation makes no claim about a straight line through the
+        raw values, so none is offered to draw."""
+        assert run_test("spearman", {"x": ANS_X, "y": ANS_Y}).fit is None
+
+    def test_no_fit_below_three_pairs(self):
+        """df = n - 2 is zero at n = 2: the line passes through both points by
+        construction and there is no residual variance to build an interval on."""
+        assert run_test("linear-regression", {"x": [1.0, 2.0], "y": [3.0, 5.0]}).fit is None
+
+    def test_no_fit_when_every_x_is_identical(self):
+        """Reached through Pearson, not regression. `linregress` raises on a
+        constant x — so `linear-regression` has always answered that request
+        with a 422, which is left alone — while `pearsonr` returns NaN quietly.
+        The guard's job is that adding a line to draw does not turn the second
+        of those into the first."""
+        outcome = run_test("pearson", {"x": [2.0, 2.0, 2.0, 2.0], "y": [1.0, 2.0, 3.0, 4.0]})
+        assert outcome.fit is None
+
+    def test_regression_on_identical_x_still_refuses_as_it_always_has(self):
+        with pytest.raises(ValueError, match="all x values are identical"):
+            run_test("linear-regression", {"x": [2.0, 2.0, 2.0], "y": [1.0, 2.0, 3.0]})
+
+    def test_alpha_reaches_the_multiplier(self):
+        """The band follows the analysis's own alpha rather than a hardcoded
+        95%. R: qt(0.995, 9) = 3.249836."""
+        fit = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}, alpha=0.01).fit
+        assert fit is not None
+        assert fit.confidenceLevel == pytest.approx(0.99)
+        assert fit.tMultiplier == pytest.approx(3.249836, abs=1e-5)
+
+    def test_fit_survives_the_separate_x_path(self):
+        """The x=/x_name= fold must produce the identical fit, not merely an
+        identical p-value — it is the path every scatter plot in the app takes."""
+        direct = run_test("linear-regression", {"x": ANS_X, "y": ANS_Y}).fit
+        via_x = run_test("linear-regression", {"y": ANS_Y}, x=ANS_X, x_name="x").fit
+        assert direct is not None and via_x is not None
+        assert via_x.slope == pytest.approx(direct.slope, abs=1e-12)
+        assert via_x.intercept == pytest.approx(direct.intercept, abs=1e-12)
+
+    def test_other_tests_carry_no_fit(self):
+        assert run_test("ttest-welch", {"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]}).fit is None
 
 
 class TestChiSquare:

@@ -109,6 +109,27 @@ export type SceneRole =
    * style controls, and a zero line follows neither.
    */
   | 'zero-line'
+  /**
+   * The least-squares line drawn from a plot's own correlation or regression
+   * analysis.
+   *
+   * Distinct from 'line', which is a data series' own connecting path, for the
+   * standing reason: an assertion counting the lines a plot draws for its
+   * series must not silently start counting a fit as well. Solid, not dashed —
+   * in this renderer a dashed stroke means a reference or a threshold, and the
+   * fit is neither.
+   */
+  | 'trend-line'
+  /**
+   * The confidence or prediction band around a 'trend-line'.
+   *
+   * Distinct from 'error-bar', which draws a series' own measured interval, so
+   * that a count of drawn error bands stays a count of error bands. Whether a
+   * given band is the confidence or the prediction interval is the plot node's
+   * setting, not a second role: they are one drawing of one fit, differing only
+   * in a term of the half-width.
+   */
+  | 'trend-band'
   /** One heatmap cell. */
   | 'heatmap-cell'
   /**

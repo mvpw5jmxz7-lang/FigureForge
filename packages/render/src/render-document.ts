@@ -16,6 +16,7 @@ import {
   GROUP_LABEL_RULE_TEXT_GAP_MM,
   GRID_PLOT_TYPES,
   LABELLED_POINT_PLOT_TYPES,
+  TREND_LINE_PLOT_TYPES,
   absoluteFrame,
   isLocked,
   childrenOf,
@@ -50,6 +51,7 @@ import {
   type PanelNode,
   type PlotNode,
   type RectMm,
+  type RegressionFit,
   type PointShape,
   type ScaleBarNode,
   type ShapeNode,
@@ -80,6 +82,7 @@ import {
   resolveHeatmapDomain,
   tickCountForLength,
   tickLabelRuns,
+  fitIntervalAt,
   foldFoldCategory,
   volcanoCategory,
   volcanoCurveClassifier,
@@ -3375,6 +3378,10 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
   const legend = placement === 'none' ? [] : renderLegend(node, theme, geometry, placement);
 
   if (geometry.kind === 'continuous') {
+    // Resolved once, placed twice — the band under the marks so the cloud reads
+    // over it, the line above them so the fit stays legible against a dense
+    // scatter. Two calls would be two chances to place them along different x.
+    const trend = resolveTrendFit(node, doc, theme, geometry);
     const area = group(
       { transform: translate(margin.left, margin.top) },
       [
@@ -3384,7 +3391,9 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
         ...renderVolcanoThresholds(node, theme, geometry),
         ...renderFoldFoldLines(node, theme, geometry),
         ...renderVolcanoSamCurve(node, theme, geometry),
+        ...trend.band,
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
+        ...trend.line,
         // After every mark, including the raster: a label emitted inside a
         // series group would paint under a baked point cloud, which is the
         // case that matters most — a real gene list is routinely over
@@ -3899,6 +3908,178 @@ function renderVolcanoSamCurve(
   };
 
   return [branch(curve.up), branch(curve.down)].filter((n): n is SceneNode => n !== null);
+}
+
+/**
+ * How many positions the fitted line and its band are evaluated at.
+ *
+ * A straight line needs two points only on a linear axis. On a log or symlog
+ * axis it is a curve on the page, and the band is a hyperbola on every axis, so
+ * both are sampled. One count for both, so the line and its own band share
+ * their x positions exactly and the line cannot appear to cross the band
+ * through a sampling artefact.
+ */
+const TREND_SAMPLES = 64;
+
+/**
+ * The stored fit for a plot, if it has one that can be drawn.
+ *
+ * `replaceAnalysisForPlot` guarantees at most one analysis per plot, so this is
+ * a `find`, not a search for the best of several. A result carrying no `fit` —
+ * every test but Pearson and linear regression, Spearman included — yields
+ * nothing, which is what keeps the Inspector's control and the drawing in step
+ * without either asking which test was run.
+ */
+function trendFitForPlot(node: PlotNode, doc: FigureDocument): RegressionFit | null {
+  const analysis = doc.analyses.find((a) => (a.plotId ?? null) === node.id);
+  return analysis?.result?.fit ?? null;
+}
+
+/**
+ * The fitted line and its band, placed — the ONE place a stored fit becomes
+ * geometry.
+ *
+ * Returns the two halves separately because they are emitted at different
+ * points of the paint order: the band goes under the marks, so the cloud reads
+ * over it, and the line goes over them, so the fit is legible against a dense
+ * scatter. Resolving once and placing twice is the same discipline that has
+ * `resolvePointLabels` serve both the drawing path and the drag hit-test —
+ * two resolutions could disagree about where the line runs.
+ */
+export function resolveTrendFit(
+  node: PlotNode,
+  doc: FigureDocument,
+  theme: Theme,
+  geometry: PlotGeometry,
+): { band: SceneNode[]; line: SceneNode[] } {
+  const nothing = { band: [], line: [] };
+  if (!TREND_LINE_PLOT_TYPES.has(node.plotType) || geometry.kind !== 'continuous') return nothing;
+  if ((node.trendLine ?? 'show') !== 'show') return nothing;
+  /*
+   * Withheld outright on a broken axis. A break states that a range is not
+   * shown; a line drawn straight across the gap asserts a continuity the axis
+   * has explicitly denied, and the fit was computed over the removed values
+   * too. The same stance that already refuses breaks on a log scale.
+   */
+  if (geometry.xScale.breaks?.length || geometry.yScale.breaks?.length) return nothing;
+
+  const fit = trendFitForPlot(node, doc);
+  if (!fit) return nothing;
+
+  /*
+   * Sampled at evenly spaced MILLIMETRE positions and inverted back to data,
+   * not stepped through the data range. That gives uniform resolution on the
+   * page whatever the scale kind — on a log or symlog axis a straight line in
+   * data space is a curve, and two endpoints would draw it as a chord.
+   */
+  const dataStart = geometry.xScale.scale(fit.xMin);
+  const dataEnd = geometry.xScale.scale(fit.xMax);
+  if (!Number.isFinite(dataStart) || !Number.isFinite(dataEnd)) return nothing;
+  const [startMm, endMm] =
+    (node.trendExtent ?? 'data') === 'axis'
+      ? [0, geometry.plotWidth]
+      : [Math.min(dataStart, dataEnd), Math.max(dataStart, dataEnd)];
+  if (!(endMm > startMm)) return nothing;
+
+  const interval = node.trendInterval ?? 'none';
+  const samples: { x: number; y: number; low: number; high: number }[] = [];
+  for (let i = 0; i < TREND_SAMPLES; i += 1) {
+    const xMm = startMm + ((endMm - startMm) * i) / (TREND_SAMPLES - 1);
+    const xValue = geometry.xScale.invert(xMm);
+    if (!Number.isFinite(xValue)) continue;
+    const point = fitIntervalAt(fit, xValue, interval === 'prediction' ? 'prediction' : 'confidence');
+    const y = geometry.yScale.scale(point.y);
+    if (!Number.isFinite(y)) continue;
+    samples.push({
+      x: xMm,
+      y,
+      low: geometry.yScale.scale(point.low),
+      high: geometry.yScale.scale(point.high),
+    });
+  }
+  if (samples.length < 2) return nothing;
+
+  const band: SceneNode[] = [];
+  if (interval !== 'none') {
+    /*
+     * Clamped to the plot area rather than clipped. The band is x-simple — one
+     * vertical interval per x — so intersecting it with the panel rectangle is
+     * exactly what clamping each edge produces, and where the clamped edges
+     * cross, the polygon closes on itself and paints nothing. `clipPolylineToRect`
+     * handles open polylines only and could not do this; an SVG clipPath would
+     * mean a `<defs>` block and per-node unique ids, which neither output
+     * adapter emits anywhere today.
+     */
+    const clamp = (v: number): number => Math.min(geometry.plotHeight, Math.max(0, v));
+    const usable = samples.filter((s) => Number.isFinite(s.low) && Number.isFinite(s.high));
+    if (usable.length > 1) {
+      // One closed polygon — out along the upper edge and back along the lower
+      // — for the reason the error band already gives: two adjacent translucent
+      // shapes double their alpha where they meet and print as a seam.
+      const upper = usable.map(
+        (s, i) => `${i === 0 ? 'M' : 'L'}${round(s.x)} ${round(clamp(s.high))}`,
+      );
+      const lower = [...usable].reverse().map((s) => `L${round(s.x)} ${round(clamp(s.low))}`);
+      band.push(
+        el(
+          'path',
+          {
+            d: `${upper.join(' ')} ${lower.join(' ')} Z`,
+            fill: theme.foreground,
+            /*
+             * Lighter than the 0.25 the error band uses, because the colour is
+             * different in kind: that band is filled in a mid-tone series
+             * colour, this one in the foreground, and black at the same alpha
+             * reads far heavier over a grey point cloud.
+             */
+            'fill-opacity': 0.15,
+            stroke: 'none',
+          },
+          undefined,
+          { role: 'trend-band' },
+        ),
+      );
+    }
+  }
+
+  const runs = clipPolylineToRect(
+    samples.map((s) => ({ x: s.x, y: s.y })),
+    geometry.plotWidth,
+    geometry.plotHeight,
+  );
+  const line: SceneNode[] = [];
+  if (runs.length > 0) {
+    // Every surviving run as a sub-path of one node, the same way the SAM
+    // boundary is drawn: a fit that leaves the panel and returns is still one
+    // line, and splitting it would make a `trend-line` role count depend on
+    // the data.
+    const d = runs
+      .map((run) => run.map((p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.y)}`).join(' '))
+      .join(' ');
+    line.push(
+      el(
+        'path',
+        {
+          d,
+          fill: 'none',
+          /*
+           * The foreground, not the series colour. On a fold-vs-fold plot the
+           * series colour is a palette entry the points never use — they are
+           * coloured per category — so a "series colour" line would match
+           * nothing on screen. Foreground reads as an annotation over the data
+           * and is legible in both themes.
+           */
+          stroke: theme.foreground,
+          'stroke-width': theme.stroke.dataMm,
+          'stroke-linecap': 'round',
+        },
+        undefined,
+        { role: 'trend-line' },
+      ),
+    );
+  }
+
+  return { band, line };
 }
 
 /**

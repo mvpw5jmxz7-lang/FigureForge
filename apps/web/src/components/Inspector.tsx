@@ -11,6 +11,7 @@
 import { useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  TREND_LINE_PLOT_TYPES,
   DEFAULT_FOLD_FOLD_THRESHOLDS,
   DEFAULT_VOLCANO_THRESHOLDS,
   GROUP_LABEL_GAP_MM,
@@ -551,6 +552,8 @@ function FoldFoldControls({
       </div>
       {conflicts.length > 0 && <ColorConflictWarning conflict={conflicts[0]!} />}
 
+      <TrendLineControls node={node} doc={doc} setPlot={setPlot} />
+
       <PointLabelControls
         node={node}
         doc={doc}
@@ -559,6 +562,127 @@ function FoldFoldControls({
         picking={picking}
         onLabelPickNodeChange={onLabelPickNodeChange}
       />
+    </>
+  );
+}
+
+/**
+ * The fitted line from this plot's own correlation or regression analysis.
+ *
+ * Rendered nothing at all until such an analysis exists: the line is drawn from
+ * a stored result, so before a test has been run every control here would move
+ * a field the renderer ignores — the standing "a control that visibly does
+ * nothing is a defect" rule, and the reason the heading lives inside the same
+ * condition rather than standing over an explanation of its own absence.
+ *
+ * Shared by the scatter and fold-vs-fold blocks, the same one-component-two-
+ * callers shape `PointLabelControls` has, so the two surfaces cannot drift.
+ */
+function TrendLineControls({
+  node,
+  doc,
+  setPlot,
+}: {
+  node: PlotNode;
+  doc: FigureDocument;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+}) {
+  if (!TREND_LINE_PLOT_TYPES.has(node.plotType)) return null;
+
+  // At most one analysis per plot — `replaceAnalysisForPlot` guarantees it —
+  // so this is a lookup, not a choice between several.
+  const analysis = doc.analyses.find((a) => (a.plotId ?? null) === node.id);
+  if (!analysis?.result) return null;
+
+  const fit = analysis.result.fit ?? null;
+  if (!fit) {
+    /*
+     * Spearman is the one case worth explaining: it is offered on these plot
+     * types, an author will run it expecting a line, and the absence is a
+     * deliberate refusal rather than a gap. Any other fit-less analysis here
+     * would have to be a leftover from a plot-type change, where a silent
+     * nothing is the right answer.
+     */
+    if (analysis.test !== 'spearman') return null;
+    return (
+      <>
+        <h4>Fitted line</h4>
+        <p className="hint">
+          Spearman measures how consistently the ranks move together, not how closely the points
+          sit on a straight line, so no line is drawn for it. Run Pearson or linear regression for
+          a fitted line.
+        </p>
+      </>
+    );
+  }
+
+  const broken = (node.x.breaks?.length ?? 0) > 0 || (node.y.breaks?.length ?? 0) > 0;
+  const interval = node.trendInterval ?? 'none';
+  const level = `${(fit.confidenceLevel * 100).toFixed(0)}%`;
+  const shown = (node.trendLine ?? 'show') === 'show';
+
+  return (
+    <>
+      <h4>Fitted line</h4>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={shown}
+          onChange={(e) => setPlot('Toggle fitted line', { trendLine: e.target.checked ? 'show' : 'hide' })}
+        />
+        Show the fitted line
+      </label>
+      {broken ? (
+        <p className="hint">
+          This plot&rsquo;s axis has a break, so no line is drawn. A break says a range is not
+          shown; a line running straight across the gap would claim a continuity the axis has
+          already ruled out.
+        </p>
+      ) : (
+        <>
+          <div className="field-row">
+            <label className="field">
+              Interval
+              <select
+                value={interval}
+                disabled={!shown}
+                onChange={(e) =>
+                  setPlot('Change fit interval', {
+                    trendInterval: e.target.value as 'none' | 'confidence' | 'prediction',
+                  })
+                }
+              >
+                <option value="none">None</option>
+                <option value="confidence">{level} confidence band</option>
+                <option value="prediction">{level} prediction band</option>
+              </select>
+            </label>
+            <label className="field">
+              Line spans
+              <select
+                value={node.trendExtent ?? 'data'}
+                disabled={!shown}
+                onChange={(e) =>
+                  setPlot('Change fit extent', { trendExtent: e.target.value as 'data' | 'axis' })
+                }
+              >
+                <option value="data">The data</option>
+                <option value="axis">The whole axis</option>
+              </select>
+            </label>
+          </div>
+          <p className="hint">
+            {`y = ${fit.slope.toFixed(3)}x ${fit.intercept < 0 ? '−' : '+'} ` +
+              `${Math.abs(fit.intercept).toFixed(3)} · n = ${fit.n}`}
+            {interval === 'confidence' &&
+              ` · the band covers where the fitted line itself lies, at ${level} confidence.`}
+            {interval === 'prediction' &&
+              ` · the band covers where a single new observation would fall, at ${level}. It is ` +
+                'always the wider of the two.'}
+            {interval === 'none' && '. Re-run the test in the Analysis tab if the data changes.'}
+          </p>
+        </>
+      )}
     </>
   );
 }
@@ -1810,6 +1934,13 @@ function PlotFields({
 
       {node.plotType === 'line' && series.length > 1 && (
         <CascadeControls node={node} doc={doc} theme={theme} series={series} setPlot={setPlot} />
+      )}
+
+      {/* Renders nothing until a correlation has been run on this plot, and is
+          the fold-vs-fold block's own copy above for that plot type — this call
+          site serves the scatter. */}
+      {node.plotType !== 'fold-fold' && (
+        <TrendLineControls node={node} doc={doc} setPlot={setPlot} />
       )}
 
       <h4>Axes</h4>

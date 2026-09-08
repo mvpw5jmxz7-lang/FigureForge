@@ -32,7 +32,7 @@ from .images.decode import DecodeError, TooLargeError, decode
 from .pca import compute_pca
 from .sam_volcano import compute_sam_volcano, compute_sam_volcano_one_sample
 from .stats.methods import methods_sentence, software_versions
-from .stats.tests import run_test
+from .stats.tests import RegressionFit, run_test
 from .umap import compute_umap
 
 logger = logging.getLogger("figureforge")
@@ -133,6 +133,21 @@ class OmnibusOut(BaseModel):
     df: list[float] | None
 
 
+class FitOut(BaseModel):
+    """The sufficient statistics of a fitted line — see `stats.tests.RegressionFit`."""
+
+    slope: float
+    intercept: float
+    n: int
+    meanX: float
+    sumSquaredDevX: float
+    residualSe: float
+    tMultiplier: float
+    confidenceLevel: float
+    xMin: float
+    xMax: float
+
+
 class AnalyzeResponse(BaseModel):
     test: str
     omnibus: OmnibusOut | None
@@ -140,6 +155,8 @@ class AnalyzeResponse(BaseModel):
     methodsSentence: str
     warnings: list[str]
     softwareVersions: dict[str, str]
+    #: Only for tests that fit a line, and only when the fit is real — see `_fit_out`.
+    fit: FitOut | None = None
 
 
 def _sanitize(value: float | None) -> float | None:
@@ -157,6 +174,31 @@ def _sanitize_or(value: float | None, fallback: float) -> float:
     instead is what actually distinguishes "not a real number" from "zero"."""
     sanitized = _sanitize(value)
     return sanitized if sanitized is not None else fallback
+
+
+def _fit_out(fit: RegressionFit | None) -> FitOut | None:
+    """A fit, or nothing — never a partly-finite one.
+
+    The same all-or-nothing rule `ci` above follows: a band drawn from a record
+    with one NaN term in it is not a narrower band, it is a wrong one. `n` is an
+    int and cannot be non-finite, so it is not part of the check.
+    """
+    if fit is None:
+        return None
+    values = {
+        "slope": _sanitize(fit.slope),
+        "intercept": _sanitize(fit.intercept),
+        "meanX": _sanitize(fit.meanX),
+        "sumSquaredDevX": _sanitize(fit.sumSquaredDevX),
+        "residualSe": _sanitize(fit.residualSe),
+        "tMultiplier": _sanitize(fit.tMultiplier),
+        "confidenceLevel": _sanitize(fit.confidenceLevel),
+        "xMin": _sanitize(fit.xMin),
+        "xMax": _sanitize(fit.xMax),
+    }
+    if any(v is None for v in values.values()):
+        return None
+    return FitOut(n=fit.n, **values)  # type: ignore[arg-type]
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -220,6 +262,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         methodsSentence=sentence,
         warnings=outcome.warnings,
         softwareVersions=software_versions(),
+        fit=_fit_out(outcome.fit),
     )
 
 

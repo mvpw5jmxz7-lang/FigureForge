@@ -216,6 +216,10 @@ const plotSchema = z.object({
     .optional(),
   foldFoldZeroLines: z.enum(['show', 'hide']).optional(),
   foldFoldCutoffLines: z.enum(['show', 'hide']).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  trendLine: z.enum(['show', 'hide']).optional(),
+  trendInterval: z.enum(['none', 'confidence', 'prediction']).optional(),
+  trendExtent: z.enum(['data', 'axis']).optional(),
   // Deliberately no `.max()` — see the field's own doc comment in nodes.ts.
   volcanoLabels: z.array(z.string()).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
@@ -455,12 +459,33 @@ const comparisonSchema = z.object({
   n: z.array(nonNeg),
 });
 
+/**
+ * Every term required, once the object is present at all: the service drops a
+ * fit whole rather than emitting a partial one, so a document either carries
+ * the complete set or none of it — the same all-or-nothing rule
+ * `foldFoldColors` follows for the same reason.
+ */
+const regressionFitSchema = z.object({
+  slope: finite,
+  intercept: finite,
+  n: z.number().int().positive(),
+  meanX: finite,
+  sumSquaredDevX: finite.positive(),
+  residualSe: finite.nonnegative(),
+  tMultiplier: finite,
+  confidenceLevel: finite.positive().max(1),
+  xMin: finite,
+  xMax: finite,
+});
+
 const statResultSchema = z.object({
   test: z.string(),
   omnibus: z
     .object({ statistic: finite, p: finite, df: z.array(finite).nullable() })
     .nullable(),
   comparisons: z.array(comparisonSchema),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  fit: regressionFitSchema.nullable().optional(),
   methodsSentence: z.string(),
   warnings: z.array(z.string()),
   softwareVersions: z.record(z.string()),
