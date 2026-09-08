@@ -12,6 +12,7 @@ import {
   LABELLED_POINT_PLOT_TYPES,
   analysisInputHash,
   effectiveDpi,
+  eventsForHash,
   findAsset,
   findDataset,
   isStale,
@@ -694,6 +695,7 @@ const checkStaleAnalyses: Rule = ({ document }) => {
       { test: analysis.test, correction: analysis.options.correction },
       series.map((s) => s.values),
       xForHash(series),
+      eventsForHash(analysis.test, dataset),
     );
     if (!isStale(analysis, current)) continue;
 

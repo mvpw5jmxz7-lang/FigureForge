@@ -25,6 +25,7 @@ import {
   toSeries,
   updateNode,
   analysisInputHash,
+  eventsForHash,
   xForHash,
   type CalibrationSource,
   type Dataset,
@@ -45,6 +46,15 @@ const XY_CSV = `Dose,Response
 4,7.8
 5,10.1
 6,12.4`;
+
+/** One row per subject: time, a 1/0 event flag, and the arm. */
+const SURVIVAL_CSV = `Time,Event,Arm
+9,1,Maintained
+13,1,Maintained
+13,0,Maintained
+23,1,Nonmaintained
+28,0,Nonmaintained
+31,1,Nonmaintained`;
 
 /** Three replicates per group — the sample size biology actually runs. */
 const SMALL = `Treatment,Rep1,Rep2,Rep3
@@ -1288,5 +1298,67 @@ describe('a stale analysis', () => {
     );
     const fresh = withCorrelation(current);
     expect(report(fresh).findings.filter((f) => f.id.startsWith('stale-analysis'))).toEqual([]);
+  });
+
+  it('says nothing about a log-rank result the moment it is stored', () => {
+    /*
+     * The regression: a log-rank run folds each subject's event flag into its
+     * stored hash, and this rule recomputed the hash without them —
+     * `analysisInputHash` branches on `events !== undefined`, so the two could
+     * never match and EVERY log-rank analysis reported itself stale at error
+     * severity, which gates export. Asserted end to end through `checkFigure`
+     * rather than on the hash alone, because the error is what an author sees.
+     */
+    const doc = editDocument(makeDocument(SURVIVAL_CSV, 'survival'), (draft) => {
+      // `inferFormat` never guesses this layout — a subject table reads exactly
+      // like three repeated measurements — so it is declared, as the Data tab's
+      // own dropdown declares it.
+      draft.datasets[0]!.format = 'survival';
+    });
+    const dataset = doc.datasets[0]!;
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const series = toSeries(dataset);
+
+    const stored = editDocument(doc, (draft) => {
+      draft.analyses = [
+        {
+          id: 'analysis-km',
+          name: 'log-rank on Viability',
+          test: 'log-rank',
+          spec: { datasetId: dataset.id, groups: series.map((s) => s.name) },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          // Exactly what the Stats tab's run path stores.
+          inputHash: analysisInputHash(
+            { test: 'log-rank', correction: 'none' },
+            series.map((s) => s.values),
+            xForHash(series),
+            eventsForHash('log-rank', dataset),
+          ),
+          result: {
+            test: 'log-rank',
+            omnibus: null,
+            comparisons: [],
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    expect(report(stored).findings.filter((f) => f.id.startsWith('stale-analysis'))).toEqual([]);
+
+    // And it still notices a real edit — one censored subject, with every time
+    // unchanged, so the flags are the only thing that can catch it.
+    const edited = editDocument(stored, (draft) => {
+      draft.datasets[0]!.rows = draft.datasets[0]!.rows.map((r, i) =>
+        i === 0 ? [r[0]!, 0, r[2]!] : r,
+      );
+    });
+    const finding = report(edited).findings.find((f) => f.id.startsWith('stale-analysis'));
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe('error');
   });
 });

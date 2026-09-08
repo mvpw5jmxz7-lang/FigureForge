@@ -17,6 +17,7 @@ import {
   DEFAULT_VOLCANO_THRESHOLDS,
   defaultAnalysisOptions,
   effectiveDpi,
+  eventsForHash,
   findAsset,
   findDataset,
   couldHaveRowNames,
@@ -2131,11 +2132,17 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         plotId: activePlot.id,
         options,
         // Hash the values too, so editing the data marks the result stale.
+        // Through `eventsForHash`, not the `survivalGroups` already in hand:
+        // the two places that recompute this to detect drift can only call the
+        // shared function, so deriving it a second way here is exactly how the
+        // stored hash and the recomputed one came to disagree over nothing.
+        // Same reason `xForHash` is called on the line above rather than
+        // reading `series[0].x` directly, which is equally available.
         inputHash: analysisInputHash(
           { test, correction },
           series.map((s) => s.values),
           xForHash(series),
-          survivalLogRank ? survivalGroups.map((g) => g.events) : undefined,
+          eventsForHash(test, dataset),
         ),
         result,
         computedAt: new Date().toISOString(),
@@ -2445,6 +2452,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
               { test: analysis.test, correction: analysis.options.correction },
               analysisSeries.map((s) => s.values),
               xForHash(analysisSeries),
+              eventsForHash(analysis.test, analysisDataset),
             )
           : analysis.inputHash;
         const stale = isStale(analysis, currentHash);

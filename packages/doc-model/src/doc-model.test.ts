@@ -45,6 +45,7 @@ import {
   toMatrix,
   toSeries,
   toSurvivalGroups,
+  eventsForHash,
   xForHash,
   type Dataset,
 } from './index.js';
@@ -4649,6 +4650,74 @@ describe('input hashing', () => {
         { name: 'b', values: [2], x: [2] },
       ]),
     ).toBeUndefined();
+  });
+
+  /**
+   * A survival table, the shape `toSurvivalGroups` reads: time, event flag,
+   * arm. Two arms so the events genuinely differ between groups — a single
+   * arm would hash the same whichever way the flags were grouped.
+   */
+  const survivalDataset = (censorFirst = false): Dataset => ({
+    ...dataset(
+      'Time,Event,Arm\n' +
+        `9,${censorFirst ? 0 : 1},Maintained\n` +
+        '13,1,Maintained\n13,0,Maintained\n' +
+        '23,1,Nonmaintained\n28,0,Nonmaintained\n31,1,Nonmaintained',
+    ),
+    format: 'survival',
+  });
+
+  it('the stored log-rank hash and the recomputed one agree', () => {
+    // The regression this exists for: the run path folded in the event flags
+    // while both places that recompute the hash called the 3-argument form,
+    // and `analysisInputHash` branches on `events !== undefined` — so every
+    // log-rank analysis reported itself permanently stale at error severity,
+    // which gates export. Both sides now derive the flags through
+    // `eventsForHash`, so the only way they can differ is a real data edit.
+    const ds = survivalDataset();
+    const options = { test: 'log-rank' as const, correction: 'none' as const };
+    const series = toSeries(ds);
+    const hashFor = (d: Dataset) => {
+      const s = toSeries(d);
+      return analysisInputHash(
+        options,
+        s.map((v) => v.values),
+        xForHash(s),
+        eventsForHash(options.test, d),
+      );
+    };
+
+    expect(hashFor(ds)).toBe(
+      analysisInputHash(
+        options,
+        series.map((s) => s.values),
+        xForHash(series),
+        toSurvivalGroups(ds).map((g) => g.events),
+      ),
+    );
+
+    // And it is still a real staleness check, not one that agrees with
+    // everything: censoring a subject who had an event changes nothing in
+    // `values` — the times are identical — so the flags are the only thing
+    // that can catch it.
+    const censored = survivalDataset(true);
+    expect(toSeries(censored).map((s) => s.values)).toEqual(series.map((s) => s.values));
+    expect(hashFor(censored)).not.toBe(hashFor(ds));
+  });
+
+  it('eventsForHash answers only for a log-rank test on a survival table', () => {
+    const ds = survivalDataset();
+    expect(eventsForHash('log-rank', ds)).toEqual([
+      [true, true, false],
+      [true, false, true],
+    ]);
+    // Another test on the same table folds in nothing, so its 4-argument call
+    // hashes exactly as the 3-argument one always did.
+    expect(eventsForHash('ttest-welch', ds)).toBeUndefined();
+    // And log-rank against a table that is not a survival table reads no
+    // columns positionally: `toSurvivalGroups` would hash whatever sat in the
+    // first three.
+    expect(eventsForHash('log-rank', { ...ds, format: 'replicate' })).toBeUndefined();
   });
 });
 

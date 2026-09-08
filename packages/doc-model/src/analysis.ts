@@ -9,7 +9,7 @@
  * Computation itself happens in the Python service; nothing here runs a test.
  */
 
-import type { Series } from './data.js';
+import { toSurvivalGroups, type Dataset, type Series } from './data.js';
 import type { AnalysisId, DatasetId, NodeId } from './nodes.js';
 
 export type StatTest =
@@ -257,4 +257,36 @@ export function analysisInputHash(
  */
 export function xForHash(series: readonly Series[]): readonly number[] | undefined {
   return series.length === 1 ? series[0]?.x : undefined;
+}
+
+/**
+ * The event flags to fold into an analysis's hash, if any.
+ *
+ * `xForHash`'s twin, and it exists for the same reason: the run path and the
+ * two places that *recompute* the hash to detect drift must derive the fourth
+ * argument identically, or an untouched figure reports itself stale. They did
+ * not. The run path passed a log-rank analysis's event flags while
+ * `checkStaleAnalyses` and the Stats tab's own staleness line each called the
+ * three-argument form — and `analysisInputHash` branches on
+ * `events !== undefined`, so the two hashes could never match. **Every**
+ * log-rank analysis was therefore permanently stale at `error` severity, which
+ * gates export.
+ *
+ * Takes the dataset rather than the `Series` the way `xForHash` does, because
+ * that is the whole reason the drift was possible: a subject's event flag has
+ * nowhere to travel in a `Series`, so it has to be read from the table through
+ * `toSurvivalGroups` — which is exactly the step the recompute sites had no way
+ * to know they were missing.
+ *
+ * The condition mirrors the run path's own `survival && test === 'log-rank'`
+ * rather than testing only the test name: `toSurvivalGroups` reads columns
+ * positionally, so asking it about a table that is not a survival table would
+ * hash whatever happened to sit in the first three columns.
+ */
+export function eventsForHash(
+  test: StatTest,
+  ds: Dataset,
+): readonly (readonly boolean[])[] | undefined {
+  if (test !== 'log-rank' || ds.format !== 'survival') return undefined;
+  return toSurvivalGroups(ds).map((g) => g.events);
 }

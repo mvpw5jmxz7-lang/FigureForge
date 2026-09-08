@@ -256,6 +256,24 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 49 (every log-rank result reported itself stale):** 1203
+TypeScript tests (1200 + 3), 204 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check acceptance
+run unaffected, and **10 live-browser checks in each of light and dark**. **No
+schema change and no new field** — one missing argument at two call sites, plus
+a third routed through the same function so the three cannot drift again.
+**Reproduced before it was changed**, rather than inferred from reading: on R's
+`aml` dataset the run path stored `753bee3d66414535` while both recompute sites
+produced `e0809e0aa32e7c98`, because `analysisInputHash` branches on
+`events !== undefined` and so selects a different grouping entirely. Measured on
+the running app, a freshly run log-rank showed an error-severity
+`no longer matches its data` finding, a staleness warning on its own result
+card, readiness **84 against 96**, and the export confirmation dialog. **The
+live harness was itself checked against the unfixed code** — reverted, all three
+of those checks fail in both themes — because the whole claim of this round is a
+negative, and a harness that passes either way would prove nothing. See
+"Round 49" below.
+
 **Verified after round 48 (the correlation line, with an optional confidence
 band):** 1200 TypeScript tests (1171 + 29: 10 in a new
 `packages/plots/src/regression.test.ts`, 12 in a `fitted line` pair of suites in
@@ -7300,7 +7318,74 @@ prediction band.
 gates export**. Correlation is unaffected — its fourth argument is `undefined`,
 taking the same branch as the 3-arg call, which is why this feature does not
 arrive looking broken. Confirmed by reading both call sites; left for its own
-round.
+round — **which is round 49, below.**
+
+---
+
+### Round 49 — every log-rank result reported itself stale
+
+The defect round 48 found while exploring and deliberately left alone, now
+fixed. It is one missing argument, and it made the app say a figure's data had
+changed on a test run seconds earlier.
+
+**Reproduced before anything was changed**, since "confirmed by reading" is not
+the standard this file holds itself to: on R's `aml` dataset the run path stores
+`753bee3d66414535` and both places that recompute the hash produce
+`e0809e0aa32e7c98`. `analysisInputHash` branches on `events !== undefined`, so
+the fourth argument does not merely change the input — it selects a different
+`hashInputs` grouping — and the two could never agree.
+
+**Measured on the running app, in both themes**: a freshly run log-rank went
+straight to a `"log-rank on Survival by arm" no longer matches its data` error,
+a `The data behind this test has changed` warning on its own result card,
+readiness **84 against 96**, and the export confirmation dialog in front of
+every attempt to leave the app.
+
+- **`eventsForHash(test, dataset)` is `xForHash`'s twin**, and the fix is that
+  all three sites now call it — including the run path, which had
+  `survivalGroups` already in hand. Deriving it a second way there is exactly
+  how the stored hash and the recomputed one came to disagree over nothing, and
+  it is why the run path already calls `xForHash(series)` on the line above
+  rather than reading `series[0].x`, which is equally available. One function
+  cannot disagree with itself; three call sites reproducing a condition can.
+- **It takes the dataset, not the `Series`** — and that asymmetry with
+  `xForHash` *is* the root cause rather than an inconsistency. A subject's event
+  flag has nowhere to travel in a `Series` (`toSeries`'s minimal `'survival'`
+  case carries the times alone), so it has to be read from the table through
+  `toSurvivalGroups`. That extra step is precisely what the two recompute sites
+  had no way to know they were missing.
+- **The condition mirrors the run path's own `survival && test === 'log-rank'`,
+  both halves.** `toSurvivalGroups` reads columns positionally, so asking it
+  about a table that is not a survival table would hash whatever happened to sit
+  in the first three columns. Reproducing the condition is not a defensive
+  guard; a test-name check alone would be a different, wrong function.
+- `analysis.ts` gains a value import from `data.ts`, which was previously
+  type-only. Checked rather than assumed: `data.ts` imports nothing but
+  `nodes.js`, and nothing in it reaches back, so the edge is one-directional.
+- **No schema change, no new field, no behaviour change to any other test.**
+  A non-log-rank analysis takes the `undefined` branch, so its hash is byte-for-
+  byte what it has always been — which is what keeps every already-saved
+  project's `inputHash` valid, the same rule the `x` parameter was added under
+  in phase 5.
+
+**Verified:** 1203 TypeScript tests (1200 + 3 new: two in `doc-model.test.ts` —
+the stored and recomputed hashes agreeing, and `eventsForHash` answering only
+for log-rank on a survival table — and one end-to-end in `quality.test.ts`
+asserting through `checkFigure` that a freshly stored result raises no finding),
+204 Python tests unchanged (nothing here touches `services/api`), `tsc --build
+--force` and `eslint .` clean, 46-check acceptance run unaffected, and **10
+live-browser checks in each of light and dark**. **Each new guard was confirmed
+to fail against the unfixed code**, and so was the live harness — reverted, it
+reports the staleness warning, the Quality error, readiness 84 and the export
+dialog, in both themes. A harness that passes either way would have proved
+nothing here, since the whole claim is a negative.
+
+**Not fixed, deliberately:** the staleness check still compares only the values,
+the x and now the event flags — not the *options* beyond test and correction,
+and not the dataset's column names. That is unchanged from phase 1 and was not
+what was reported. Nothing collects an analysis whose stored hash was written by
+the broken path: reopening such a project recomputes correctly and the finding
+simply goes away, so there is nothing to migrate.
 
 ---
 
