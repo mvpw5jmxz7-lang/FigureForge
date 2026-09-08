@@ -1951,3 +1951,223 @@ describe('the per-plot point-label limit', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fold change vs fold change
+// ---------------------------------------------------------------------------
+
+/**
+ * Four proteins, one per quadrant, plus one that clears neither cutoff and one
+ * that clears only x. Chosen so every branch of `foldFoldCategory` is reachable
+ * from a single fixture, and so the two "clears one axis only" cases sit on
+ * opposite axes.
+ */
+const FOLD_FOLD_CSV = `Gene,97Q/25Q,97Q/APEX
+UPUP,2.5,3.0
+DOWNDOWN,-2.5,-3.0
+UPDOWN,2.0,-2.2
+DOWNUP,-2.0,2.2
+FLAT,0.2,0.1
+XONLY,3.5,0.3`;
+
+function makeFoldFoldDocument(
+  patch: Partial<PlotNode> = {},
+  csv = FOLD_FOLD_CSV,
+  panelFrame = { x: 2, y: 2, width: 80, height: 60 },
+): FigureDocument {
+  const newId = createIdFactory();
+  const base = createDocument({
+    widthMm: 183,
+    heightMm: 75,
+    idFactory: newId,
+    now: () => '2026-01-01T00:00:00.000Z',
+  });
+
+  return editDocument(base, (draft) => {
+    const parsed = parseDelimited(csv);
+    const dataset: Dataset = {
+      id: newId(),
+      name: 'Two contrasts',
+      format: 'fold-fold',
+      columns: parsed.columns,
+      rows: parsed.rows,
+      sourcePath: 'data/ff.csv',
+      sourceFilename: 'ff.csv',
+      importedAt: '2026-01-01T00:00:00.000Z',
+    };
+    draft.datasets = [dataset];
+
+    addPanelWithPlot(draft, newId, {
+      frame: panelFrame,
+      name: 'Fold vs fold',
+      datasetId: dataset.id,
+      plotType: 'fold-fold',
+    });
+
+    for (const node of Object.values(draft.nodes)) {
+      if (node.type === 'plot') Object.assign(node, patch);
+    }
+  });
+}
+
+/** Point fill by gene name, read off the drawn markers' own `<title>`. */
+function fillByGene(doc: FigureDocument): Map<string | undefined, unknown> {
+  return new Map(
+    collectByRole(scene(doc), 'point').map((p) => [
+      p.children?.find((c) => c.tag === 'title')?.text,
+      p.attrs?.['fill'],
+    ]),
+  );
+}
+
+describe('fold change vs fold change', () => {
+  it('plots the y column as it arrives, with no transform', () => {
+    /*
+     * The property that separates this from a volcano, and the reason it is a
+     * separate plot type at all. A volcano takes -log10 of its y column, which
+     * on these values is NaN for every negative one — so half this fixture
+     * would simply vanish, and the survivors would be ordered by magnitude
+     * rather than by value.
+     *
+     * Asserted as the ordering, not as a spread: `-3.0` and `+3.0` have the
+     * same magnitude, so a transform that reads magnitude would place them
+     * together while a raw read puts them at opposite ends. Screen y grows
+     * downward, so a larger data value is a smaller `cy`.
+     */
+    const points = collectByRole(scene(makeFoldFoldDocument()), 'point');
+    expect(points).toHaveLength(6);
+
+    const cy = new Map(
+      points.map((p) => [p.children?.find((c) => c.tag === 'title')?.text, Number(p.attrs?.['cy'])]),
+    );
+    for (const value of cy.values()) expect(Number.isFinite(value)).toBe(true);
+    // y: UPUP 3.0 > DOWNUP 2.2 > FLAT 0.1 > UPDOWN -2.2 > DOWNDOWN -3.0
+    expect(cy.get('UPUP')!).toBeLessThan(cy.get('DOWNUP')!);
+    expect(cy.get('DOWNUP')!).toBeLessThan(cy.get('FLAT')!);
+    expect(cy.get('FLAT')!).toBeLessThan(cy.get('UPDOWN')!);
+    expect(cy.get('UPDOWN')!).toBeLessThan(cy.get('DOWNDOWN')!);
+  });
+
+  it('colours significant and not-significant in the default mode', () => {
+    const byGene = fillByGene(makeFoldFoldDocument({ foldFoldThresholds: { x: 1, y: 1 } }));
+    expect(byGene.get('UPUP')).toBe('#d73027');
+    expect(byGene.get('DOWNDOWN')).toBe('#d73027');
+    // One colour for every significant point, whichever quadrant — that is
+    // what "significant or not" means.
+    expect(byGene.get('UPDOWN')).toBe('#d73027');
+    expect(byGene.get('FLAT')).toBe('#999999');
+    // Clears x at 3.5 but not y at 0.3, and the default rule is `both`.
+    expect(byGene.get('XONLY')).toBe('#999999');
+  });
+
+  it('honours the either-axis rule', () => {
+    const byGene = fillByGene(
+      makeFoldFoldDocument({ foldFoldThresholds: { x: 1, y: 1, rule: 'either' } }),
+    );
+    expect(byGene.get('XONLY')).toBe('#d73027');
+    expect(byGene.get('FLAT')).toBe('#999999');
+  });
+
+  it('gives each quadrant its own colour in quadrant mode', () => {
+    const byGene = fillByGene(
+      makeFoldFoldDocument({ foldFoldThresholds: { x: 1, y: 1 }, foldFoldColorBy: 'quadrant' }),
+    );
+    // Four distinct colours where the significant mode drew one.
+    expect(
+      new Set([
+        byGene.get('UPUP'),
+        byGene.get('DOWNDOWN'),
+        byGene.get('UPDOWN'),
+        byGene.get('DOWNUP'),
+      ]).size,
+    ).toBe(4);
+    expect(byGene.get('FLAT')).toBe('#999999');
+    expect(byGene.get('XONLY')).toBe('#999999');
+  });
+
+  it('lets an author recolour one quadrant without touching the others', () => {
+    const byGene = fillByGene(
+      makeFoldFoldDocument({
+        foldFoldThresholds: { x: 1, y: 1 },
+        foldFoldColorBy: 'quadrant',
+        foldFoldColors: {
+          ns: '#999999',
+          sig: '#d73027',
+          'up-up': '#00ff00',
+          'down-down': '#4575b4',
+          'up-down': '#f0a30a',
+          'down-up': '#7b3294',
+        },
+      }),
+    );
+    expect(byGene.get('UPUP')).toBe('#00ff00');
+    expect(byGene.get('DOWNDOWN')).toBe('#4575b4');
+  });
+
+  it('draws zero lines by default and cutoff lines only on request', () => {
+    const plain = scene(makeFoldFoldDocument());
+    // One through x = 0, one through y = 0.
+    expect(collectByRole(plain, 'zero-line')).toHaveLength(2);
+    expect(collectByRole(plain, 'threshold-line')).toEqual([]);
+
+    const both = scene(makeFoldFoldDocument({ foldFoldCutoffLines: 'show' }));
+    expect(collectByRole(both, 'zero-line')).toHaveLength(2);
+    // ±x and ±y.
+    expect(collectByRole(both, 'threshold-line')).toHaveLength(4);
+
+    const neither = scene(makeFoldFoldDocument({ foldFoldZeroLines: 'hide' }));
+    expect(collectByRole(neither, 'zero-line')).toEqual([]);
+  });
+
+  it('refuses to draw a cutoff line the axis never reaches', () => {
+    /*
+     * A scale extrapolates outside its domain rather than returning NaN, so
+     * without the bounds test this would draw two lines beside the panel and
+     * over whatever sits next to it — the same defect round 16 fixed for the
+     * volcano's SAM curve.
+     */
+    const s = scene(
+      makeFoldFoldDocument({
+        foldFoldCutoffLines: 'show',
+        // The data reaches |3.5| in x and |3.0| in y; nothing is at 50.
+        foldFoldThresholds: { x: 50, y: 50 },
+      }),
+    );
+    expect(collectByRole(s, 'threshold-line')).toEqual([]);
+    // The zero lines are unaffected — they are inside the domain.
+    expect(collectByRole(s, 'zero-line')).toHaveLength(2);
+  });
+
+  it('refuses a zero line when the data never crosses zero', () => {
+    const allPositive = `Gene,A,B
+G1,1.5,2.0
+G2,2.5,3.0
+G3,3.5,4.0`;
+    const s = scene(makeFoldFoldDocument({}, allPositive));
+    expect(collectByRole(s, 'zero-line')).toEqual([]);
+    expect(collectByRole(s, 'point')).toHaveLength(3);
+  });
+
+  it('labels points, ranked by distance from the origin', () => {
+    /*
+     * The cap is what makes the order observable: with a limit of two, only
+     * the two furthest-out of the three requested names may be drawn. UPUP is
+     * at hypot(2.5, 3.0) = 3.91 and DOWNDOWN at 3.91; FLAT is at 0.22 and must
+     * lose. Ranked in DATA space, so a panel resize cannot change the answer.
+     */
+    const s = scene(
+      makeFoldFoldDocument({
+        volcanoLabels: ['UPUP', 'DOWNDOWN', 'FLAT'],
+        pointLabelLimit: 2,
+      }),
+    );
+    const drawn = collectByRole(s, 'point-label').map((n) => n.text);
+    expect(drawn).not.toContain('FLAT');
+    expect(drawn.length).toBeGreaterThan(0);
+    for (const name of drawn) expect(['UPUP', 'DOWNDOWN']).toContain(name);
+  });
+
+  it('draws no label until one is asked for', () => {
+    expect(collectByRole(scene(makeFoldFoldDocument()), 'point-label')).toEqual([]);
+  });
+});

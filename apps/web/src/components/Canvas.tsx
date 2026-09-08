@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  LABELLED_POINT_PLOT_TYPES,
   absoluteFrame,
   ancestorsOf,
   childrenOf,
@@ -328,7 +329,7 @@ export function Canvas({
 
   const labelPickCandidate = labelPickNodeId ? doc.nodes[labelPickNodeId] : undefined;
   const labelPickTarget =
-    labelPickCandidate?.type === 'plot' && labelPickCandidate.plotType === 'volcano'
+    labelPickCandidate?.type === 'plot' && LABELLED_POINT_PLOT_TYPES.has(labelPickCandidate.plotType)
       ? labelPickCandidate
       : null;
 

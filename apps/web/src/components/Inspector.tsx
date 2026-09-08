@@ -11,6 +11,7 @@
 import { useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  DEFAULT_FOLD_FOLD_THRESHOLDS,
   DEFAULT_VOLCANO_THRESHOLDS,
   GROUP_LABEL_GAP_MM,
   GROUP_LABEL_GAP_NO_RULE_MM,
@@ -63,11 +64,13 @@ import {
   type PointShape,
   type TextRun,
   type TextStyle,
+  type FoldFoldCategory,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
 import {
   DEFAULT_HEATMAP_MISSING_COLOR,
   DEFAULT_HEATMAP_STOPS,
+  DEFAULT_FOLD_FOLD_COLORS,
   DEFAULT_VOLCANO_COLORS,
   MAX_POINT_LABELS,
   MAX_POINT_LABEL_CEILING,
@@ -119,6 +122,7 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'line', label: 'Line' },
   { id: 'histogram', label: 'Histogram' },
   { id: 'volcano', label: 'Volcano' },
+  { id: 'fold-fold', label: 'Fold change vs fold change' },
   { id: 'heatmap', label: 'Heatmap' },
   { id: 'survival', label: 'Survival (Kaplan–Meier)' },
 ];
@@ -144,6 +148,7 @@ function typesFor(
   series: readonly { values: number[]; x?: number[]; pointLabels?: readonly string[] }[],
   hasMatrix: boolean,
   hasSurvival: boolean,
+  hasFoldFold: boolean,
 ): typeof OFFERED_PLOT_TYPES {
   const hasX = series.length > 0 && series.every((s) => s.x !== undefined && s.x.length > 0);
   const single = series.length === 1;
@@ -152,7 +157,16 @@ function typesFor(
   return OFFERED_PLOT_TYPES.filter((t) => {
     if (t.id === 'scatter' || t.id === 'line') return hasX;
     if (t.id === 'histogram') return single;
-    if (t.id === 'volcano') return hasLabels;
+    /*
+     * A fold-fold table satisfies `hasLabels` exactly as a differential one
+     * does — same three columns, same label in column 0 — so volcano has to
+     * be withheld from it explicitly. Drawing one would take -log10 of a
+     * log2 fold change: NaN for every down-regulated protein, which drops
+     * half the data and draws the rest confidently. The standing "a plot
+     * type the data cannot support is withheld, never approximated" rule.
+     */
+    if (t.id === 'volcano') return hasLabels && !hasFoldFold;
+    if (t.id === 'fold-fold') return hasFoldFold;
     if (t.id === 'heatmap') return hasMatrix;
     if (t.id === 'survival') return hasSurvival;
     return true;
@@ -363,7 +377,181 @@ function VolcanoColorControls({
       </div>
       {conflicts.length > 0 && <ColorConflictWarning conflict={conflicts[0]!} />}
 
-      <VolcanoLabelControls
+      <PointLabelControls
+        node={node}
+        doc={doc}
+        theme={theme}
+        setPlot={setPlot}
+        picking={picking}
+        onLabelPickNodeChange={onLabelPickNodeChange}
+      />
+    </>
+  );
+}
+
+const FOLD_FOLD_CATEGORY_LABELS: Record<FoldFoldCategory, string> = {
+  ns: 'Not significant',
+  sig: 'Significant',
+  'up-up': 'Up in both',
+  'down-down': 'Down in both',
+  'up-down': 'Up in x, down in y',
+  'down-up': 'Down in x, up in y',
+};
+
+/** Only the categories the current mode can actually produce get a swatch —
+ *  a colour control for a class nothing is ever classified into is the
+ *  standing "a control that visibly does nothing" defect. */
+const FOLD_FOLD_SWATCHES: Record<'significant' | 'quadrant', readonly FoldFoldCategory[]> = {
+  significant: ['sig', 'ns'],
+  quadrant: ['up-up', 'down-down', 'up-down', 'down-up', 'ns'],
+};
+
+/**
+ * Cutoffs, reference lines and per-category colours for a fold-vs-fold plot —
+ * in place of the ordinary per-series Colours block, for the same reason the
+ * volcano block replaces it: category colour wins over the series fallback for
+ * every valid point, so palette swatches would visibly do nothing.
+ */
+function FoldFoldControls({
+  node,
+  doc,
+  theme,
+  setPlot,
+  picking,
+  onLabelPickNodeChange,
+}: {
+  node: PlotNode;
+  doc: FigureDocument;
+  theme: Theme;
+  setPlot: (label: string, patch: Partial<PlotNode>) => void;
+  picking: boolean;
+  onLabelPickNodeChange: (id: NodeId | null) => void;
+}) {
+  const thresholds = node.foldFoldThresholds ?? DEFAULT_FOLD_FOLD_THRESHOLDS;
+  const colorBy = node.foldFoldColorBy ?? 'significant';
+  const colors = { ...DEFAULT_FOLD_FOLD_COLORS, ...node.foldFoldColors };
+  const shown = FOLD_FOLD_SWATCHES[colorBy];
+  // Only the colours actually on the page can conflict with each other; the
+  // hidden ones are not drawn, so warning about them would report a clash a
+  // reader will never see.
+  const conflicts = findColorConflicts(shown.map((category) => colors[category]));
+
+  const setCutoff = (axis: 'x' | 'y', raw: string): void => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) return;
+    setPlot('Change fold-change cutoff', {
+      foldFoldThresholds: { ...thresholds, [axis]: value },
+    });
+  };
+
+  return (
+    <>
+      <h4>Thresholds</h4>
+      <label className="field">
+        |log2 fold change| ≥ (x)
+        <input
+          type="number"
+          min={0}
+          step={0.1}
+          value={thresholds.x}
+          onChange={(e) => setCutoff('x', e.target.value)}
+        />
+      </label>
+      <label className="field">
+        |log2 fold change| ≥ (y)
+        <input
+          type="number"
+          min={0}
+          step={0.1}
+          value={thresholds.y}
+          onChange={(e) => setCutoff('y', e.target.value)}
+        />
+      </label>
+      <label className="field">
+        Colour by
+        <select
+          value={colorBy}
+          onChange={(e) =>
+            setPlot('Change fold-fold colouring', {
+              foldFoldColorBy: e.target.value as 'significant' | 'quadrant',
+            })
+          }
+        >
+          <option value="significant">Significant or not</option>
+          <option value="quadrant">Quadrant</option>
+        </select>
+      </label>
+      {/* Hidden in quadrant mode rather than disabled: a quadrant needs a
+          direction on both axes, so "either" has no meaning there and the
+          classifier does not read it. */}
+      {colorBy === 'significant' ? (
+        <label className="field">
+          Significant when the cutoff is met on
+          <select
+            value={thresholds.rule ?? 'both'}
+            onChange={(e) =>
+              setPlot('Change significance rule', {
+                foldFoldThresholds: { ...thresholds, rule: e.target.value as 'both' | 'either' },
+              })
+            }
+          >
+            <option value="both">both axes</option>
+            <option value="either">either axis</option>
+          </select>
+        </label>
+      ) : (
+        <p className="hint">
+          A quadrant needs a direction on both axes, so quadrant colouring always requires both
+          cutoffs to be met. A point clearing one cutoff but not the other stays grey.
+        </p>
+      )}
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={(node.foldFoldZeroLines ?? 'show') === 'show'}
+          onChange={(e) =>
+            setPlot('Change zero lines', { foldFoldZeroLines: e.target.checked ? 'show' : 'hide' })
+          }
+        />
+        Show lines through zero
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={(node.foldFoldCutoffLines ?? 'hide') === 'show'}
+          onChange={(e) =>
+            setPlot('Change cutoff lines', {
+              foldFoldCutoffLines: e.target.checked ? 'show' : 'hide',
+            })
+          }
+        />
+        Show cutoff lines
+      </label>
+      <p className="hint">
+        A line is drawn only where the axis actually reaches it, so a cutoff wider than your data
+        draws nothing rather than a line beside the panel.
+      </p>
+
+      <h4>Colours</h4>
+      <div className="swatches">
+        {shown.map((category) => (
+          <label className="swatch" key={category} title={FOLD_FOLD_CATEGORY_LABELS[category]}>
+            <input
+              type="color"
+              value={colors[category]}
+              onChange={(e) =>
+                setPlot('Change fold-fold colour', {
+                  foldFoldColors: { ...colors, [category]: e.target.value },
+                })
+              }
+            />
+            <span>{FOLD_FOLD_CATEGORY_LABELS[category]}</span>
+          </label>
+        ))}
+      </div>
+      {conflicts.length > 0 && <ColorConflictWarning conflict={conflicts[0]!} />}
+
+      <PointLabelControls
         node={node}
         doc={doc}
         theme={theme}
@@ -380,8 +568,13 @@ function VolcanoColorControls({
  * a range in the Data tab's grid, or a click on the canvas — this is where
  * the current set is reviewed, toggled from the canvas, and pruned, since
  * every route unions into the same field rather than replacing it.
+ *
+ * Shared verbatim by the volcano and fold-vs-fold blocks: it was already
+ * generic — `volcanoLabels`, `pointLabelLimit` and `placedPointLabelsForPlot`
+ * are the same three things whichever plot type is drawing — and only its
+ * name said otherwise.
  */
-function VolcanoLabelControls({
+function PointLabelControls({
   node,
   doc,
   theme,
@@ -973,7 +1166,12 @@ function PlotFields({
   const dataset = findDataset(doc, node.datasetId);
   const series = dataset ? toSeries(dataset) : [];
   const colors = paletteColors(node.palette, Math.max(1, series.length));
-  const offered = typesFor(series, dataset?.format === 'matrix', dataset?.format === 'survival');
+  const offered = typesFor(
+    series,
+    dataset?.format === 'matrix',
+    dataset?.format === 'survival',
+    dataset?.format === 'fold-fold',
+  );
 
   /*
    * Whether a continuous plot has anything to summarise.
@@ -1215,6 +1413,15 @@ function PlotFields({
           node={node}
           doc={doc}
           dataset={dataset}
+          theme={theme}
+          setPlot={setPlot}
+          picking={picking}
+          onLabelPickNodeChange={onLabelPickNodeChange}
+        />
+      ) : node.plotType === 'fold-fold' ? (
+        <FoldFoldControls
+          node={node}
+          doc={doc}
           theme={theme}
           setPlot={setPlot}
           picking={picking}

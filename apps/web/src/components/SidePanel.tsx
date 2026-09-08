@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  LABELLED_POINT_PLOT_TYPES,
   addAsset,
   addBracket,
   addPanelWithImage,
@@ -157,6 +158,14 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
     id: 'differential',
     label: 'Feature, log2 fold change, p-value',
     hint: 'Three columns in this order: a feature name, an effect size and a significance value — plus an optional 4th column, an FDR/q-value per point (use the ‹ › buttons above to reorder columns first). A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran. If your significance column already is −log10(p) rather than a raw p-value, say so in the plot’s Inspector after import.',
+  },
+  {
+    // Beside the differential layout, and for the same reason the proteomics
+    // one is: all three are read off the same kind of export, and the only
+    // thing separating them is what the columns mean.
+    id: 'fold-fold',
+    label: 'Feature, log2 fold change, log2 fold change',
+    hint: 'Three columns in this order: a feature name, then the SAME feature’s log2 fold change in two different comparisons — 97Q/25Q against 97Q/APEX, treated-vs-control in two cell lines, and so on. Draws as a fold-vs-fold scatter with a cutoff on each axis, so you can see which proteins move together and which move only in one comparison. Its shape is identical to the layout above, and nothing in the numbers can tell an effect size from a p-value — so choose it explicitly. Correlation and linear regression *are* offered here, unlike a volcano: both axes are effect sizes this app never computed a significance value for.',
   },
   {
     // Directly under the differential layout: the two are neighbours in
@@ -1024,11 +1033,20 @@ function DataTab({
      * what keeps a row's label the same one the plot itself would draw.
      */
     const labelColumn = pointLabelColumnIndex(editing);
-    const volcanoPlot =
+    /*
+     * The plot this grid's rows can be labelled on — any type that draws point
+     * names, not volcano alone. `LABELLED_POINT_PLOT_TYPES` is the one place
+     * that says which those are, so this cannot fall behind the renderer the
+     * way it did when a fold-vs-fold plot drew labels the Data tab would not
+     * offer.
+     */
+    const labellablePlot =
       labelColumn !== null
         ? Object.values(doc.nodes).find(
             (n): n is PlotNode =>
-              n.type === 'plot' && n.plotType === 'volcano' && n.datasetId === editing.id,
+              n.type === 'plot' &&
+              LABELLED_POINT_PLOT_TYPES.has(n.plotType) &&
+              n.datasetId === editing.id,
           )
         : undefined;
 
@@ -1038,9 +1056,9 @@ function DataTab({
       return value === null || value === undefined ? null : String(value);
     };
 
-    const currentLabels = volcanoPlot?.volcanoLabels ?? [];
+    const currentLabels = labellablePlot?.volcanoLabels ?? [];
     const markedRows =
-      volcanoPlot &&
+      labellablePlot &&
       new Set(
         editing.rows
           .map((_, r) => r)
@@ -1050,10 +1068,10 @@ function DataTab({
           }),
       );
 
-    const labelLimit = volcanoPlot ? pointLabelLimit(volcanoPlot) : 0;
+    const labelLimit = labellablePlot ? pointLabelLimit(labellablePlot) : 0;
 
     let disabledReason: string | null = null;
-    if (volcanoPlot) {
+    if (labellablePlot) {
       if (currentLabels.length >= labelLimit) {
         disabledReason =
           `${labelLimit} labels is this plot's maximum — raise "Maximum labels" in the ` +
@@ -1066,7 +1084,7 @@ function DataTab({
         }
         if (usable.length === 0) {
           disabledReason =
-            'None of the selected rows have a usable label, fold change and p-value, or they are already on the plot.';
+            'None of the selected rows have a usable label and both coordinates, or they are already on the plot.';
         }
       }
     }
@@ -1079,7 +1097,7 @@ function DataTab({
         onRowRangeChange={setSelectedRowRange}
         markedRows={markedRows}
         rowAction={
-          volcanoPlot
+          labellablePlot
             ? {
                 label: 'Label these rows on the plot',
                 disabledReason,
@@ -1093,7 +1111,7 @@ function DataTab({
                   }
                   const next = [...currentLabels, ...toAdd].slice(0, labelLimit);
                   commit('Label points', (draft) => {
-                    const target = draft.nodes[volcanoPlot.id];
+                    const target = draft.nodes[labellablePlot.id];
                     if (target?.type === 'plot') target.volcanoLabels = next;
                   });
                 },

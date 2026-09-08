@@ -433,6 +433,25 @@ export function datasetFromText(
  * the groups, which the band labels already show.
  */
 export function axisTitlesFor(dataset: Dataset): { x?: string; y?: string } {
+  // `usable` is declared below and used by both paths; hoisted in reading order
+  // only, since a function declaration is available throughout.
+  /*
+   * A fold-vs-fold table is the one shape where each axis is fed by exactly
+   * one named column, so the "every column feeding this axis agrees" rule
+   * below has nothing to decide and would reject the honest answer: it reads
+   * `names.slice(1)` as the y candidates and finds two different names.
+   *
+   * Which makes it the opposite case to a volcano's, where `addPlot`
+   * hardcodes the titles because neither header names what is drawn. Here the
+   * headers are exactly the axis names an author wants — "97Q/25Q fold
+   * enrichment" — and neither column is transformed on the way to the page.
+   */
+  if (dataset.format === 'fold-fold') {
+    const x = usableAxisName(dataset.columns[1]?.name.trim());
+    const y = usableAxisName(dataset.columns[2]?.name.trim());
+    return { ...(x ? { x } : {}), ...(y ? { y } : {}) };
+  }
+
   if (!CONTINUOUS_X_FORMATS.has(dataset.format)) return {};
 
   const first = dataColumnOffset(dataset);
@@ -464,16 +483,22 @@ export function axisTitlesFor(dataset: Dataset): { x?: string; y?: string } {
       ? undefined
       : agreed(isPaired ? names.filter((_, i) => i % 2 === 1) : names.slice(1));
 
-  // `defaultColumnName` produces A, B, C… when there was no header row. Those
-  // are placeholders, not labels, and putting one on an axis is worse than
-  // leaving it blank for the author to fill.
-  const usable = (name: string | undefined): string | undefined =>
-    name !== undefined && name !== '' && !/^[A-Z]{1,2}$/.test(name) ? name : undefined;
-
   return {
-    ...(usable(x) ? { x: usable(x)! } : {}),
-    ...(usable(y) ? { y: usable(y)! } : {}),
+    ...(usableAxisName(x) ? { x: usableAxisName(x)! } : {}),
+    ...(usableAxisName(y) ? { y: usableAxisName(y)! } : {}),
   };
+}
+
+/**
+ * `defaultColumnName` produces A, B, C… when there was no header row. Those are
+ * placeholders, not labels, and putting one on an axis is worse than leaving it
+ * blank for the author to fill.
+ *
+ * Lifted out of `axisTitlesFor` so the fold-vs-fold branch above applies the
+ * identical rule rather than a second, drifting copy of it.
+ */
+function usableAxisName(name: string | undefined): string | undefined {
+  return name !== undefined && name !== '' && !/^[A-Z]{1,2}$/.test(name) ? name : undefined;
 }
 
 /** Layouts whose column 0 (or 1) is an x axis rather than a group label. */

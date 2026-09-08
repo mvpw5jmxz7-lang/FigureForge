@@ -256,6 +256,31 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 47 (a fold-change vs fold-change plot for proteomics):**
+1171 TypeScript tests (1141 + 30 new: 10 in a new
+`packages/plots/src/fold-fold.test.ts`, 5 in `doc-model.test.ts` plus a
+five-field archive round-trip, 10 in a `fold change vs fold change` suite in
+`continuous-axis.test.ts`, 2 parity fixtures — one vector, one above
+`MAX_VECTOR_POINTS` — and 2 in `sample.test.ts`), 190 Python tests unchanged
+(nothing here touches `services/api`), `tsc --build --force` and `eslint .`
+clean, 46-check acceptance run unaffected, **32 live-browser checks in each of
+light and dark**, a 3-check full-size gene-list pass and an 8-check export run.
+**No schema version bump**: five optional `PlotNode` fields, two widened enums.
+**Measured, not assumed** — the significance count is computed independently in
+the harness and compared against the drawn marks: on a 400-protein table
+**17 points draw red against 17 computed**, with 383 grey and nothing else;
+switching the rule to "either axis" takes it to **42**; quadrant mode draws
+**5 distinct fills** where the default drew 2, and recolouring one quadrant
+reaches the marks. A cutoff wider than the data draws **no** line beside the
+panel. 2,500 proteins bake to **one** raster node with the reference lines
+still vector, and an export carries both colours, the gene names and both axis
+titles into the file. **One real gap found by running it rather than reading
+it**: the Data tab's "Label these rows" action was still volcano-only, so a
+fold-fold plot drew labels the Data tab would not offer. **And two harness
+traps of my own**, both caught by measuring: the first run counted colours
+across *every* panel on the page and reported a bar-dot panel's, and a mouse
+click cannot reliably hit a 0.45 mm marker. See "Round 47" below.
+
 **Verified after round 46 (a volcano's point-label limit is the author's to
 raise):** 1141 TypeScript tests (1129 + 12 new: 3 in `point-labels.test.ts` for
 placing past the default and truncating at whatever `maxLabels` says, 8 in
@@ -6963,6 +6988,139 @@ matching point rather than misattribute one, and is not changed here.
 
 ---
 
+### Round 47 — a fold-change vs fold-change plot
+
+Requested with a reference figure (`reference-and-test-files/Picture 1.png`): a
+proteomics scatter of the same feature's log2 fold change in **two** contrasts —
+97Q/25Q against 97Q/APEX — a grey cloud with the significant proteins in red,
+dashed lines through zero on both axes, and named points with leaders.
+
+FigureForge could not draw it. The nearest type is the volcano plot, whose y
+axis is a −log10 transform of a p-value: pointed at two fold-change columns it
+would take −log10 of a negative number, silently dropping every
+down-regulated protein and ordering the survivors by magnitude rather than by
+value. That is the whole reason this is a separate plot type rather than a
+volcano with different colours.
+
+**Decisions taken with the user:** two-colour significant/not by default with a
+**Colour by** dropdown offering quadrants, and a swatch for every significant
+class; **zero lines and cutoff lines each independently toggleable**; and
+correlation offered on this plot.
+
+#### Most of it already existed
+
+Established by reading before writing, and it is why the round is small:
+
+- **The point-label surface was already generic.** `resolvePointLabels`,
+  `layoutPointLabels`, `pointLabelLimit`, `pointLabelOffsets`,
+  `pointLabelSizePt` and the Inspector's own label block name nothing
+  volcano-specific — only the *gates* on them did. Six of those now read one
+  `LABELLED_POINT_PLOT_TYPES` set in `nodes.ts`, spelled beside the union for
+  the reason `CONTINUOUS_X_PLOT_TYPES` is: six copies of a plot-type test is
+  six chances for the next labellable type to reach five of them.
+- **Correlation cost nothing.** `correlationPossible` already reads
+  `series.length === 1 && series[0]?.x !== undefined && !differential`, and a
+  fold-fold dataset satisfies it — only `differential` is excluded, and for a
+  stated reason that does not apply here (both axes are effect sizes this app
+  never computed a significance value for). Verified by reading the gate *and*
+  live: the Stats tab offers Pearson, Spearman and linear regression and
+  returns `r² = 0.58`.
+- **Rasterization was free.** A real gene list is 2,000–8,000 features, over
+  `MAX_VECTOR_POINTS`, and `planPointClouds` bakes per-point colour into the
+  raster already. It resolves colour through exactly one function — the one
+  generalised below — which is what kept this to a rename.
+
+#### `volcanoLabels` is reused, and the misnomer is deliberate
+
+A fold-fold plot names its points through the same field. Renaming it would be
+this project's first schema migration, bought for a nicer name; a parallel
+`foldFoldLabels` would fork all eight call sites that read it — the Data tab's
+action, the canvas overlay, two quality rules, the Inspector block and three
+render helpers. The field's own doc comment records both the reuse and why the
+name survives.
+
+#### Quadrant mode implies AND, by construction rather than by policy
+
+`foldFoldCategory` (a new `packages/plots/src/fold-fold.ts`, its own module
+because `volcano.ts` is about significance measured against effect) takes a
+cutoff per axis and a `rule` of `'both'` or `'either'`. The rule applies to the
+two-colour mode **only**: a point clearing x but not y has a direction on one
+axis and none on the other, so it belongs to no quadrant and there is nothing
+to colour it. So quadrant mode does not read `rule` at all, and the Inspector
+hides that control there rather than offering one that does nothing — with a
+unit test asserting `rule: 'either'` is ignored in quadrant mode, which is what
+pins the UI decision to the maths rather than to a comment.
+
+#### Two kinds of dashed line, kept apart
+
+`renderFoldFoldLines` draws zero lines (`'zero-line'`, a new role) and cutoff
+lines (the existing `'threshold-line'`), each on its own toggle, defaulting to
+zero-on and cutoff-off — four cutoff lines plus two zero lines is a busy panel,
+and the colours already say where the cutoffs fall. The roles are distinct
+because the two say different things, a quadrant boundary against a
+significance boundary, so a count of one must not include the other.
+
+Every line goes through the same in-bounds test `renderVolcanoThresholds` uses,
+and for the same reason: **a scale extrapolates outside its domain rather than
+returning NaN**, so a cutoff — or a zero — the data never reaches would be
+drawn beside the panel. Measured live: a cutoff of 50 on data reaching 3.5
+draws *no* x lines while the two y lines, still in range, stay.
+
+#### Axis titles: the opposite choice to volcano's, for the stated reason
+
+`addPlot` hardcodes a volcano's titles because the fold-change column is spelled
+inconsistently and the y axis is a transform of the p-value column, so neither
+header names what is drawn. Here both columns are plotted exactly as they
+arrive and their headers *are* the axis names an author wants, so
+`axisTitlesFor` gained a branch returning columns 1 and 2 by name — through the
+same placeholder filter (`usableAxisName`, lifted out rather than copied) that
+rejects the `A`/`B` a header-less paste produces. Confirmed live: both axes
+read `97Q/25Q fold enrichment` and `97Q/APEX fold enrichment`.
+
+#### Label ranking is in data space, not millimetres
+
+A volcano ranks candidates by significance then effect; a fold-fold plot has no
+significance value, so it ranks by **distance from the origin** — the one
+ordering that treats the two contrasts symmetrically, as the plot does. Both
+are computed through `xScale.invert`/`yScale.invert` rather than from the drawn
+positions: a panel's aspect would otherwise decide which protein is "further
+out", so the same figure resized would label a different set once the cap binds.
+
+#### One real gap, found by running it
+
+**The Data tab's "Label these rows" action was still volcano-only.** The plot
+drew labels perfectly and the Inspector offered the picker, but the grid's own
+route silently did nothing — `volcanoPlot` was found by
+`n.plotType === 'volcano'`. It now reads `LABELLED_POINT_PLOT_TYPES` and is
+named `labellablePlot`. Invisible to 1,171 green tests and to reading the
+renderer, because the defect was in the one surface neither covers.
+
+#### Two harness traps of my own
+
+- **The first live run counted colours across every panel on the page**, and
+  reported a sample bar-dot panel's palette as though it were this plot's —
+  "76 red against 17 computed". Every count is now scoped to the imported
+  plot's own `<g data-node-id>`, found from a planted protein name only the
+  generated table has.
+- **A mouse click cannot reliably hit a 0.45 mm marker** (~1.7 px at this
+  zoom): a single click on one reported "Nothing selected". The plot is now
+  selected through the Inspector's own "Go to" navigator by node id — exact,
+  and a route a real user has.
+
+Also measured, and worth recording because it is *not* this round's doing: a
+2,500-row paste takes ~30 s and a 3,000-row one ~40 s, because the paste box
+re-parses the whole table on every change. Confirmed **format-independent** —
+a plain replicate table of the same size is just as slow — so it is a
+pre-existing property of the import preview, not something this plot type
+introduced. Named here rather than fixed, since it was not what was asked for.
+
+**Not done, deliberately:** no p-value or FDR column for this format (both axes
+are effect sizes; significance here is the author's stated cutoff, which is
+what the request asked for); no diagonal *y = x* reference line, which the
+reference figure does not have; no density or contour shading of the cloud.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -7014,13 +7172,16 @@ Phases 5–9, with the actual entry points:
 
 ### Declared-but-missing things — check before trusting the types
 
-- **All 12 `PlotType` variants now render distinctly.** The dropdown is gated
+- **All 13 `PlotType` variants now render distinctly.** The dropdown is gated
   on what the *dataset* supports rather than on what is implemented (`typesFor`
   in `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
   supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
   series, since pooling groups invents a bimodal shape belonging to neither;
-  volcano needs a single series carrying `Series.pointLabels`, which only the
-  `differential` format supplies; heatmap needs a `matrix`-format dataset and
+  volcano needs a single series carrying `Series.pointLabels` **and a dataset
+  that is not `fold-fold`** — that format satisfies the label test exactly as
+  `differential` does, and a volcano drawn on it would take −log10 of a
+  negative fold change; fold-fold is gated on its own format for the mirror
+  reason; heatmap needs a `matrix`-format dataset and
   survival needs a `survival`-format dataset, both gated on the dataset's
   format directly rather than on a `Series`-derivable shape, since both bypass
   `Series` entirely (`toMatrix`/`toSurvivalGroups`).
@@ -7037,7 +7198,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`) is **optional**, so old files still load. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

@@ -246,14 +246,14 @@ describe('volcano dropped points', () => {
     const findings = reportFor(
       volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02'),
     ).findings;
-    expect(findings.filter((f) => f.id.startsWith('volcano-dropped-'))).toEqual([]);
+    expect(findings.filter((f) => f.id.startsWith('points-dropped-'))).toEqual([]);
   });
 
   it('discloses rows dropped for a missing or invalid cell', () => {
     const findings = reportFor(
       volcanoDocument('Gene,log2FC,p\nTP53,2.1,0.001\n,1.0,0.01\nMYC,n/a,0.02'),
     ).findings;
-    const finding = findings.find((f) => f.id.startsWith('volcano-dropped-'));
+    const finding = findings.find((f) => f.id.startsWith('points-dropped-'));
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe('info');
     expect(finding?.title).toContain('2');

@@ -98,6 +98,17 @@ export type SceneRole =
    * silently widened by another.
    */
   | 'threshold-line'
+  /**
+   * A fold-vs-fold plot's dashed line through x = 0 or y = 0.
+   *
+   * Distinct from 'threshold-line', which it sits alongside: the two are
+   * independently toggleable and say different things — a quadrant boundary
+   * against a significance boundary — so a count of one must not include the
+   * other. Distinct from 'gridline' for the same reason in the other
+   * direction: gridlines are a separate feature with their own colour and
+   * style controls, and a zero line follows neither.
+   */
+  | 'zero-line'
   /** One heatmap cell. */
   | 'heatmap-cell'
   /**

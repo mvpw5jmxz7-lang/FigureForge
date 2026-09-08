@@ -31,6 +31,7 @@ import {
   hashInputs,
   contingencyCategories,
   inferFormat,
+  pointLabelColumnIndex,
   mergedHeaderGroups,
   isContingency,
   loadArchive,
@@ -298,6 +299,50 @@ describe('delimited parsing', () => {
     expect(series[0]!.pointLabels).toEqual(['TP53']);
     expect(series[0]!.x).toEqual([2.1]);
     expect(series[0]!.values).toEqual([0.001]);
+  });
+
+  it('never infers fold-fold, which is the differential shape exactly', () => {
+    // Two effect sizes and an effect-size-plus-p-value are the same three
+    // columns of the same types. Neither is guessed; the author states which.
+    const columns = parseDelimited('Gene,97Q/25Q,97Q/APEX\nTP53,1.2,0.8').columns;
+    expect(inferFormat(columns)).not.toBe('fold-fold');
+    expect(inferFormat(columns)).not.toBe('differential');
+  });
+
+  it('reads a fold-fold table as one series with per-point labels', () => {
+    const table: Dataset = {
+      ...dataset('Gene,97Q/25Q,97Q/APEX\nTP53,2.1,1.7\nMYC,-1.8,-2.4\nEGFR,0.1,0.05'),
+      format: 'fold-fold',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(1);
+    // Column 1 is x and column 2 is y — the same read as `differential`, with
+    // no q-value column, since both numbers here are effect sizes.
+    expect(series[0]).toEqual({
+      name: 'Test',
+      values: [1.7, -2.4, 0.05],
+      x: [2.1, -1.8, 0.1],
+      pointLabels: ['TP53', 'MYC', 'EGFR'],
+    });
+    expect(series[0]).not.toHaveProperty('qValues');
+  });
+
+  it('drops a fold-fold row missing its label or either fold change', () => {
+    const table: Dataset = {
+      ...dataset('Gene,A,B\nTP53,2.1,1.7\n,1.0,1.0\nMYC,n/a,0.5\nEGFR,0.1,'),
+      format: 'fold-fold',
+    };
+    const series = toSeries(table);
+    expect(series[0]!.pointLabels).toEqual(['TP53']);
+  });
+
+  it('names the fold-fold label column, which is what makes labels selectable', () => {
+    const table: Dataset = { ...dataset('Gene,A,B\nTP53,1,2'), format: 'fold-fold' };
+    expect(pointLabelColumnIndex(table)).toBe(0);
+  });
+
+  it('opens a fold-fold table as a fold-fold plot', () => {
+    expect(defaultPlotTypeFor('fold-fold')).toBe('fold-fold');
   });
 
   it('reads a differential table\'s optional 4th column as per-point FDR/q-values', () => {
@@ -3421,6 +3466,56 @@ describe('.figureforge archive', () => {
         plotNode.volcanoThresholds = { foldChange: 1.5, pValue: 0.01 };
         plotNode.volcanoColors = { down: '#111111', ns: '#222222', up: '#333333' };
         plotNode.volcanoThresholdLines = 'hide';
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a fold-fold plot with all five of its new fields', () => {
+    /*
+     * zod strips a key present only on the TS type, so a round-trip is the
+     * check that matters — a missing `schema.ts` line would drop the field on
+     * save and the figure would open with its colours and cutoffs reset.
+     * Every one of the five is set to a non-default, or a dropped field could
+     * pass by coinciding with what the renderer would have used anyway.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Gene,97Q/25Q,97Q/APEX\nTP53,2.1,1.7\nMYC,-1.8,-2.4', newId()),
+        format: 'fold-fold',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Fold vs fold',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'fold-fold';
+        plotNode.foldFoldThresholds = { x: 1.5, y: 0.75, rule: 'either' };
+        plotNode.foldFoldColorBy = 'quadrant';
+        plotNode.foldFoldColors = {
+          ns: '#111111',
+          sig: '#222222',
+          'up-up': '#333333',
+          'down-down': '#444444',
+          'up-down': '#555555',
+          'down-up': '#666666',
+        };
+        plotNode.foldFoldZeroLines = 'hide';
+        plotNode.foldFoldCutoffLines = 'show';
       }
     });
 

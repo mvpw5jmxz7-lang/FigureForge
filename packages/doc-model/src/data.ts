@@ -122,6 +122,23 @@ export type DataFormat =
    */
   | 'differential'
   /**
+   * Feature, log2FC (x), log2FC (y) — one row per protein or gene, carrying
+   * the same feature's effect size in *two* comparisons: 97Q/25Q against
+   * 97Q/APEX, treated against control in two cell lines, and so on. Drawn as
+   * a fold-vs-fold scatter, where the question is whether the two contrasts
+   * agree.
+   *
+   * Exactly the same three-column shape as `differential`, and a separate
+   * member for exactly the reason `pca` and `umap` are separate from it and
+   * from each other: nothing at the cell level distinguishes two effect sizes
+   * from an effect size and a significance value, and reading one as the
+   * other is not a near miss. A `differential` table drawn this way would
+   * plot a p-value as a fold change; a fold-fold table drawn as a volcano
+   * would take −log10 of a negative number and silently drop every
+   * down-regulated protein. Never auto-inferred; the author states it.
+   */
+  | 'fold-fold'
+  /**
    * RowLabel,Col1,Col2,… — a dense matrix, one continuous numeric value per
    * (row, column) cell: a gene-expression table, a correlation matrix, a
    * distance matrix.
@@ -958,6 +975,18 @@ export function toSeries(ds: Dataset): Series[] {
       return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0, qIndex) }];
     }
 
+    case 'fold-fold': {
+      // The same read as `differential` above — a label and two numbers per
+      // row — with no q-value column: both numbers here are effect sizes, so
+      // there is no significance value to carry. What separates the two
+      // formats is what the second number *means*, which is why they are
+      // separate members and why this arm cannot simply be merged into that
+      // one: `differential` would offer an FDR column this shape never has.
+      const [labelCol, xCol, yCol] = ds.columns;
+      if (!labelCol || !xCol || !yCol) return [];
+      return [{ name: ds.name, ...numericPairsAt(ds, 1, 2, 0) }];
+    }
+
     case 'matrix': {
       /*
        * One series per cell, mirroring `contingency`'s reading — but this
@@ -1228,6 +1257,7 @@ export function rowNames(ds: Dataset): string[] {
 export function pointLabelColumnIndex(ds: Dataset): number | null {
   switch (ds.format) {
     case 'differential':
+    case 'fold-fold':
     case 'pca':
     case 'umap':
       return 0;

@@ -9,6 +9,7 @@
 
 import {
   absoluteFrame,
+  LABELLED_POINT_PLOT_TYPES,
   analysisInputHash,
   effectiveDpi,
   findAsset,
@@ -819,8 +820,9 @@ const checkPointCloudRasterization: Rule = ({ document, theme }) => {
 };
 
 /**
- * A volcano plot's rows dropped for a missing/non-numeric fold change, p-value
- * or label.
+ * A labelled-point plot's rows dropped for a missing/non-numeric label or
+ * either coordinate — a volcano's fold change and p-value, a fold-vs-fold
+ * plot's two fold changes.
  *
  * Disclosure, not a defect — the same stance as `checkPointCloudRasterization`
  * and `checkDistributionSampleSize`: nothing is silently miscounted, the
@@ -831,7 +833,7 @@ const checkVolcanoDroppedPoints: Rule = ({ document }) => {
   const findings: Finding[] = [];
 
   for (const node of Object.values(document.nodes)) {
-    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    if (node.type !== 'plot' || !LABELLED_POINT_PLOT_TYPES.has(node.plotType)) continue;
     const dataset = findDataset(document, node.datasetId);
     if (!dataset) continue;
 
@@ -840,12 +842,12 @@ const checkVolcanoDroppedPoints: Rule = ({ document }) => {
     if (dropped <= 0) continue;
 
     findings.push({
-      id: `volcano-dropped-${node.id}`,
+      id: `points-dropped-${node.id}`,
       severity: 'info',
       title: `${dropped.toLocaleString()} row${dropped === 1 ? '' : 's'} not plotted`,
       detail:
         `${dropped.toLocaleString()} of ${dataset.rows.length.toLocaleString()} rows had a ` +
-        'missing or non-numeric label, fold change or p-value and were left off the plot ' +
+        'missing or non-numeric label or coordinate and were left off the plot ' +
         'rather than placed at a position they were never measured at.',
       nodeIds: [node.id],
     });
@@ -875,7 +877,7 @@ const checkPointLabelPlacement: Rule = ({ document, scene }) => {
 
   const findings: Finding[] = [];
   for (const node of Object.values(document.nodes)) {
-    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    if (node.type !== 'plot' || !LABELLED_POINT_PLOT_TYPES.has(node.plotType)) continue;
     const requested = node.volcanoLabels?.length ?? 0;
     if (requested === 0) continue;
 
@@ -911,7 +913,7 @@ const checkDuplicatePointLabels: Rule = ({ document }) => {
   const findings: Finding[] = [];
 
   for (const node of Object.values(document.nodes)) {
-    if (node.type !== 'plot' || node.plotType !== 'volcano') continue;
+    if (node.type !== 'plot' || !LABELLED_POINT_PLOT_TYPES.has(node.plotType)) continue;
     const wanted = node.volcanoLabels;
     if (!wanted || wanted.length === 0) continue;
     const dataset = findDataset(document, node.datasetId);

@@ -703,6 +703,129 @@ describe('adapter parity', () => {
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
 
+  it('draws a fold-vs-fold plot identically through both adapters, quadrant-coloured', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited(
+      'Gene,97Q/25Q,97Q/APEX\nUPUP,2.5,3.0\nDOWNDOWN,-3.0,-2.5\nUPDOWN,2.2,-2.0\nFLAT,0.1,0.2',
+    );
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-fold-fold',
+        name: 'Two contrasts',
+        format: 'fold-fold',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/fold-fold.csv',
+        sourceFilename: 'fold-fold.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Fold vs fold',
+        datasetId: dataset.id,
+        plotType: 'fold-fold',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.foldFoldColorBy = 'quadrant';
+        node.foldFoldCutoffLines = 'show';
+        node.volcanoLabels = ['UPUP', 'DOWNDOWN'];
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(collectByRole(scene, 'point')).toHaveLength(4);
+    // Both line kinds present, and distinguishable by role — the assertion
+    // that stops a future change collapsing them into one.
+    expect(collectByRole(scene, 'zero-line')).toHaveLength(2);
+    expect(collectByRole(scene, 'threshold-line')).toHaveLength(4);
+    expect(collectByRole(scene, 'point-label').map((n) => n.text).sort()).toEqual([
+      'DOWNDOWN',
+      'UPUP',
+    ]);
+    // Three quadrants occupied plus the grey — four distinct fills, which is
+    // what would collapse to one if per-point resolution were ever dropped.
+    expect(new Set(collectByRole(scene, 'point').map((p) => p.attrs?.['fill'])).size).toBe(4);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('rasterizes a fold-vs-fold plot above MAX_VECTOR_POINTS, keeping its quadrant colours', () => {
+    /*
+     * The case a real proteomics list always hits: 2,000-8,000 features is
+     * over the threshold, so the whole cloud bakes to one raster. Per-point
+     * colour has to survive that, or every quadrant collapses to one shade the
+     * moment the table is a realistic size — visible only at scale, which is
+     * exactly why it is pinned here rather than left to the vector fixture.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    // Cycles through all four quadrants plus a near-origin point, so every
+    // category is present well past the threshold.
+    const rows = Array.from({ length: MAX_VECTOR_POINTS + 500 }, (_, i) => {
+      const quadrant = i % 5;
+      const mag = 2 + i * 0.0001;
+      const x = quadrant === 0 || quadrant === 2 ? mag : quadrant === 4 ? 0.1 : -mag;
+      const y = quadrant === 0 || quadrant === 3 ? mag : quadrant === 4 ? 0.1 : -mag;
+      return `G${i},${x},${y}`;
+    });
+    const parsed = parseDelimited(`Gene,A,B\n${rows.join('\n')}`);
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-fold-fold-cloud',
+        name: 'Two contrasts',
+        format: 'fold-fold',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/fold-fold-cloud.csv',
+        sourceFilename: 'fold-fold-cloud.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Fold cloud',
+        datasetId: dataset.id,
+        plotType: 'fold-fold',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.foldFoldColorBy = 'quadrant';
+    });
+
+    const plotNode = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const plans = planPointClouds(doc, NATURE_THEME);
+    expect(plans).toHaveLength(1);
+    // Four quadrants plus the grey, all reaching the raster path.
+    expect(new Set(plans[0]!.series[0]!.points.map((p) => p.color)).size).toBe(5);
+
+    const baked = renderDocument(doc, {
+      theme: NATURE_THEME,
+      pointRasters: new Map([[plotNode.id, 'data:image/png;base64,AAAA']]),
+    });
+    expect(collectByRole(baked, 'point-cloud').length).toBe(1);
+    expect(collectByRole(baked, 'point')).toEqual([]);
+    // The reference lines are vector regardless of how many points baked.
+    expect(collectByRole(baked, 'zero-line')).toHaveLength(2);
+  });
+
   it('rasterizes a volcano plot above MAX_VECTOR_POINTS with per-point colour surviving the bake', () => {
     const newId = createIdFactory();
     const base = createDocument({

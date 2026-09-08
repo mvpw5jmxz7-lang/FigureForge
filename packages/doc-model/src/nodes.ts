@@ -116,6 +116,7 @@ export type PlotType =
   | 'beeswarm'
   | 'histogram'
   | 'volcano'
+  | 'fold-fold'
   | 'heatmap'
   | 'survival';
 
@@ -139,7 +140,23 @@ export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(
   'line',
   'histogram',
   'volcano',
+  'fold-fold',
   'survival',
+]);
+
+/**
+ * The plot types that draw a name beside chosen points, on the same
+ * `volcanoLabels` field and through the same placement engine.
+ *
+ * Spelled once here, beside the union, for the reason
+ * `CONTINUOUS_X_PLOT_TYPES` is: six separate gates across the renderer, the
+ * quality checker and the canvas read it, and six copies of the same
+ * plot-type test is six chances for a new labellable type to be wired into
+ * five of them.
+ */
+export const LABELLED_POINT_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
+  'volcano',
+  'fold-fold',
 ]);
 
 /**
@@ -183,6 +200,40 @@ export interface VolcanoThresholds {
  * second copy.
  */
 export const DEFAULT_VOLCANO_THRESHOLDS: VolcanoThresholds = { foldChange: 1, pValue: 0.05 };
+
+/**
+ * Where a point sits relative to a fold-change cutoff on *each* of two axes.
+ *
+ * One union covering both colouring modes rather than two, so
+ * `PointGeometry.category` keeps its single string type and the colour lookup
+ * stays one record. `'sig'` is what the two-colour mode emits — the reference
+ * convention, one highlight against a grey cloud — and the four quadrant
+ * members are what the quadrant mode emits instead. `up-down` reads
+ * "up on x, down on y".
+ */
+export type FoldFoldCategory = 'ns' | 'sig' | 'up-up' | 'down-down' | 'up-down' | 'down-up';
+
+export interface FoldFoldThresholds {
+  /** |log2 fold change| on the x axis at or above which a point counts. */
+  x: number;
+  /** The same, on the y axis. The two are independent: two contrasts can
+   *  warrant different cutoffs, and forcing one value would say otherwise. */
+  y: number;
+  /**
+   * Whether a point must clear the cutoff on **both** axes or on **either**.
+   * Absent is `'both'`, the strict reading.
+   *
+   * Read only in the two-colour mode. Quadrant colouring implies `'both'` by
+   * construction — a point clearing x but not y belongs to no quadrant, so
+   * there would be nothing to colour it — which is why the Inspector hides
+   * this control there rather than offering one that does nothing.
+   */
+  rule?: 'both' | 'either';
+}
+
+/** Declared here for the reason `DEFAULT_VOLCANO_THRESHOLDS` is: `addPlot`
+ *  sets it and `doc-model` imports nothing internal. */
+export const DEFAULT_FOLD_FOLD_THRESHOLDS: FoldFoldThresholds = { x: 1, y: 1 };
 
 /**
  * A Perseus-style permutation (SAM) significance boundary: the two branches of
@@ -605,6 +656,41 @@ export interface PlotNode extends NodeBase {
    */
   volcanoTest?: VolcanoTestRecord;
   /**
+   * The per-axis |log2 fold change| cutoffs a fold-vs-fold plot classifies
+   * against. Absent is `DEFAULT_FOLD_FOLD_THRESHOLDS`. `fold-fold` only.
+   */
+  foldFoldThresholds?: FoldFoldThresholds;
+  /**
+   * Whether significant points take one colour or one per quadrant.
+   *
+   * Absent is `'significant'` — the reference convention, a single highlight
+   * against a grey cloud. `'quadrant'` distinguishes concordant from
+   * discordant change, which is the extra reading two axes make available.
+   */
+  foldFoldColorBy?: 'significant' | 'quadrant';
+  /** Colour per category. Absent falls back to the renderer's own defaults;
+   *  a partial record overrides only the categories it names. */
+  foldFoldColors?: Record<FoldFoldCategory, string>;
+  /**
+   * Whether dashed lines are drawn through x = 0 and y = 0.
+   *
+   * Absent is `'show'`: on a plot whose both axes are signed effect sizes,
+   * zero is the reading the eye needs first — which quadrant a protein is in
+   * — and it is what the reference figures draw. A string enum rather than a
+   * boolean for the reason `volcanoThresholdLines` is one.
+   */
+  foldFoldZeroLines?: 'show' | 'hide';
+  /**
+   * Whether dashed lines are drawn at ±`foldFoldThresholds.x`/`.y`.
+   *
+   * Absent is `'hide'`, the opposite default to `volcanoThresholdLines` and
+   * deliberately so: four cutoff lines plus two zero lines is a busy panel,
+   * and the colours already say where the cutoffs fall. Offered because an
+   * author who wants the boundary stated explicitly should not have to draw
+   * it by hand.
+   */
+  foldFoldCutoffLines?: 'show' | 'hide';
+  /**
    * Which points carry a drawn name, keyed on the LABEL STRING rather than a
    * row index.
    *
@@ -622,7 +708,16 @@ export interface PlotNode extends NodeBase {
    * Deliberately not capped in the schema: `loadArchive` throws on a
    * validation failure, so a `.max(25)` here would make a hand-edited file
    * unopenable. The cap is enforced in the UI and, as a backstop, by
-   * `layoutPointLabels` truncating in a defined order. Volcano only.
+   * `layoutPointLabels` truncating in a defined order.
+   *
+   * Read by every type in `LABELLED_POINT_PLOT_TYPES`, not only volcano — the
+   * fold-vs-fold plot names its points through this same field and the same
+   * placement engine. The `volcano` prefix is now a misnomer and is kept
+   * deliberately: it is a persisted key, so renaming it would be this
+   * project's first schema migration, bought for a nicer name. A parallel
+   * `foldFoldLabels` was the alternative and would fork all eight call sites
+   * that read this — the Data tab's action, the canvas overlay, two quality
+   * rules, the Inspector block and three render helpers.
    */
   volcanoLabels?: readonly string[];
   /**

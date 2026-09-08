@@ -133,6 +133,7 @@ const plotSchema = z.object({
     'beeswarm',
     'histogram',
     'volcano',
+    'fold-fold',
     'heatmap',
     'survival',
   ]),
@@ -195,6 +196,26 @@ const plotSchema = z.object({
     .object({ down: z.string(), ns: z.string(), up: z.string() })
     .optional(),
   volcanoThresholdLines: z.enum(['show', 'hide']).optional(),
+  /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
+  foldFoldThresholds: z
+    .object({ x: nonNeg, y: nonNeg, rule: z.enum(['both', 'either']).optional() })
+    .optional(),
+  foldFoldColorBy: z.enum(['significant', 'quadrant']).optional(),
+  // Every category required once the field is present, exactly as
+  // `volcanoColors` is: the Inspector writes the merged record, so a document
+  // either carries the whole set or none of it.
+  foldFoldColors: z
+    .object({
+      ns: z.string(),
+      sig: z.string(),
+      'up-up': z.string(),
+      'down-down': z.string(),
+      'up-down': z.string(),
+      'down-up': z.string(),
+    })
+    .optional(),
+  foldFoldZeroLines: z.enum(['show', 'hide']).optional(),
+  foldFoldCutoffLines: z.enum(['show', 'hide']).optional(),
   // Deliberately no `.max()` — see the field's own doc comment in nodes.ts.
   volcanoLabels: z.array(z.string()).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
@@ -396,6 +417,7 @@ const datasetSchema = z.object({
     'xy-replicates',
     'nested',
     'differential',
+    'fold-fold',
     'matrix',
     'survival',
     'pca',

@@ -47,6 +47,7 @@ import {
   absoluteFrame,
   childrenOf,
   CONTINUOUS_X_PLOT_TYPES,
+  DEFAULT_FOLD_FOLD_THRESHOLDS,
   DEFAULT_VOLCANO_THRESHOLDS,
   descendantsOf,
   isEffectivelyLocked,
@@ -202,6 +203,10 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     // volcano plot, not as a trend or a bar over features.
     case 'differential':
       return 'volcano';
+    // Two effect sizes for the same feature exist to be read against each
+    // other, not pooled into a bar over features or joined into a trend.
+    case 'fold-fold':
+      return 'fold-fold';
     // A dense matrix of values exists to be coloured, not to be pooled into
     // bars over its rows.
     case 'matrix':
@@ -310,6 +315,25 @@ export function addPlot(
     if (plot.x.title === '') plot.x.title = 'log2 fold change';
     if (plot.y.title === '') plot.y.title = '-log10(p-value)';
     plot.volcanoThresholds = DEFAULT_VOLCANO_THRESHOLDS;
+  }
+
+  /*
+   * The opposite choice to volcano's above, and for the opposite reason. A
+   * volcano's titles are hardcoded because the fold-change column is spelled
+   * inconsistently and the y axis is a transform of the p-value column, so
+   * neither header names what is drawn. Here both columns are plotted exactly
+   * as they arrive, and their headers are precisely the axis names an author
+   * wants ("97Q/25Q fold enrichment") — so the caller passes them, via
+   * `axisTitlesFor`, and these generic fallbacks fill in only where the header
+   * was a placeholder that function already refuses.
+   */
+  if (dataset && dataset.format === 'fold-fold') {
+    plot.plotType = 'fold-fold';
+    plot.errorBars = 'none';
+    plot.showPoints = true;
+    if (plot.x.title === '') plot.x.title = 'log2 fold change (x)';
+    if (plot.y.title === '') plot.y.title = 'log2 fold change (y)';
+    plot.foldFoldThresholds = DEFAULT_FOLD_FOLD_THRESHOLDS;
   }
 
   /*

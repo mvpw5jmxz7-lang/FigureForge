@@ -10,10 +10,12 @@ import {
   BRACKET_HEIGHT_MM,
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_BRACKET_GAP_MM,
+  DEFAULT_FOLD_FOLD_THRESHOLDS,
   DEFAULT_GROUP_LABEL_PT,
   DEFAULT_VOLCANO_THRESHOLDS,
   GROUP_LABEL_RULE_TEXT_GAP_MM,
   GRID_PLOT_TYPES,
+  LABELLED_POINT_PLOT_TYPES,
   absoluteFrame,
   isLocked,
   childrenOf,
@@ -56,6 +58,7 @@ import {
   type TextNode,
   type TextRun,
   type TextStyle,
+  type FoldFoldCategory,
   type VolcanoCategory,
 } from '@figureforge/doc-model';
 import { paletteColors, parseHex, toHex, type Theme } from '@figureforge/theme';
@@ -77,6 +80,7 @@ import {
   resolveHeatmapDomain,
   tickCountForLength,
   tickLabelRuns,
+  foldFoldCategory,
   volcanoCategory,
   volcanoCurveClassifier,
   xyMarks,
@@ -1688,6 +1692,84 @@ function continuousGeometry(
     };
   }
 
+  if (node.plotType === 'fold-fold') {
+    /*
+     * The volcano branch above, without its transform. Both axes are already
+     * the quantity being drawn — a log2 fold change in one contrast against
+     * the same feature's in another — so there is nothing to convert, and the
+     * classification reads the very numbers the axes show.
+     */
+    if (series.length !== 1) return null;
+    const raw = series[0]!;
+    if (!raw.x || raw.x.length === 0 || !raw.pointLabels || raw.pointLabels.length === 0) {
+      return null;
+    }
+
+    const thresholds = node.foldFoldThresholds ?? DEFAULT_FOLD_FOLD_THRESHOLDS;
+
+    /*
+     * `includeZero: false` on both, unlike volcano's y. A fold change is
+     * signed, so zero is a meaningful position rather than a baseline the
+     * axis must reach — and real data straddles it anyway. Forcing it would
+     * distort a comparison whose changes all ran one way, and the zero lines
+     * are already refused when they fall outside the domain, which is the
+     * honest outcome there.
+     */
+    const xScale = makeScale({
+      domain: resolveDomain(raw.x, {
+        min: node.x.min,
+        max: node.x.max,
+        includeZero: false,
+        padFraction: 0.08,
+        kind: node.x.scale,
+      }),
+      rangeMm: [0, plotWidth],
+      tickStep: node.x.tickStep,
+      kind: node.x.scale,
+      ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+      ...labelFormatOptions(node.x),
+      ...linthreshOptions(node.x),
+    });
+
+    const yScale = makeScale({
+      domain: resolveDomain(raw.values, {
+        min: node.y.min,
+        max: node.y.max,
+        includeZero: false,
+        padFraction: 0.08,
+        kind: node.y.scale,
+      }),
+      rangeMm: [plotHeight, 0],
+      tickStep: node.y.tickStep,
+      kind: node.y.scale,
+      ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
+      ...labelFormatOptions(node.y),
+      ...linthreshOptions(node.y),
+    });
+
+    return {
+      kind: 'continuous',
+      margin,
+      plotWidth,
+      plotHeight,
+      xScale,
+      yScale,
+      series: xyMarks([raw], {
+        x: xScale,
+        y: yScale,
+        showLine: false,
+        showPoints: true,
+        pointSizeMm: node.pointSizeMm,
+        colors,
+        classify: (xValue, yValue) =>
+          foldFoldCategory(xValue, yValue, thresholds, node.foldFoldColorBy ?? 'significant'),
+        clipToXRange: clipsToRange(node.x),
+        clipToYRange: [clipsToRange(node.y)],
+      }),
+      bins: [],
+    };
+  }
+
   // scatter and line: every series must carry its own paired x values.
   const xValues = series.flatMap((s) => [...(s.x ?? [])]).filter(Number.isFinite);
   if (xValues.length === 0) return null;
@@ -2821,7 +2903,7 @@ export function planPointClouds(doc: FigureDocument, theme: Theme): PointCloudPl
         sizeMm: node.pointSizeMm,
         stroke: node.pointStroke,
         points: s.points.map((p) => {
-          const color = resolveVolcanoColor(node, p.category);
+          const color = resolvePointCategoryColor(node, p.category);
           return { x: p.x, y: p.y, ...(color ? { color } : {}) };
         }),
       })),
@@ -3300,6 +3382,7 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
         ...renderGridlines(node, theme, geometry),
         ...renderCascadeAxis(node, theme, geometry),
         ...renderVolcanoThresholds(node, theme, geometry),
+        ...renderFoldFoldLines(node, theme, geometry),
         ...renderVolcanoSamCurve(node, theme, geometry),
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
         // After every mark, including the raster: a label emitted inside a
@@ -3559,16 +3642,124 @@ export const DEFAULT_VOLCANO_COLORS: Record<VolcanoCategory, string> = {
 };
 
 /**
- * A volcano point's colour, from its significance category — called from both
- * the vector path (`renderContinuousMarks`) and the raster path
- * (`planPointClouds`), in this one place, so the two cannot drift on what
- * colour a point gets. Only the resolved hex string crosses into `apps/web`'s
- * `pointRasters.ts`, as plain data on `PointCloudSeries.points[].color` — no
- * volcano-specific logic needs to live outside `packages/render`.
+ * Fold-vs-fold defaults.
+ *
+ * The two-colour mode reuses the volcano palette's own red and grey, which is
+ * the reference convention — one highlight against a cloud — and keeps the two
+ * plot types reading as the same family.
+ *
+ * The quadrant colours are the harder choice, and they are picked for what
+ * they have to survive rather than for how they look together: two of the four
+ * classes are concordant and two discordant, so the pairs must be
+ * distinguishable in greyscale and under a red-green deficiency both. Red and
+ * blue carry the concordant pair (the volcano's own up/down, for the same
+ * reason it chose them); the discordant pair takes purple and orange, which
+ * differ from each other and from the concordant two in lightness as well as
+ * hue. `findColorConflicts` is what actually checks this — see the palette
+ * test rather than trusting the description.
  */
-function resolveVolcanoColor(node: PlotNode, category: string | undefined): string | undefined {
-  if (category !== 'up' && category !== 'down' && category !== 'ns') return undefined;
-  return { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors }[category];
+export const DEFAULT_FOLD_FOLD_COLORS: Record<FoldFoldCategory, string> = {
+  ns: '#999999',
+  sig: '#d73027',
+  'up-up': '#d73027',
+  'down-down': '#4575b4',
+  'up-down': '#f0a30a',
+  'down-up': '#7b3294',
+};
+
+const VOLCANO_CATEGORIES = new Set<string>(['up', 'down', 'ns']);
+const FOLD_FOLD_CATEGORIES = new Set<string>([
+  'ns',
+  'sig',
+  'up-up',
+  'down-down',
+  'up-down',
+  'down-up',
+]);
+
+/**
+ * A classified point's colour — called from both the vector path
+ * (`renderContinuousMarks`) and the raster path (`planPointClouds`), in this
+ * one place, so the two cannot drift on what colour a point gets. Only the
+ * resolved hex string crosses into `apps/web`'s `pointRasters.ts`, as plain
+ * data on `PointCloudSeries.points[].color` — no category logic needs to live
+ * outside `packages/render`.
+ *
+ * Dispatches on the *category*, not on the plot type, because the two vocabularies
+ * are disjoint by construction: a fold-fold plot cannot emit `'up'` and a
+ * volcano cannot emit `'sig'`. An unrecognised category returns undefined and
+ * the caller falls back to the series colour, which is what every plot type
+ * that classifies nothing already relies on.
+ */
+function resolvePointCategoryColor(node: PlotNode, category: string | undefined): string | undefined {
+  if (category === undefined) return undefined;
+  if (VOLCANO_CATEGORIES.has(category)) {
+    return { ...DEFAULT_VOLCANO_COLORS, ...node.volcanoColors }[category as VolcanoCategory];
+  }
+  if (FOLD_FOLD_CATEGORIES.has(category)) {
+    return { ...DEFAULT_FOLD_FOLD_COLORS, ...node.foldFoldColors }[category as FoldFoldCategory];
+  }
+  return undefined;
+}
+
+/**
+ * The dashed reference lines on a fold-vs-fold plot: through zero on both
+ * axes, and at ±each cutoff.
+ *
+ * Two independent toggles rather than one, because they answer different
+ * questions. The zero lines say which quadrant a protein is in — the first
+ * thing the eye needs when both axes are signed, and what the published
+ * figures draw. The cutoff lines state the significance boundary the colours
+ * already imply, which an author may or may not want said twice; four of them
+ * plus the two zero lines is a busy panel, hence the opposite defaults.
+ *
+ * Every line goes through `withinPlot`, the same in-bounds test
+ * `renderVolcanoThresholds` uses and for the same reason: a scale
+ * extrapolates outside its domain rather than returning NaN, so a cutoff — or
+ * a zero — that the data never reaches would otherwise be drawn beside the
+ * panel instead of inside it.
+ */
+function renderFoldFoldLines(node: PlotNode, theme: Theme, geometry: PlotGeometry): SceneNode[] {
+  if (node.plotType !== 'fold-fold' || geometry.kind !== 'continuous') return [];
+
+  const dashAttrs = {
+    fill: 'none',
+    stroke: theme.foreground,
+    'stroke-width': theme.stroke.hairlineMinMm,
+    'stroke-dasharray': '1.5 1',
+    'stroke-opacity': 0.5,
+  };
+
+  const lines: SceneNode[] = [];
+  const vertical = (value: number, role: SceneRole): void => {
+    const x = geometry.xScale.scale(value);
+    if (!Number.isFinite(x) || x < 0 || x > geometry.plotWidth) return;
+    lines.push(
+      el('path', { d: `M${round(x)} 0 L${round(x)} ${round(geometry.plotHeight)}`, ...dashAttrs }, undefined, {
+        role,
+      }),
+    );
+  };
+  const horizontal = (value: number, role: SceneRole): void => {
+    const y = geometry.yScale.scale(value);
+    if (!Number.isFinite(y) || y < 0 || y > geometry.plotHeight) return;
+    lines.push(
+      el('path', { d: `M0 ${round(y)} L${round(geometry.plotWidth)} ${round(y)}`, ...dashAttrs }, undefined, {
+        role,
+      }),
+    );
+  };
+
+  if ((node.foldFoldZeroLines ?? 'show') === 'show') {
+    vertical(0, 'zero-line');
+    horizontal(0, 'zero-line');
+  }
+  if ((node.foldFoldCutoffLines ?? 'hide') === 'show') {
+    const t = node.foldFoldThresholds ?? DEFAULT_FOLD_FOLD_THRESHOLDS;
+    for (const value of [-t.x, t.x]) vertical(value, 'threshold-line');
+    for (const value of [-t.y, t.y]) horizontal(value, 'threshold-line');
+  }
+  return lines;
 }
 
 /**
@@ -3712,13 +3903,20 @@ function renderVolcanoSamCurve(
 
 /**
  * Which points get a label, in the order `layoutPointLabels` should place
- * them — sorted by the DATA, never by the order the author clicked: most
- * significant first, so it wins the best slot and survives the cap if one
+ * them — sorted by the DATA, never by the order the author clicked: the most
+ * notable point first, so it wins the best slot and survives the cap if one
  * binds. So canvas and export agree, and re-selecting the same set in a
  * different order changes nothing on the page.
+ *
+ * "Most notable" is per plot type, because the two axes mean different things.
+ * A volcano ranks by significance, then by effect. A fold-vs-fold plot has no
+ * significance value at all — both axes are effects — so it ranks by distance
+ * from the origin, which is the one ordering that treats the two contrasts
+ * symmetrically, as the plot itself does. Both fall back to the label for a
+ * total order, so neither depends on the order `points` happens to arrive in.
  */
-function volcanoLabelCandidates(node: PlotNode, geometry: ContinuousPlotGeometry): LabelCandidate[] {
-  if (node.plotType !== 'volcano') return [];
+function pointLabelCandidates(node: PlotNode, geometry: ContinuousPlotGeometry): LabelCandidate[] {
+  if (!LABELLED_POINT_PLOT_TYPES.has(node.plotType)) return [];
   const wanted = node.volcanoLabels;
   if (!wanted || wanted.length === 0) return [];
   const wantedSet = new Set(wanted);
@@ -3727,19 +3925,35 @@ function volcanoLabelCandidates(node: PlotNode, geometry: ContinuousPlotGeometry
   if (!series) return [];
 
   const matches = series.points.filter((p) => p.label !== undefined && wantedSet.has(p.label));
-  matches.sort((a, b) => {
-    if (b.value !== a.value) return b.value - a.value; // descending -log10(p)
-    const aFc = Math.abs(geometry.xScale.invert(a.x));
-    const bFc = Math.abs(geometry.xScale.invert(b.x));
-    if (bFc !== aFc) return bFc - aFc; // descending |fold change|
-    return (a.label ?? '').localeCompare(b.label ?? '');
-  });
+
+  // Ranked in DATA space, never in millimetres: a panel's aspect would
+  // otherwise decide which protein is "further out", so the same figure
+  // resized would label a different set once the cap binds.
+  const dataX = (p: (typeof matches)[number]): number => geometry.xScale.invert(p.x);
+  const dataY = (p: (typeof matches)[number]): number => geometry.yScale.invert(p.y);
+
+  if (node.plotType === 'fold-fold') {
+    matches.sort((a, b) => {
+      const aD = Math.hypot(dataX(a), dataY(a));
+      const bD = Math.hypot(dataX(b), dataY(b));
+      if (bD !== aD) return bD - aD;
+      return (a.label ?? '').localeCompare(b.label ?? '');
+    });
+  } else {
+    matches.sort((a, b) => {
+      if (b.value !== a.value) return b.value - a.value; // descending -log10(p)
+      const aFc = Math.abs(dataX(a));
+      const bFc = Math.abs(dataX(b));
+      if (bFc !== aFc) return bFc - aFc; // descending |fold change|
+      return (a.label ?? '').localeCompare(b.label ?? '');
+    });
+  }
 
   return matches.map((p) => ({
     x: p.x,
     y: p.y,
     text: p.label!,
-    color: node.pointFill ?? resolveVolcanoColor(node, p.category) ?? series.color,
+    color: node.pointFill ?? resolvePointCategoryColor(node, p.category) ?? series.color,
   }));
 }
 
@@ -3790,7 +4004,7 @@ export function pointLabelLimit(node: PlotNode): number {
  * neither can compute a different answer from the other.
  */
 function resolvePointLabels(node: PlotNode, theme: Theme, geometry: ContinuousPlotGeometry): ResolvedPointLabel[] {
-  const candidates = volcanoLabelCandidates(node, geometry);
+  const candidates = pointLabelCandidates(node, geometry);
   if (candidates.length === 0) return [];
 
   const fontSizePt = node.pointLabelSizePt ?? theme.type.annotationPt;
@@ -3850,9 +4064,9 @@ function resolvePointLabels(node: PlotNode, theme: Theme, geometry: ContinuousPl
 }
 
 /**
- * Drawn point names — currently volcano only, gated inside
- * `volcanoLabelCandidates` itself. Returns `[]` whenever `volcanoLabels` is
- * absent, so an existing figure that never used this is untouched byte for
+ * Drawn point names, for every type in `LABELLED_POINT_PLOT_TYPES` — gated
+ * inside `pointLabelCandidates` itself. Returns `[]` whenever `volcanoLabels`
+ * is absent, so an existing figure that never used this is untouched byte for
  * byte.
  *
  * Above `MAX_VECTOR_POINTS` this still works with no extra code: rasterizing
@@ -3917,7 +4131,9 @@ export interface PickablePoint {
 
 export function pickablePointsForPlot(node: PlotNode, doc: FigureDocument, theme: Theme): PickablePoint[] {
   const geometry = computePlotGeometry(node, doc, theme);
-  if (!geometry || geometry.kind !== 'continuous' || node.plotType !== 'volcano') return [];
+  if (!geometry || geometry.kind !== 'continuous' || !LABELLED_POINT_PLOT_TYPES.has(node.plotType)) {
+    return [];
+  }
   const series = geometry.series[0];
   if (!series) return [];
 
@@ -3949,7 +4165,9 @@ export interface PlacedPointLabel {
 
 export function placedPointLabelsForPlot(node: PlotNode, doc: FigureDocument, theme: Theme): PlacedPointLabel[] {
   const geometry = computePlotGeometry(node, doc, theme);
-  if (!geometry || geometry.kind !== 'continuous' || node.plotType !== 'volcano') return [];
+  if (!geometry || geometry.kind !== 'continuous' || !LABELLED_POINT_PLOT_TYPES.has(node.plotType)) {
+    return [];
+  }
   return resolvePointLabels(node, theme, geometry).map((label) => ({
     text: label.text,
     anchor: label.anchor,
@@ -4291,7 +4509,7 @@ function renderContinuousMarks(
       for (const point of s.points) {
         markChildren.push(
           markerNode(node, theme, point.x, point.y, {
-            fill: node.pointFill ?? resolveVolcanoColor(node, point.category) ?? s.color,
+            fill: node.pointFill ?? resolvePointCategoryColor(node, point.category) ?? s.color,
             ...(shape ? { shape } : {}),
             ...(point.label !== undefined ? { label: point.label } : {}),
           }),

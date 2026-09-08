@@ -125,6 +125,36 @@ describe('axisTitlesFor', () => {
     expect(axisTitlesFor(datasetFromText(XY_PAIRS_PASTE, 'Runs', 'd1'))).toEqual({});
   });
 
+  it('names a fold-fold plot\'s axes after its two contrast columns', () => {
+    /*
+     * The one shape where each axis is fed by exactly one named column, so
+     * the "every column feeding this axis agrees" rule has nothing to decide
+     * and would reject the honest answer — it reads both numeric columns as
+     * y candidates and finds two different names.
+     *
+     * The opposite case to a volcano's, where `addPlot` hardcodes the titles
+     * because neither header names what is drawn.
+     */
+    const ds = {
+      ...datasetFromText('Gene,97Q/25Q enrichment,97Q/APEX enrichment\nTP53,2.1,1.7', 'FF', 'd9'),
+      format: 'fold-fold' as const,
+    };
+    expect(axisTitlesFor(ds)).toEqual({
+      x: '97Q/25Q enrichment',
+      y: '97Q/APEX enrichment',
+    });
+  });
+
+  it('leaves a fold-fold axis untitled when the header was a placeholder', () => {
+    // `defaultColumnName` produces A, B, C… for a header-less paste; putting
+    // one on an axis is worse than leaving it for the author to fill.
+    const ds = {
+      ...datasetFromText('Gene,A,B\nTP53,2.1,1.7', 'FF', 'd10'),
+      format: 'fold-fold' as const,
+    };
+    expect(axisTitlesFor(ds)).toEqual({});
+  });
+
   it('takes the shared name of repeated x columns', () => {
     // The honest case for the same rule: every run really was measured against
     // a radius, so "Radius" is the x axis.

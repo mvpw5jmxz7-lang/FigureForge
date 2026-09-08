@@ -53,7 +53,10 @@ between "this is broken" and "this hasn't been built yet."
   anything is added to the figure.
 - **Every chart type on the menu is real**, not a placeholder: bar, dot,
   bar+dot, beeswarm, box, violin, scatter, line and histogram plots; plus the
-  more specialised omics/biostatistics types — **volcano plots**, **heatmaps**,
+  more specialised omics/biostatistics types — **volcano plots**,
+  **fold-change vs fold-change plots** (the same protein's change in two
+  different comparisons, plotted against each other, with a cutoff on each
+  axis), **heatmaps**,
   **Kaplan–Meier survival curves**, and **PCA**/**UMAP** dimensionality-
   reduction plots (run directly from an imported data matrix via a "Run PCA" /
   "Run UMAP" button). Which types are offered depends on the shape of your
