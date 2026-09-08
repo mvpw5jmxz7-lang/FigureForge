@@ -99,7 +99,14 @@ import {
   superscriptSizePt,
   truncateToWidth,
 } from './text-width.js';
-import { layoutPointLabels, nearestRectPoint, type LabelCandidate, type Rect } from './point-labels.js';
+import {
+  layoutPointLabels,
+  nearestRectPoint,
+  MAX_POINT_LABELS,
+  MAX_POINT_LABEL_CEILING,
+  type LabelCandidate,
+  type Rect,
+} from './point-labels.js';
 import { clipPolylineToRect } from './clip.js';
 
 /**
@@ -3751,6 +3758,27 @@ interface ResolvedPointLabel {
 }
 
 /**
+ * How many points this plot may name — the one place that answer is composed.
+ *
+ * The number used to be spelled at six sites across four files (the renderer,
+ * the canvas's cap test and its tooltip, the Data tab's disabled reason, the
+ * Inspector's hint and the Quality tab's disclosure), three of them as the
+ * literal "25" inside a sentence. That is the drift `scaleBarWidthMm`,
+ * `y2WidthMm` and `analysisInputHash` are each composed once to avoid, so
+ * every one of those sites reads this instead.
+ *
+ * Absent is `MAX_POINT_LABELS`. A stored value is clamped rather than trusted:
+ * the schema deliberately carries no bound (see the field's doc comment), so a
+ * hand-edited or future-authored file still opens, and its ambition is capped
+ * here where the cost is actually paid.
+ */
+export function pointLabelLimit(node: PlotNode): number {
+  const requested = node.pointLabelLimit;
+  if (requested === undefined || !Number.isFinite(requested)) return MAX_POINT_LABELS;
+  return Math.min(MAX_POINT_LABEL_CEILING, Math.max(1, Math.floor(requested)));
+}
+
+/**
  * Auto-places this volcano plot's requested point labels, then applies any
  * manual `pointLabelOffsets` on top — the "auto base, stored delta" split
  * `BracketNode.userOffsetMm` already uses, so a later change to which labels
@@ -3791,6 +3819,7 @@ function resolvePointLabels(node: PlotNode, theme: Theme, geometry: ContinuousPl
     plotWidth: geometry.plotWidth,
     plotHeight: geometry.plotHeight,
     pointRadiusMm,
+    maxLabels: pointLabelLimit(node),
     otherPointsMm,
   });
 

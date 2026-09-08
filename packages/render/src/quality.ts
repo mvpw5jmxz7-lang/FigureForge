@@ -40,7 +40,12 @@ import {
   relabelAllPanels,
   type Fix,
 } from './fixes.js';
-import { hasCascadeOffset, MAX_VECTOR_POINTS, planPointClouds } from './render-document.js';
+import {
+  hasCascadeOffset,
+  MAX_VECTOR_POINTS,
+  planPointClouds,
+  pointLabelLimit,
+} from './render-document.js';
 import { walkScene, walkWithOwner, type SceneNode } from './scene.js';
 import { SUPERSCRIPT_MIN_PT } from './text-width.js';
 
@@ -852,7 +857,7 @@ const checkVolcanoDroppedPoints: Rule = ({ document }) => {
 /**
  * A selected point label that did not make it onto the plot — the row no
  * longer has a valid label/fold change/p-value, the plot was too dense to fit
- * it even pushed out, or the 25-label cap was reached.
+ * it even pushed out, or the plot's own label limit was reached.
  *
  * Disclosure, not a defect — the same stance as `checkPointCloudRasterization`:
  * every value is still drawn, only the *name* beside it is missing, and the
@@ -885,8 +890,8 @@ const checkPointLabelPlacement: Rule = ({ document, scene }) => {
       detail:
         `${missing} selected label${missing === 1 ? '' : 's'} ${missing === 1 ? 'is' : 'are'} not ` +
         'drawn — the row may no longer have a valid label, fold change or p-value, the plot may ' +
-        'be too dense to fit it even pushed out, or the 25-label maximum was reached. Every value ' +
-        'is still drawn; only the name beside it is missing.',
+        `be too dense to fit it even pushed out, or this plot's ${pointLabelLimit(node)}-label ` +
+        'maximum was reached. Every value is still drawn; only the name beside it is missing.',
       nodeIds: [node.id],
     });
   }

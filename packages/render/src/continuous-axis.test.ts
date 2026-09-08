@@ -31,9 +31,11 @@ import {
   isCascadable,
   measurePlot,
   placedPointLabelsForPlot,
+  pointLabelLimit,
   renderCascadeAxis,
   type ContinuousPlotGeometry,
 } from './render-document.js';
+import { MAX_POINT_LABELS, MAX_POINT_LABEL_CEILING } from './point-labels.js';
 import { collectByRole, round } from './scene.js';
 import { toSvgString } from './svg-string.js';
 
@@ -1314,6 +1316,10 @@ function makeVolcanoDocument(
   csv: string,
   format: Dataset['format'],
   patch: Partial<PlotNode> = {},
+  /** Default is the small panel every earlier volcano test was written on.
+   *  Label-placement tests need a roomier one to be about the limit rather
+   *  than about running out of space. */
+  panelFrame = { x: 2, y: 2, width: 80, height: 60 },
 ): FigureDocument {
   const newId = createIdFactory();
   const base = createDocument({
@@ -1338,7 +1344,7 @@ function makeVolcanoDocument(
     draft.datasets = [dataset];
 
     addPanelWithPlot(draft, newId, {
-      frame: { x: 2, y: 2, width: 80, height: 60 },
+      frame: panelFrame,
       name: 'Volcano',
       datasetId: dataset.id,
       plotType: 'volcano',
@@ -1871,5 +1877,77 @@ describe('bracket anchoring on a continuous plot', () => {
     const doc = makeDocument(XY, 'bar');
     const plot = Object.values(doc.nodes).find((n): n is PlotNode => n.type === 'plot')!;
     expect(measurePlot(doc, plot, NATURE_THEME)!.categoryX.size).toBeGreaterThan(0);
+  });
+});
+
+describe('the per-plot point-label limit', () => {
+  /**
+   * Forty genes with distinct fold changes and p-values, on a panel big enough
+   * that whether a label draws is decided by the limit rather than by running
+   * out of room. `-log10(p)` is spread by construction so no two share a rank.
+   */
+  const MANY_GENES_CSV = ['Gene,log2FC,p']
+    .concat(
+      Array.from({ length: 40 }, (_, i) => {
+        const fc = (i % 2 === 0 ? 1 : -1) * (1.5 + (i % 10) * 0.4);
+        return `GENE${i},${fc},${Math.pow(10, -(12 - i * 0.25)).toExponential(6)}`;
+      }),
+    )
+    .join('\n');
+
+  function drawnCount(patch: Partial<PlotNode>): number {
+    const doc = makeVolcanoDocument(MANY_GENES_CSV, 'differential', patch, {
+      x: 2,
+      y: 2,
+      width: 170,
+      height: 110,
+    });
+    return collectByRole(scene(doc), 'point-label').length;
+  }
+
+  const everyGene = Array.from({ length: 40 }, (_, i) => `GENE${i}`);
+
+  it('draws no more than the default when no limit is set', () => {
+    expect(drawnCount({ volcanoLabels: everyGene })).toBeLessThanOrEqual(MAX_POINT_LABELS);
+  });
+
+  it('draws more than the default once the limit is raised', () => {
+    const base = drawnCount({ volcanoLabels: everyGene });
+    const raised = drawnCount({ volcanoLabels: everyGene, pointLabelLimit: 40 });
+    expect(base).toBe(MAX_POINT_LABELS);
+    expect(raised).toBeGreaterThan(base);
+  });
+
+  it('a limit below the default lowers it, so the field cuts both ways', () => {
+    expect(drawnCount({ volcanoLabels: everyGene, pointLabelLimit: 5 })).toBe(5);
+  });
+
+  describe('pointLabelLimit()', () => {
+    const plot = (patch: Partial<PlotNode>): PlotNode =>
+      ({ type: 'plot', plotType: 'volcano', ...patch }) as PlotNode;
+
+    it('is the default when the field is absent', () => {
+      expect(pointLabelLimit(plot({}))).toBe(MAX_POINT_LABELS);
+    });
+
+    it('honours a value between 1 and the ceiling', () => {
+      expect(pointLabelLimit(plot({ pointLabelLimit: 60 }))).toBe(60);
+    });
+
+    it('clamps to the ceiling rather than refusing an over-ambitious file', () => {
+      // The schema deliberately carries no `.max()` so such a file still opens
+      // (see the field's doc comment); this is where the ambition is capped.
+      expect(pointLabelLimit(plot({ pointLabelLimit: 100000 }))).toBe(MAX_POINT_LABEL_CEILING);
+    });
+
+    it('floors a fractional value and never returns less than one', () => {
+      expect(pointLabelLimit(plot({ pointLabelLimit: 7.9 }))).toBe(7);
+      expect(pointLabelLimit(plot({ pointLabelLimit: 0 }))).toBe(1);
+      expect(pointLabelLimit(plot({ pointLabelLimit: -5 }))).toBe(1);
+    });
+
+    it('falls back to the default for a non-finite value', () => {
+      expect(pointLabelLimit(plot({ pointLabelLimit: Number.NaN }))).toBe(MAX_POINT_LABELS);
+    });
   });
 });

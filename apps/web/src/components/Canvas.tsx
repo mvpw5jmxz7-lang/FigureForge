@@ -45,9 +45,9 @@ import {
   type ResizeHandle,
 } from '@figureforge/doc-model';
 import {
-  MAX_POINT_LABELS,
   measureAllPlots,
   pickablePointsForPlot,
+  pointLabelLimit,
   placedPointLabelsForPlot,
   reflowBrackets,
   renderDocument,
@@ -1509,7 +1509,8 @@ function PointPickOverlay({
     height: frame.height * pxPerMm,
   };
 
-  const atCap = (node.volcanoLabels?.length ?? 0) >= MAX_POINT_LABELS;
+  const limit = pointLabelLimit(node);
+  const atCap = (node.volcanoLabels?.length ?? 0) >= limit;
 
   const nearest = (event: {
     clientX: number;
@@ -1641,7 +1642,7 @@ function PointPickOverlay({
             style={{ left: hovered.xMm * pxPerMm, top: hovered.yMm * pxPerMm }}
           >
             {!hovered.labelled && atCap
-              ? '25 labels is the maximum — past that a key stops being readable and the leaders cross.'
+              ? `${limit} labels is this plot's maximum — raise it in the Inspector's Labels section.`
               : hovered.label}
           </div>
         </>

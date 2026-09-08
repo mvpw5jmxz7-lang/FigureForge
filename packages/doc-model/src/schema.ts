@@ -221,6 +221,10 @@ const plotSchema = z.object({
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   pointLabelOffsets: z.record(z.string(), pointSchema).optional(),
   pointLabelSizePt: finite.positive().optional(),
+  // Deliberately no `.max()`, for the reason `volcanoLabels` has none: a bound
+  // here would make a hand-edited file unopenable. The ceiling is applied when
+  // the value is read. See the field's own doc comment in nodes.ts.
+  pointLabelLimit: z.number().int().positive().optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   heatmapScale: z.enum(['sequential', 'diverging']).optional(),
   heatmapStops: z.array(z.string()).optional(),

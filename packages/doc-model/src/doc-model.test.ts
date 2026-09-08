@@ -3719,6 +3719,57 @@ describe('.figureforge archive', () => {
     expect(untouchedPlot?.type === 'plot' && 'pointLabelSizePt' in untouchedPlot).toBe(false);
   });
 
+  it('round-trips pointLabelLimit, including a value past the ceiling', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const build = (limit: number | undefined): FigureDocument =>
+      editDocument(base, (draft) => {
+        const ds: Dataset = {
+          ...dataset('Gene,log2FC,p\nTP53,2.1,0.001\nMYC,-1.8,0.02', newId()),
+          format: 'differential',
+        };
+        draft.datasets = [ds];
+        const { plot } = addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 80, height: 60 },
+          datasetId: ds.id,
+          name: 'Volcano',
+        });
+        const plotNode = draft.nodes[plot.id];
+        if (plotNode?.type === 'plot') {
+          plotNode.plotType = 'volcano';
+          if (limit !== undefined) plotNode.pointLabelLimit = limit;
+        }
+      });
+
+    const doc = build(60);
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    const plot = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(plot?.type === 'plot' && plot.pointLabelLimit).toBe(60);
+
+    // The schema carries no `.max()` on purpose: `loadArchive` throws on a
+    // validation failure, so a bound here would make a hand-edited file
+    // UNOPENABLE rather than merely over-ambitious. The ceiling is applied
+    // when the value is read, by `pointLabelLimit()` in packages/render.
+    const ambitious = build(100000);
+    const loadedAmbitious = loadArchive(saveArchive(buildArchiveContents(ambitious)));
+    const ambitiousPlot = Object.values(loadedAmbitious.document.nodes).find((n) => n.type === 'plot');
+    expect(ambitiousPlot?.type === 'plot' && ambitiousPlot.pointLabelLimit).toBe(100000);
+
+    // An archive written before the field existed loads with it absent, which
+    // is what makes 25 keep being the default for every figure already saved.
+    const untouched = build(undefined);
+    const loadedUntouched = loadArchive(saveArchive(buildArchiveContents(untouched)));
+    const untouchedPlot = Object.values(loadedUntouched.document.nodes).find((n) => n.type === 'plot');
+    expect(untouchedPlot?.type === 'plot' && 'pointLabelLimit' in untouchedPlot).toBe(false);
+  });
+
   it("round-trips an axis's labelFormat/labelDecimals, and leaves both absent when never set", () => {
     // The same schema trap as `orientation`: a field on the TS type but not in
     // schema.ts is silently dropped by zod on save.

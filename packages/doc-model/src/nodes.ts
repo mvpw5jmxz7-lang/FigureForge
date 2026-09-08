@@ -647,6 +647,29 @@ export interface PlotNode extends NodeBase {
    * every other themed role already follows. Volcano only.
    */
   pointLabelSizePt?: number;
+  /**
+   * How many points this plot may name at once. Absent is `MAX_POINT_LABELS`
+   * (25), which is what every figure written before this field carried.
+   *
+   * 25 is a good default and was a poor absolute: it is a readability
+   * judgement, and whether a figure naming an entire regulated pathway is
+   * readable is the author's call, not the renderer's. What is *not* their
+   * call is making the canvas unresponsive, so the value read here is clamped
+   * to `MAX_POINT_LABEL_CEILING` — a measured number, see its own comment.
+   *
+   * Clamped when READ (`pointLabelLimit` in `render-document.ts`), never
+   * validated on load, for the same reason `volcanoLabels` carries no
+   * `.max()`: `loadArchive` throws on a validation failure, so a bound in the
+   * schema would make a hand-edited file unopenable rather than merely
+   * over-ambitious.
+   *
+   * Raising it adds the *next most significant* names, deterministically:
+   * `volcanoLabelCandidates` sorts by descending -log10(p), then descending
+   * |fold change|, then label, and the cap truncates after that sort. So the
+   * canvas and the export agree, and re-selecting the same genes in a
+   * different order changes nothing on the page. Volcano only.
+   */
+  pointLabelLimit?: number;
   /** How a heatmap's colour domain is built. Absent is `'sequential'`. Heatmap only. */
   heatmapScale?: HeatmapScaleMode;
   /**

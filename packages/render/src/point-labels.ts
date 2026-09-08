@@ -9,18 +9,57 @@
  *
  * The only import is `text-width.ts`'s static metrics, so this stays within
  * the same DOM-free discipline that measures every other label in this
- * package. Complexity is bounded by the number of LABELS (`MAX_POINT_LABELS`
- * = 25), never by the number of points a plot carries: a real gene list is
- * 10,000+ rows, and this module never iterates it — the caller has already
- * reduced that to the (small) set of points asked to be labelled before
- * calling in here.
+ * package. Complexity is bounded by the number of LABELS (at most
+ * `MAX_POINT_LABEL_CEILING`), never by the number of points a plot carries: a
+ * real gene list is 10,000+ rows, and this module never iterates it — the
+ * caller has already reduced that to the set of points asked to be labelled
+ * before calling in here.
  */
 
 import { estimateTextHeightMm, estimateTextWidthMm } from './text-width.js';
 
-/** Hard cap on how many points one plot can label at once. See `nodes.ts`'s
- *  `PlotNode.volcanoLabels` doc comment for why this is not a schema limit. */
+/** How many points a plot labels when its author has not said otherwise.
+ *
+ *  A default, not a limit, since round 46: `PlotNode.pointLabelLimit` raises
+ *  it per plot. See `nodes.ts`'s `PlotNode.volcanoLabels` doc comment for why
+ *  neither number is a schema limit. */
 export const MAX_POINT_LABELS = 25;
+
+/**
+ * The most a plot may be asked to label, however high its own limit is set.
+ *
+ * This exists for render cost, not taste — the readability argument is what
+ * makes 25 a sensible *default*, but it is the author's call, and a figure
+ * naming an entire regulated pathway is legitimate. What is not the author's
+ * call is making the canvas unresponsive, so the override is clamped here.
+ *
+ * MEASURED, not chosen — `scripts/point-label-cost.ts`, a 10,000-row gene list
+ * on an 80x60 mm plot. The budget is ~100 ms, the same interactivity threshold
+ * `MAX_VECTOR_POINTS` was measured against, and it is spent roughly *twice*
+ * per interaction frame: `Canvas.tsx` renders the document unmemoised, and
+ * `placedPointLabelsForPlot` resolves the same placement again for drag
+ * hit-testing.
+ *
+ *     labels   engine   end to end   drawn
+ *        100     12.9         15.8      32
+ *        200     25.0         37.7      43
+ *        400     67.9         36.6      60
+ *        600    118.6         38.2      60
+ *
+ * "engine" is `layoutPointLabels` handed the *whole* cloud as obstacles;
+ * "end to end" is the real path, where `resolvePointLabels` first filters the
+ * cloud to a box around the candidates. The engine column is the number this
+ * ceiling rests on, because that filter stops helping exactly when an author
+ * labels points spread across the whole plot — which is the case that has to
+ * survive. At 200 that is ~25 ms, so ~50 ms a frame, with real headroom; at
+ * 400 it is ~68 ms, so ~136 ms, and a drag would visibly stutter.
+ *
+ * The second column of the argument is that a higher ceiling buys nothing:
+ * `drawn` saturates at 60 by 300 labels and does not move again through 1200.
+ * Past a few hundred names a plot is simply full, and further labels cost time
+ * to reject and draw nothing.
+ */
+export const MAX_POINT_LABEL_CEILING = 200;
 
 /** Gap between a marker's own edge and an adjacent label. */
 const GAP_MM = 0.6;

@@ -256,6 +256,36 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 46 (a volcano's point-label limit is the author's to
+raise):** 1141 TypeScript tests (1129 + 12 new: 3 in `point-labels.test.ts` for
+placing past the default and truncating at whatever `maxLabels` says, 8 in
+`continuous-axis.test.ts` — 3 end-to-end drawn-count cases plus a 5-case
+`pointLabelLimit()` suite covering the default, an honoured value, the clamp,
+the floor and a non-finite value — and 1 archive round-trip in
+`doc-model.test.ts`), 190 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check acceptance
+run unaffected, and **19 live-browser checks in each of light and dark** plus an
+export check. **No `SCHEMA_VERSION` bump**: `PlotNode.pointLabelLimit` is
+optional and absent reads as 25, so every saved figure is untouched.
+**Measured, not assumed** — the ceiling is the whole risk in this round and
+`scripts/point-label-cost.ts` is where its number comes from, on a 10,000-row
+gene list: the placement engine costs 12.9 ms at 100 labels, 25.0 at 200, 67.9
+at 400 and 118.6 at 600, against a ~100 ms budget that is spent *twice* per
+interaction frame; and `drawn` saturates at 60 by 300 labels and does not move
+again through 1200, so a higher ceiling would buy cost and no labels.
+`MAX_POINT_LABEL_CEILING = 200`. Driven live against the sample's own volcano
+panel: at the default, 40 selected rows cap at 25 and draw 17; raising the limit
+to 60 re-enables the Data tab's button and draws 19; and on a panel enlarged to
+175 x 125 mm, 60 selected names draw **53** — counted off the DOM, not assumed —
+with the Inspector's new "N of LIMIT selected · M drawn" hint agreeing with that
+DOM count at every step and one Ctrl+Z stepping it back. An export carries all
+60 names into the SVG and returns a single-page PDF, so the file matches the
+screen. **Two traps of my own, both caught by measuring rather than reading**:
+the first cost script drew its cloud uniformly, which places *nothing* and so
+timed `fits()` short-circuiting instead of placement; and `updateNode` takes a
+patch object, not a callback, so a mistyped call silently set no labels at all
+and vite-node ran it without a typecheck. See "Round 46" below.
+
 **Verified after round 45 ("Send to back" reaches the back of the page):** 1129
 TypeScript tests (1122 + 7 new: 4 in `doc-model.test.ts` — the reported
 rectangle, the one-press-at-a-time crossing, the hidden/locked stop and a
@@ -6812,6 +6842,127 @@ comparator: its rows under a panel banner can come from *different parents*, a
 mixed list `compareDrawOrder` deliberately does not answer, since a child and a
 top-level node are not in one draw order to begin with.
 
+### Round 46 — a volcano's point-label limit is the author's to raise
+
+Reported: a figure sometimes needs to name more points than FigureForge allows.
+It allowed 25 — `MAX_POINT_LABELS`, a round-7 constant whose stated reason is
+that "past this a key stops being readable and the leaders cross". That is a
+good default and was a poor absolute: whether a figure calling out an entire
+regulated pathway is readable is the author's judgement, and there was no way to
+express it. The Data tab's "Label these rows" button disabled itself at 25, a
+canvas click at the cap was a silent no-op, and the Inspector said the maximum
+was reached.
+
+- **`PlotNode.pointLabelLimit`, optional, absent = 25.** The additive pattern
+  every field since phase 1 has used, so `SCHEMA_VERSION` stays 1 and no saved
+  figure moves. Mirrored into `schema.ts` as well as the TS type, or zod strips
+  it on save — pinned by a round-trip test that was confirmed to fail when the
+  schema line is removed.
+- **No `.max()` in the schema, deliberately**, for the reason already written on
+  `volcanoLabels`: `loadArchive` throws on a validation failure, so a bound there
+  would make a hand-edited file **unopenable** rather than merely
+  over-ambitious. The ceiling is applied when the value is *read*, and a test
+  loads a `pointLabelLimit: 100000` archive to prove it still opens.
+- **`pointLabelLimit(node)` in `render-document.ts` is the one composition.**
+  The number had been spelled at six sites across four files — the renderer, the
+  canvas's cap test *and* its tooltip, the Data tab's disabled reason, the
+  Inspector's hint and the Quality tab's disclosure — three of them as the
+  literal "25" inside a sentence. That is exactly the drift `scaleBarWidthMm`,
+  `y2WidthMm` and `analysisInputHash` are each composed once to avoid; all six
+  now read this. It lives beside `resolvePointLabels` rather than in
+  `point-labels.ts`, whose header states its only import is `text-width.js` and
+  which is deliberately pure geometry knowing nothing about `PlotNode`.
+- **`layoutPointLabels` needed no change at all.** `LabelLayoutOptions.maxLabels`
+  has existed since round 7 and already truncates in a defined order; it was only
+  ever called without it. And because `volcanoLabelCandidates` sorts by
+  descending -log10(p), then |fold change|, then label, and the cap truncates
+  *after* that sort, raising the limit adds the **next most significant** names
+  deterministically — the canvas and the export agree, and re-selecting the same
+  genes in a different order changes nothing.
+
+#### The ceiling, which is the only real risk here
+
+An unbounded field is not safe. Per label, placement tries 8 directions adjacent
+then up to 8 push rings x 8 directions — 72 attempts — and each attempt's
+`fits()` linearly scans the placed rects, the leaders and the marker obstacles.
+The obstacle set is the part that bites: `resolvePointLabels` pre-filters the
+point cloud to a box around *all* candidates, which is tight for 25 clustered
+hits and admits nearly the whole 10,000-row cloud once labels spread across both
+wings. `Canvas.tsx` renders the document unmemoised and `placedPointLabelsForPlot`
+resolves the same placement again for drag hit-testing, so the cost is paid about
+twice per interaction frame.
+
+`scripts/point-label-cost.ts` measures it rather than arguing it, and its numbers
+are on the constant:
+
+| labels | engine | end to end | drawn |
+|---|---|---|---|
+| 100 | 12.9 ms | 15.8 ms | 32 |
+| 200 | 25.0 ms | 37.7 ms | 43 |
+| 400 | 67.9 ms | 36.6 ms | 60 |
+| 600 | 118.6 ms | 38.2 ms | 60 |
+
+"engine" hands `layoutPointLabels` the whole cloud; "end to end" is the real
+path with its filter. **The engine column is what the ceiling rests on**, because
+that filter stops helping exactly when an author labels points spread over the
+whole plot — the case that has to survive. At 200 that is ~25 ms, so ~50 ms a
+frame with real headroom; at 400 it is ~68 ms, so ~136 ms, and a drag would
+stutter. The second half of the argument is that a higher ceiling buys nothing:
+`drawn` saturates at 60 by 300 labels and does not move through 1200. Hence
+**`MAX_POINT_LABEL_CEILING = 200`**, eight times the default and far past any
+realistic need.
+
+**Deliberately not done:** replacing the linear obstacle scan with a spatial
+bucket grid. It would raise the ceiling a lot and `Canvas.tsx`'s own
+`PICK_BUCKET_MM` hit-test map is precedent for the idiom, but it changes a
+function every figure's label placement depends on and would have to be proven
+byte-identical first. Named here so it is not mistaken for an oversight; the
+trigger for it is an author who needs more than 200.
+
+#### The drawn count, which the raised limit makes necessary
+
+An unplaceable label is dropped rather than overprinted — deliberate, and round
+7 already observed 30 selected drawing as 17. Once the limit rises that becomes
+confusing: raising it looks like it did nothing whenever the extra names do not
+fit. The Inspector's hint now reads `N of LIMIT selected · M drawn`, with `M`
+from the existing `placedPointLabelsForPlot` — the same function the canvas uses
+for hit-testing, itself `resolvePointLabels`, so the count cannot disagree with
+what is drawn — and says plainly when names were left off and what would fit
+more. It is memoised on `[node, doc, theme]` exactly as `Canvas.tsx` does, since
+it runs a full `computePlotGeometry`. The Quality tab's own figure-wide
+`checkPointLabelPlacement` disclosure stays; this is the same fact where the
+author is actually choosing labels.
+
+**Setting the field back to 25 removes it** rather than storing the default, the
+same "clearing the last override removes it entirely" rule `pointShapes`
+follows, so a figure only carries the field if its author moved it.
+
+#### One pre-existing subtlety, left alone
+
+The cap counts **candidates**, and `volcanoLabelCandidates` emits one per
+matching *point* while `volcanoLabels` counts *names*. A duplicated feature name
+(two probes for one gene) therefore consumes two of the limit while reading as
+one selection. That follows from round 7's deliberate choice to label every
+matching point rather than misattribute one, and is not changed here.
+
+#### Two traps of my own, both found by measuring
+
+- **The first cost script drew its point cloud uniformly over the plot**, which
+  places *nothing* — every position is blocked — so it was timing `fits()`
+  short-circuiting on its first obstacle rather than the cost of placing a
+  label, and reported a flat "0 placed" at every count. A real volcano is a
+  dense blob of null genes with the significant ones sparse in the wings, and
+  the labelled points sit in the sparse region where `fits()` must scan the
+  whole obstacle list before returning true. That is both the expensive case
+  and the only one that draws anything. The generator now produces that shape.
+- **`updateNode` takes a patch object, not a callback.** Passing a function
+  makes `Object.assign` copy nothing, so the measurement harness set no labels
+  at all and every end-to-end row read zero — and `vite-node` does not
+  typecheck, so it ran silently. Found by probing the path rather than by
+  re-reading the script.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -6886,7 +7037,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`) is **optional**, so old files still load. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

@@ -68,7 +68,7 @@ import {
   measureAllPlots,
   measurePlot,
   bracketStepMm,
-  MAX_POINT_LABELS,
+  pointLabelLimit,
   reflowBrackets,
   type Finding,
   type QualityReport,
@@ -1050,11 +1050,14 @@ function DataTab({
           }),
       );
 
+    const labelLimit = volcanoPlot ? pointLabelLimit(volcanoPlot) : 0;
+
     let disabledReason: string | null = null;
     if (volcanoPlot) {
-      if (currentLabels.length >= MAX_POINT_LABELS) {
+      if (currentLabels.length >= labelLimit) {
         disabledReason =
-          '25 labels is the maximum — past that a key stops being readable and the leaders cross.';
+          `${labelLimit} labels is this plot's maximum — raise "Maximum labels" in the ` +
+          "Inspector's Labels section to add more.";
       } else if (selectedRowRange) {
         const usable = [];
         for (let r = selectedRowRange.r0; r <= selectedRowRange.r1; r++) {
@@ -1088,7 +1091,7 @@ function DataTab({
                       toAdd.push(rowLabel);
                     }
                   }
-                  const next = [...currentLabels, ...toAdd].slice(0, MAX_POINT_LABELS);
+                  const next = [...currentLabels, ...toAdd].slice(0, labelLimit);
                   commit('Label points', (draft) => {
                     const target = draft.nodes[volcanoPlot.id];
                     if (target?.type === 'plot') target.volcanoLabels = next;

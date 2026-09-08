@@ -8,7 +8,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { layoutPointLabels, MAX_POINT_LABELS, type LabelCandidate } from './point-labels.js';
+import {
+  layoutPointLabels,
+  MAX_POINT_LABELS,
+  MAX_POINT_LABEL_CEILING,
+  type LabelCandidate,
+} from './point-labels.js';
 import { estimateTextHeightMm, estimateTextWidthMm } from './text-width.js';
 
 const OPTIONS = { fontSizePt: 6, plotWidth: 60, plotHeight: 50, pointRadiusMm: 0.45 };
@@ -238,5 +243,39 @@ describe('layoutPointLabels', () => {
       expect(placed).toEqual([]);
       expect(unplaced).toEqual([candidate]);
     });
+  });
+});
+
+describe('the label ceiling', () => {
+  /** A plot roomy enough that placement, not collision, is what is under test. */
+  const ROOMY = { fontSizePt: 6, plotWidth: 400, plotHeight: 300, pointRadiusMm: 0.45 };
+
+  function grid(count: number): LabelCandidate[] {
+    return Array.from({ length: count }, (_, i) => ({
+      x: 6 + (i % 20) * 19,
+      y: 6 + Math.floor(i / 20) * 19,
+      text: `G${i}`,
+      color: '#000',
+    }));
+  }
+
+  it('places past MAX_POINT_LABELS when asked for more', () => {
+    // The default is a default, not a limit — this is the whole point of
+    // `PlotNode.pointLabelLimit`. Without a raised `maxLabels` the 26th
+    // candidate is never even considered (see the cap test above).
+    const candidates = grid(60);
+    const { placed } = layoutPointLabels(candidates, { ...ROOMY, maxLabels: 60 });
+    expect(placed.length).toBeGreaterThan(MAX_POINT_LABELS);
+  });
+
+  it('still truncates at whatever maxLabels says, above the default', () => {
+    const candidates = grid(60);
+    const { placed, unplaced } = layoutPointLabels(candidates, { ...ROOMY, maxLabels: 40 });
+    expect(placed.length + unplaced.length).toBe(40);
+    expect([...placed, ...unplaced].some((l) => l.text === 'G40')).toBe(false);
+  });
+
+  it('has a ceiling above the default, so the override is worth having', () => {
+    expect(MAX_POINT_LABEL_CEILING).toBeGreaterThan(MAX_POINT_LABELS);
   });
 });

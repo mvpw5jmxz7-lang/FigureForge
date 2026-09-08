@@ -8,7 +8,7 @@
  * just plots.
  */
 
-import { useRef, useState, type ChangeEvent } from 'react';
+import { useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DEFAULT_VOLCANO_THRESHOLDS,
@@ -70,6 +70,9 @@ import {
   DEFAULT_HEATMAP_STOPS,
   DEFAULT_VOLCANO_COLORS,
   MAX_POINT_LABELS,
+  MAX_POINT_LABEL_CEILING,
+  placedPointLabelsForPlot,
+  pointLabelLimit,
   computePlotGeometry,
   hasCascadeOffset,
   isCascadable,
@@ -174,6 +177,7 @@ const VOLCANO_CATEGORY_LABELS: Record<VolcanoCategory, string> = {
  */
 function VolcanoColorControls({
   node,
+  doc,
   dataset,
   theme,
   setPlot,
@@ -181,6 +185,7 @@ function VolcanoColorControls({
   onLabelPickNodeChange,
 }: {
   node: PlotNode;
+  doc: FigureDocument;
   dataset: Dataset | undefined;
   theme: Theme;
   setPlot: (label: string, patch: Partial<PlotNode>) => void;
@@ -360,6 +365,7 @@ function VolcanoColorControls({
 
       <VolcanoLabelControls
         node={node}
+        doc={doc}
         theme={theme}
         setPlot={setPlot}
         picking={picking}
@@ -377,18 +383,26 @@ function VolcanoColorControls({
  */
 function VolcanoLabelControls({
   node,
+  doc,
   theme,
   setPlot,
   picking,
   onLabelPickNodeChange,
 }: {
   node: PlotNode;
+  doc: FigureDocument;
   theme: Theme;
   setPlot: (label: string, patch: Partial<PlotNode>) => void;
   picking: boolean;
   onLabelPickNodeChange: (id: NodeId | null) => void;
 }) {
   const labels = node.volcanoLabels ?? [];
+  const limit = pointLabelLimit(node);
+  // How many of the selected names actually reached the page. Through the very
+  // function the canvas uses for hit-testing, which is `resolvePointLabels`
+  // again, so this count cannot disagree with what is drawn. Memoised because
+  // it runs a full `computePlotGeometry`, exactly as `Canvas.tsx` does.
+  const drawn = useMemo(() => placedPointLabelsForPlot(node, doc, theme).length, [node, doc, theme]);
 
   return (
     <>
@@ -412,11 +426,37 @@ function VolcanoLabelControls({
           }}
         />
       </label>
+      <label className="field">
+        Maximum labels
+        <input
+          type="number"
+          min={1}
+          max={MAX_POINT_LABEL_CEILING}
+          step={1}
+          value={limit}
+          onChange={(e) => {
+            const requested = Number(e.target.value);
+            if (!Number.isFinite(requested) || requested < 1) return;
+            const clamped = Math.min(MAX_POINT_LABEL_CEILING, Math.floor(requested));
+            // Back at the default, drop the field rather than storing 25 — the
+            // same "clearing the last override removes it entirely" rule
+            // `pointShapes` already follows, so a figure only carries the field
+            // if its author actually moved it.
+            setPlot('Change label limit', {
+              pointLabelLimit: clamped === MAX_POINT_LABELS ? undefined : clamped,
+            });
+          }}
+        />
+      </label>
       <p className="hint">
-        {labels.length} of {MAX_POINT_LABELS} selected. Select rows in the Data tab's grid, or
-        click points on the canvas, to add more.
-        {labels.length >= MAX_POINT_LABELS &&
-          ' The maximum is reached — past this a key stops being readable and the leaders cross.'}
+        {labels.length} of {limit} selected
+        {labels.length > 0 && <> · {drawn} drawn</>}. Select rows in the Data tab's grid, or click
+        points on the canvas, to add more.
+        {labels.length >= limit && ' This plot’s maximum is reached — raise it above.'}
+        {drawn < labels.length &&
+          ` ${labels.length - drawn} selected name${labels.length - drawn === 1 ? ' has' : 's have'} nowhere to go without overprinting a neighbouring point, so ${labels.length - drawn === 1 ? 'it is' : 'they are'} left off. A bigger panel, a smaller label size or fewer names will fit more.`}
+        {limit >= MAX_POINT_LABEL_CEILING &&
+          ` ${MAX_POINT_LABEL_CEILING} is the ceiling — past it the placement search costs more than a drag can absorb.`}
       </p>
       {labels.length > 0 && (
         <ul className="list compact">
@@ -1173,6 +1213,7 @@ function PlotFields({
       {node.plotType === 'volcano' ? (
         <VolcanoColorControls
           node={node}
+          doc={doc}
           dataset={dataset}
           theme={theme}
           setPlot={setPlot}
