@@ -986,6 +986,20 @@ export function Canvas({
         })}
         <GuideOverlay guides={guides} doc={doc} zoom={zoom} />
 
+        {/* What to do with an empty page. The app opens blank since round 51,
+            and a blank white rectangle says nothing about where a figure comes
+            from. HTML above the SVG, never a scene node — the same rule the
+            crop and text-edit chrome follow below, and here it is load-bearing
+            twice over: a scene node would export into the figure, and this one
+            would do it on precisely the documents most likely to be exported
+            early. `pointer-events: none` so it never swallows the click that
+            makes it go away. */}
+        {Object.keys(doc.nodes).length === 0 && (
+          <p className="canvas-empty">
+            Paste or import your data in the Data tab to add the first panel.
+          </p>
+        )}
+
         {/* Crop chrome, like the text editor, is HTML above the SVG and never
             a scene node. Resize handles are proven not to leak into an export
             by the parity test; crop chrome would have no such guard, and it is

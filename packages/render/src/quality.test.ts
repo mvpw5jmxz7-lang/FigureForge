@@ -37,6 +37,7 @@ import {
 import { NATURE_THEME, resolveTheme, type Theme } from '@figureforge/theme';
 import { MAX_VECTOR_POINTS, renderDocument } from './render-document.js';
 import { checkFigure, type Finding } from './quality.js';
+import { toSvgString } from './svg-string.js';
 
 /** Paired x and y, the shape a correlation needs. */
 const XY_CSV = `Dose,Response
@@ -1360,5 +1361,37 @@ describe('a stale analysis', () => {
     const finding = report(edited).findings.find((f) => f.id.startsWith('stale-analysis'));
     expect(finding).toBeDefined();
     expect(finding!.severity).toBe('error');
+  });
+});
+
+describe('an empty figure', () => {
+  /*
+   * The app opens on a blank page since round 51, so every one of these runs
+   * against a document with no nodes on the very first render — a state
+   * nothing had ever evaluated the checker or the renderer over, because the
+   * app previously opened on a seven-panel sample.
+   */
+  it('renders and serialises without throwing', () => {
+    const doc = createDocument();
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(() => toSvgString(scene)).not.toThrow();
+  });
+
+  it('scores a blank page without findings that cannot be acted on', () => {
+    const doc = createDocument();
+    const report = checkFigure({
+      document: doc,
+      theme: NATURE_THEME,
+      scene: renderDocument(doc, { theme: NATURE_THEME }),
+    });
+
+    // Pinned, not merely asserted non-throwing: this is the number in the
+    // footer the instant the app opens, and a rule gaining an opinion about
+    // an empty document would move it silently.
+    expect(report.score).toBe(100);
+
+    // Nothing to fix on a page with nothing on it. An error here would open
+    // the export confirmation dialog on a figure the author has not started.
+    expect(report.findings.filter((f) => f.severity === 'error')).toEqual([]);
   });
 });

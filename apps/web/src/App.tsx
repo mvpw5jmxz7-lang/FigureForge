@@ -28,8 +28,7 @@ import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
 import { openAuthorisedPath } from './desktopFiles.js';
 import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
-import { createSampleDocument } from './sample.js';
-import { seedSampleAssets } from './sampleMicrographs.js';
+import { blankDocument } from './blankDocument.js';
 import { isDesktop, type DesktopMenuCommand } from './shell.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
@@ -131,20 +130,10 @@ export interface AppProps {
 }
 
 export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
-  const api = useDocument(createSampleDocument);
+  const api = useDocument(blankDocument);
   useUndoShortcuts(api);
 
   const assets = useAssets(api.document);
-
-  /*
-   * The sample figure's micrographs. Asset bytes live outside the document, so
-   * `createSampleDocument()` can only declare the `Asset` records — something
-   * has to supply what they point at, here and in `newFigure` below. Keyed by
-   * a fixed id and `add` is idempotent, so a re-render costs nothing.
-   */
-  useEffect(() => {
-    seedSampleAssets(assets.store);
-  }, [assets.store]);
 
   /**
    * Verbatim source text for every imported dataset, keyed by archive path.
@@ -607,17 +596,17 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   /**
    * Start again.
    *
-   * There was no "new" command before the menu needed one: the sample document
-   * was built once, as `useDocument`'s initialiser. This clears exactly what
-   * `openFromFile` clears — the four things that outlive a document reset and
-   * would otherwise leak into the next figure — and produces the same sample
-   * the app opens with, so New and launch agree about what a fresh figure is.
+   * There was no "new" command before the menu needed one: the starting
+   * document was built once, as `useDocument`'s initialiser. This clears
+   * exactly what `openFromFile` clears — the four things that outlive a
+   * document reset and would otherwise leak into the next figure — and both
+   * it and the initialiser call `blankDocument()`, so New and launch agree
+   * about what a fresh figure is.
    */
   const newFigure = useCallback(() => {
     assets.store.clear();
-    seedSampleAssets(assets.store);
     dataOriginals.current = new Map();
-    api.store.reset(createSampleDocument());
+    api.store.reset(blankDocument());
     setSelectedIds([]);
     setSaveTarget(null);
     setDirty(false);

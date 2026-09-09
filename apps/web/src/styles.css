@@ -139,6 +139,22 @@ button.icon.danger:hover { color: var(--danger); }
 
 .guide-overlay { position: absolute; inset: 0; pointer-events: none; }
 
+/* The empty page's own prompt. Drawn on the paper, which is white in both
+   themes, so the colour is fixed rather than themed — `--muted` is light on a
+   dark theme and would vanish here. */
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 24px;
+  text-align: center;
+  color: #9aa0a6;
+  font-size: 13px;
+  pointer-events: none;
+}
+
 /* Editing a label in place. Sits above the SVG; never part of the document.
    Colour and background both track the theme: hardcoding a white background
    while leaving the text colour to the UA put white-on-white text in dark

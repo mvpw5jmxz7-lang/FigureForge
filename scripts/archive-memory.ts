@@ -26,13 +26,13 @@ import { join } from 'node:path';
 import {
   archiveEntries,
   buildArchiveContents,
+  createDocument,
   loadArchive,
   readArchiveStream,
   saveArchive,
   writeArchiveStream,
   type FigureDocument,
 } from '../packages/doc-model/src/index.js';
-import { createSampleDocument } from '../apps/web/src/sample.js';
 
 const MB = 1024 * 1024;
 const ASSET_MB = Number(process.env['ASSET_MB'] ?? 200);
@@ -62,7 +62,10 @@ function syntheticProject(
   sizeMb: number,
   count: number,
 ): { document: FigureDocument; assets: Map<string, Uint8Array> } {
-  const document = createSampleDocument();
+  // A bare document, since only the assets are being weighed: this used to be
+  // the app's seven-panel sample, whose node JSON was a few kB against 200 MB
+  // of images. Round 51 removed it; the measured figures are unaffected.
+  const document = createDocument();
   const assets = new Map<string, Uint8Array>();
   const records = [];
   const each = Math.floor((sizeMb * MB) / count);
