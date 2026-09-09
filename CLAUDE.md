@@ -47,12 +47,12 @@ stack** — never run `npm` or `pytest` on the host, run them inside the contain
 make up          # build images, start the pod
                  #   web -> http://localhost:5173
                  #   api -> http://localhost:8000/health
-make test        # 789 TypeScript + 152 Python tests
+make test        # 1271 TypeScript + 248 Python tests
 make acceptance  # 46-check end-to-end run (needs `make up` first)
 make down
 
 make desktop        # launch the Electron shell against the dev server
-make desktop-smoke  # drive that shell headlessly, 21 checks
+make desktop-smoke  # drive that shell headlessly, 24 checks
 ```
 
 `make help` lists all 18 targets. The two `desktop` targets build a separate,
@@ -255,6 +255,35 @@ non-developer would be misleading. Checked by hand rather than run: every
 internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
+
+**Verified after round 52 (a working directory for Open and Save):** 1271
+TypeScript tests (1240 + 31: 16 in `projectFiles.test.ts` covering the
+feature-detect, the pick/cancel/error paths, a stored folder read back with no
+permission call, cache invalidation and two storage-failure cases, plus the
+`id`/`startIn` pair for both pickers; 5 in a new `workingDirectory.test.ts`; 8
+in `projects.node.test.ts` pinning dialog options that had **no test at all**
+before; 2 in `menu.test.ts`), 248 Python tests unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check acceptance
+run unaffected, a **24-check desktop smoke run** (21 + 3 new), and **44
+live-browser checks in each of light and dark**. **No schema change and no
+persisted field** — `SCHEMA_VERSION` stays 1; the one widened enum
+(`MenuCommand`) is not serialised. **Measured, not assumed** — the whole browser
+half of this feature is a negative, so the harness spies on the real
+`window.showSaveFilePicker` rather than asking the app what it did: with no
+folder the save picker is handed exactly `{suggestedName, id:
+'figureforge-project', startIn: 'documents', types}`, byte-identical to before
+the feature existed; with one, both pickers get `startIn` **identical to the
+handle object** and `['startIn', 'suggestedName', 'types']` — **no `id` key at
+all**; one reload restores the folder from IndexedDB **without reopening the
+picker** and still suppresses the id; and clearing puts the id and `'documents'`
+back, remembered across a reload too. **The id-suppression checks were confirmed
+to fail against a version that keeps the id** — 38/44 — because a harness that
+passed either way would prove nothing here. The desktop's own security negative
+is asserted through the real IPC: `the renderer has no way to name a working
+folder — no setter`. **One correction to what the user was told**: using the
+folder costs no prompt, but `showDirectoryPicker()` itself is a
+permission-granting act and Chromium confirms it once, which no design can
+avoid. See "Round 52" below.
 
 **Verified after round 51 (six polishing steps: montage selection, import
 titles, a blank start, a save guard, hidden controls, orphaned files):** 1240
@@ -2897,7 +2926,10 @@ one grouping concept touches nothing outside `packages/render`.
   `"Downloaded \"name\" to your browser's downloads folder."` on the
   Firefox/Safari fallback) — the one place a folder choice is acknowledged on
   screen, since the File System Access API deliberately exposes no path for
-  the existing `.file-target` readout to show instead.
+  the existing `.file-target` readout to show instead. **Round 52 amends the
+  Chromium wording**: once a working directory is set the dialog no longer
+  drifts to wherever you last saved, so "remembers this folder" stops being
+  true and the confirmation names the fixed folder instead.
 
 - **Volcano label dragging, and a stricter obstacle set.** Three related
   changes, all in the label-editing surface stage 1 of round 7 built:
@@ -7838,6 +7870,150 @@ literals came from, and each file now says plainly that the workbooks are no
 longer in the repo. `GUIDE.old.md`'s own stale reference here was corrected
 too, and the risk table's "there is still no `beforeunload` guard" row is no
 longer true and no longer says so. **The app's test suites are untouched.**
+---
+
+### Round 52 — a working directory for Open and Save
+
+Requested: a button to set the working directory for when files are opened and
+where they are saved. Every dialog started wherever the platform last happened
+to be — `startIn: 'documents'` on the first use and then whatever Chromium
+remembered against the shared picker id, and on the desktop a bare filename as
+`defaultPath` with no directory at all — so an author working out of one project
+folder navigated back to it on every save.
+
+**Settled with the user before anything was written:** it is *where the dialogs
+start*, not a silent write target. The filename is still confirmed each time and
+a plain Save still overwrites the file you have open, untouched — `write()`
+never consults the folder, only the two pickers do. And it persists across
+reloads on both platforms.
+
+**One thing the user was told that needed correcting, and it is a fact about the
+API rather than a choice.** Using the folder costs no permission prompt: a
+handle passed as `startIn` is resolved inside the picker algorithm without a
+permission check, and reading `handle.name` is a plain attribute get. But
+`showDirectoryPicker()` *is* a permission-granting act — Chromium shows the
+folder chooser and then usually a "let this site view files in this folder?"
+confirmation. That happens once, when the folder is set, and there is no way to
+obtain a directory handle without it. It is requested with `mode: 'read'`, the
+least privilege the API offers, and nothing ever reads or writes inside the
+folder.
+
+**No schema change and no persisted field.** `SCHEMA_VERSION` stays 1. The one
+enum widened is `MenuCommand`/`DesktopMenuCommand`, which is not serialised.
+
+#### The crux: `startIn` versus `id`
+
+Both pickers passed **both** `id: 'figureforge-project'` and
+`startIn: 'documents'`, and the id is what actually decided after the first
+save — which is what `PICKER_ID`'s own comment had said since round 7. The spec
+resolves a starting directory by taking a `startIn` **handle** first, a
+directory remembered against `id` second, and a `startIn` **string** last, so on
+paper a handle already wins and the id could stay.
+
+**The code does not rely on that.** A picker will not tell you where it opened,
+so the ordering is unobservable from JavaScript and untestable in Node. The rule
+is therefore: with a folder set, pass `startIn: <handle>` and **omit `id`
+entirely** — correct under either reading, because with no id there is nothing
+for the handle to lose to. `startingDirectory` is the one composition, read by
+both pickers so they cannot start in different places.
+
+Two consequences written into the code rather than left to be discovered.
+Omitting `id` also stops Chromium *recording* the pick against it, so while a
+folder is set the dialog no longer drifts to wherever you last saved — it
+returns to the fixed folder every time, which is what a working directory should
+mean. And clearing one resumes `PICKER_ID` with whatever was remembered before
+the button was ever used.
+
+#### The browser half, and the first storage in `apps/web`
+
+`DirectoryStore` (`apps/web/src/directoryStore.ts`) is an interface with an
+`indexedDbDirectoryStore()` and a memory double. IndexedDB is forced rather than
+preferred — a `FileSystemDirectoryHandle` survives only structured cloning and
+`localStorage` holds strings — and this is the **first browser storage anywhere
+in `apps/web`**, which is exactly why it sits behind a seam: the suite runs in
+`environment: 'node'` on purpose, so there is no `indexedDB` and no structured
+clone of a handle to test against.
+
+- **It must not touch `indexedDB` at module load**, because the exported
+  `browserProjectFileSystem` const is constructed at import time in that suite.
+  Every method opens the database inside itself, guarded, and degrades to null
+  or a no-op — the stance `loadRecent`'s own try/catch already takes.
+- `browserProjectFileSystem` became `createBrowserProjectFileSystem(store)` with
+  the const closing over the real store, so `main.tsx` and `App.tsx`'s default
+  prop needed no change at all.
+- **The handle is cached in the implementation** (`undefined` = not read yet).
+  That keeps every save off IndexedDB and keeps the session working when the
+  *write* failed — private browsing, a quota, denied site data — where the
+  folder is in force for the tab's life and simply will not survive a reload.
+  `clearWorkingDirectory` resets it to `null`, not `undefined`, or the next
+  picker would go back to the store and resurrect what was just cleared.
+- **A stored handle is never inspected.** `queryPermission` would not prompt,
+  but it reports `'prompt'` for a perfectly good folder after every browser
+  restart, so using it to detect staleness would silently drop the setting on
+  day two. A deleted or renamed folder simply stops steering the dialog, which
+  still opens; the clear button is the recourse.
+- `StoredDirectory` is declared as `{ readonly name }` — the only member ever
+  read — so a plain object satisfies it structurally and the memory double needs
+  no `structuredClone`, no fake-indexeddb and no jsdom. It also states the
+  privacy claim in the type.
+
+#### The desktop half, and why it is shaped that way
+
+The main process owns the value, and that is the security shape rather than a
+convenience. **No path ever crosses from the renderer**:
+`pickWorkingDirectory()` takes no argument, so the value can only originate in
+Electron's own folder dialog. There is deliberately no "set" channel. The
+directory is never granted, opened, read or written — it reaches exactly one
+place, a dialog's `defaultPath` — and it could not be granted anyway, having no
+project extension for `AuthorisedPaths.refuse` to accept.
+
+- `workingDirectory.ts` is the pure parse/serialise half, mirroring `recent.ts`;
+  `main.ts` persists it at `userData/working-directory.json` and loads it in
+  `startUp()` beside `loadRecent()`. Stored as `{ "path": "…" }` rather than a
+  bare string, so the corrupt-file cases are meaningful — a bare `"/x"` is valid
+  JSON and a bare-string format could not tell a real value from a mangled file.
+  **Not** checked for existence: a folder on a temporarily-unmounted share must
+  not silently forget itself.
+- The three bridge members live **inside `project`**, not as new top-level keys,
+  which is also what leaves the smoke run's exact top-level surface assertion
+  untouched.
+- **One hole closed while there**: `join(dir, suggestedName)` composed a
+  main-owned directory with a *renderer-supplied* string, so a compromised
+  renderer could steer the dialog's starting point with `../../../etc/x.ffg`.
+  Not an authorisation hole — the user still confirms and only the result is
+  granted — but free to close with `basename`.
+
+#### Neither picker had any test
+
+`pickSave` and `pickOpen` had no test at all, so their dialog options were free
+to drift. They are pinned now, including the security negative in executable
+form: a chosen folder is **not** authorised, asserted by a later `beginRead` on
+it still rejecting.
+
+#### The UI
+
+One button in the status-bar file group, hidden entirely where it cannot work —
+`supportsWorkingDirectory()` is a separate feature-detect from `supported()`
+because the two genuinely differ, and the fallback branch below is exactly where
+a browser with no directory picker lands. It reads "Set folder…" unset and
+"Folder: <name>" once chosen, with a × to clear. Nothing here reads as a save
+destination, because the folder is not where Save writes. On the desktop a
+File-menu item reaches the same renderer-side implementation, the shape round
+51's Close File already set.
+
+`chooseWorkingDirectory` does `if (picked) setWorkingDir(picked)` and the guard
+is load-bearing: null means cancelled, exactly as for `pickSave`/`pickOpen`, so
+treating it as a value would wipe the setting every time someone changed their
+mind. Round 8's save confirmation — "the browser remembers this folder for next
+time" — stops being true once a folder is fixed, and now names it instead.
+
+**Not done, deliberately:** the folder is not offered on the Firefox/Safari
+download path, which has no directory concept at all; nothing re-validates a
+stored folder on load, for the reason above; and the native folder dialogs
+themselves — Electron's, and Chromium's own "view files in this folder?"
+confirmation — are OS-level UI a headless container cannot click, so they are
+covered by unit tests over the options and by the smoke run's bridge
+assertions rather than driven.
 ---
 
 ## What's next
