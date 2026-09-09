@@ -261,8 +261,9 @@ titles, a blank start, a save guard, hidden controls, orphaned files):** 1240
 TypeScript tests (1237 + 3 new: two in `quality.test.ts` pinning that an empty
 document renders and scores, plus a `toSvgString` guard), 248 Python tests
 unchanged (nothing here touches `services/api`), `tsc --build --force` and
-`eslint .` clean, 46-check acceptance run unaffected, and **52 + 32 + 28
-live-browser checks in each of light and dark** across the three surfaces.
+`eslint .` clean, 46-check acceptance run unaffected, a **21-check desktop
+smoke run** (for item 4's menu addition), and **52 + 32 + 28 live-browser
+checks in each of light and dark** across the three surfaces.
 **No schema change, no new field, no model or renderer change** —
 `SCHEMA_VERSION` stays 1. **Measured, not assumed**: a plain click on a montage
 tile now selects the panel and drags all four tiles by an identical 60.6 px,
@@ -8033,6 +8034,14 @@ Each of these cost time once and will again:
 - **`File.path` was removed in Electron 32.** A dropped file's path now comes
   from `webUtils.getPathForFile`, which is a main-world module the sandboxed
   page cannot reach — so it has to be called in the preload.
+- **A container's own stdout can lose Node's last writes.** `make desktop-smoke`
+  reported *nothing at all* — no checks, not even the script's own failure
+  line — while the same command run inside the container with its output
+  redirected to a file printed all 21. Node block-buffers stdout to a pipe and
+  `process.exit()` does not flush it, so a run that ends promptly can vanish
+  into podman's log driver. Redirect to a file and `cat` it before concluding a
+  script produced no output; and remember `xvfb-run` keeps the container alive
+  afterwards either way, so "still running" is not evidence the script is.
 - **`xvfb-run` needs `xauth`**, which the slim images do not carry; without it
   it exits with `xauth command not found` before your program starts. It also
   outlives a crashed child, so a hung container may be `xvfb-run` waiting on
