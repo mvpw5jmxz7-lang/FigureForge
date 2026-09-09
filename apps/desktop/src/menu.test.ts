@@ -107,6 +107,23 @@ describe('buildMenuTemplate', () => {
     });
   });
 
+  describe('the working folder', () => {
+    it('is a renderer command, not a main-process action', () => {
+      const item = find(buildMenuTemplate(context()), 'Set Working Folder…');
+      // The browser build has the same button, so this reaches the renderer's
+      // own implementation rather than doing the work in the shell — the shape
+      // Close File already set. About and the guide are the other way round,
+      // and carry an `id` instead.
+      expect(item?.command).toEqual({ type: 'set-working-directory' });
+      expect(item?.id).toBeUndefined();
+    });
+
+    it('takes no accelerator', () => {
+      // CmdOrCtrl+W belongs to the close/quit role at the end of this menu.
+      expect(find(buildMenuTemplate(context()), 'Set Working Folder…')?.accelerator).toBeUndefined();
+    });
+  });
+
   describe('recent files', () => {
     it('disables the submenu and says so when there is nothing in it', () => {
       const template = buildMenuTemplate(context());

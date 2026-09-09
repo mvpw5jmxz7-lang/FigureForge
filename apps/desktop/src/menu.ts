@@ -113,6 +113,11 @@ function fileMenu(context: MenuContext): MenuTemplateItem {
       // keyboard way to close.
       { label: 'Close File', command: { type: 'close-file' } },
       separator,
+      // A renderer command, not a main-process action like About or the guide:
+      // the browser build has the same button, and one implementation reached
+      // two ways is the shape Close File already set.
+      { label: 'Set Working Folder…', command: { type: 'set-working-directory' } },
+      separator,
       {
         label: 'Export',
         submenu: EXPORT_FORMATS.map((entry) => ({

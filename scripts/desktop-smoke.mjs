@@ -269,6 +269,7 @@ async function main() {
       'JSON.stringify({ isDesktop: window.figureforge?.isDesktop,' +
         ' base: window.figureforge?.apiBase?.(),' +
         ' keys: Object.keys(window.figureforge ?? {}).sort(),' +
+        ' projectKeys: Object.keys(window.figureforge?.project ?? {}).sort(),' +
         ' hasRequire: typeof window.require,' +
         ' hasProcess: typeof window.process })',
     );
@@ -296,6 +297,36 @@ async function main() {
           'setShellState',
         ]),
       info.keys?.join(', '),
+    );
+
+    /*
+     * The working directory reaches the page through `project`, not as a new
+     * top-level key — which is why the assertion above is unchanged.
+     *
+     * The negative is the one that matters: there is no `setWorkingDirectory`,
+     * so no channel exists by which the renderer can name a path. The value can
+     * only ever originate in Electron's own folder dialog, and it is composed
+     * into a dialog's `defaultPath` and nothing else — never opened, read,
+     * written or authorised.
+     */
+    const projectKeys = info.projectKeys ?? [];
+    check(
+      'the working folder can be read, chosen and cleared',
+      ['workingDirectory', 'pickWorkingDirectory', 'clearWorkingDirectory'].every((key) =>
+        projectKeys.includes(key),
+      ),
+      projectKeys.join(', '),
+    );
+    check(
+      'the renderer has no way to name a working folder',
+      !projectKeys.some((key) => /^set/i.test(key)),
+      projectKeys.filter((key) => /^set/i.test(key)).join(', ') || 'no setter',
+    );
+    check(
+      'no working folder is set on a fresh profile',
+      (await cdp.evaluate(
+        'window.figureforge.project.workingDirectory().then(d => JSON.stringify(d))',
+      )) === 'null',
     );
 
     await checkFileAccessIsFenced(cdp);

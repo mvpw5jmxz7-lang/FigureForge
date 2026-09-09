@@ -23,6 +23,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('electron', () => ({ dialog: { showSaveDialog: vi.fn(), showOpenDialog: vi.fn() } }));
 
 const { ProjectFiles } = await import('./projects.node.js');
+/** The stubbed dialogs, hoisted: `await import` is legal only at module top. */
+const { dialog } = (await import('electron')) as unknown as {
+  dialog: { showSaveDialog: ReturnType<typeof vi.fn>; showOpenDialog: ReturnType<typeof vi.fn> };
+};
 
 let directory: string;
 let files: InstanceType<typeof ProjectFiles>;
@@ -186,5 +190,131 @@ describe('reading', () => {
     await files.endRead(id);
 
     await expect(files.readChunk(id)).rejects.toThrow(/no longer open/);
+  });
+});
+
+/**
+ * What the dialogs are actually told.
+ *
+ * None of this was pinned before — neither `pickSave` nor `pickOpen` had any
+ * test, so the options were free to drift. The working directory reaches the
+ * user through exactly these three option objects, so they are the behaviour.
+ */
+describe('dialogs', () => {
+  // A window is only ever forwarded to Electron, never read here.
+  const window = {} as never;
+
+  beforeEach(() => {
+    dialog.showSaveDialog.mockReset();
+    dialog.showOpenDialog.mockReset();
+  });
+
+  describe('pickSave', () => {
+    it('starts wherever the OS last was when no folder is set', async () => {
+      dialog.showSaveDialog.mockResolvedValue({ canceled: false, filePath: target() });
+
+      await files.pickSave(window, 'figure.ffg');
+
+      expect(dialog.showSaveDialog.mock.calls[0]![1]).toStrictEqual({
+        title: 'Save figure',
+        defaultPath: 'figure.ffg',
+        filters: [{ name: 'FigureForge project', extensions: ['ffg', 'figureforge'] }],
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+      });
+    });
+
+    it('starts in the working folder when there is one', async () => {
+      dialog.showSaveDialog.mockResolvedValue({ canceled: false, filePath: target() });
+
+      await files.pickSave(window, 'figure.ffg', '/home/a/Figures');
+
+      expect(dialog.showSaveDialog.mock.calls[0]![1].defaultPath).toBe(
+        join('/home/a/Figures', 'figure.ffg'),
+      );
+    });
+
+    it('takes only the filename from the renderer, never a path', async () => {
+      dialog.showSaveDialog.mockResolvedValue({ canceled: false, filePath: target() });
+
+      // The suggested name comes from the renderer, so without `basename` a
+      // compromised one could steer the dialog out of the working folder.
+      // Not an authorisation hole — the user still confirms and only the
+      // result is granted — but there is no reason to allow it.
+      await files.pickSave(window, '../../../etc/evil.ffg', '/home/a/Figures');
+
+      expect(dialog.showSaveDialog.mock.calls[0]![1].defaultPath).toBe(
+        join('/home/a/Figures', 'evil.ffg'),
+      );
+    });
+
+    it('authorises what it returns, and nothing when cancelled', async () => {
+      dialog.showSaveDialog.mockResolvedValue({ canceled: true, filePath: undefined });
+      await expect(files.pickSave(window, 'figure.ffg')).resolves.toBeNull();
+      await expect(files.beginWrite(target())).rejects.toThrow(/did not open or save/);
+
+      dialog.showSaveDialog.mockResolvedValue({ canceled: false, filePath: target() });
+      await expect(files.pickSave(window, 'figure.ffg')).resolves.toEqual({
+        path: target(),
+        name: 'figure.ffg',
+      });
+      await expect(files.beginWrite(target())).resolves.toEqual(expect.any(String));
+    });
+  });
+
+  describe('pickOpen', () => {
+    it('passes no defaultPath at all when no folder is set', async () => {
+      dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [target()] });
+
+      await files.pickOpen(window);
+
+      const [, options] = dialog.showOpenDialog.mock.calls[0]!;
+      // Absence, not `undefined`: with no working folder the options must be
+      // exactly what they were before this feature existed.
+      expect(Object.hasOwn(options, 'defaultPath')).toBe(false);
+      expect(options.properties).toEqual(['openFile']);
+    });
+
+    it('starts in the working folder when there is one', async () => {
+      dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [target()] });
+
+      await files.pickOpen(window, '/home/a/Figures');
+
+      expect(dialog.showOpenDialog.mock.calls[0]![1].defaultPath).toBe('/home/a/Figures');
+    });
+  });
+
+  describe('pickDirectory', () => {
+    it('asks for a folder, with no file-type filter', async () => {
+      dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: ['/home/a/Figures'] });
+
+      const picked = await files.pickDirectory(window);
+
+      const [, options] = dialog.showOpenDialog.mock.calls[0]!;
+      expect(options.properties).toEqual(['openDirectory', 'createDirectory']);
+      // `filters` is meaningless for a folder chooser and on GTK renders as a
+      // file-type dropdown over a dialog that cannot select files.
+      expect(Object.hasOwn(options, 'filters')).toBe(false);
+      expect(picked).toEqual({ path: '/home/a/Figures', name: 'Figures' });
+    });
+
+    it('returns null when cancelled', async () => {
+      dialog.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
+      await expect(files.pickDirectory(window)).resolves.toBeNull();
+    });
+
+    it('does NOT authorise the folder it returns', async () => {
+      // The security argument in executable form. A working directory is only
+      // ever composed into a `defaultPath`; nothing opens, reads or writes it,
+      // so granting it would widen the renderer's reach for no purpose. It
+      // could not be granted anyway — a folder has no project extension.
+      dialog.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [directory] });
+
+      await files.pickDirectory(window);
+
+      await expect(files.beginRead(directory)).rejects.toThrow(/not a FigureForge project/);
+      await expect(files.beginRead(join(directory, 'anything.ffg'))).rejects.toThrow(
+        /did not open or save/,
+      );
+    });
   });
 });

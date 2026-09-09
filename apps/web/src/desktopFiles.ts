@@ -75,6 +75,33 @@ export async function openAuthorisedPath(
 export const desktopProjectFileSystem: ProjectFileSystem = {
   supported: isDesktop,
 
+  /*
+   * The working directory lives in the main process, not here.
+   *
+   * That is the security shape, not a convenience: `pickWorkingDirectory`
+   * takes no argument and the value originates only in Electron's own folder
+   * dialog, so no path ever crosses from the renderer to the shell. The
+   * renderer can ask for a folder to be chosen and read back the one the shell
+   * chose; it cannot name one.
+   */
+  supportsWorkingDirectory: () =>
+    isDesktop() && typeof window.figureforge?.project?.pickWorkingDirectory === 'function',
+
+  async workingDirectory() {
+    const picked = await project().workingDirectory();
+    return picked ? { name: picked.name, location: picked.path } : null;
+  },
+
+  async pickWorkingDirectory() {
+    const picked = await project().pickWorkingDirectory();
+    // Null is a cancelled dialog, never "clear it".
+    return picked ? { name: picked.name, location: picked.path } : null;
+  },
+
+  async clearWorkingDirectory() {
+    await project().clearWorkingDirectory();
+  },
+
   async pickSave(suggestedName) {
     const picked = await project().pickSave(suggestedName);
     // Null is a cancelled dialog, which is not an error — the same contract

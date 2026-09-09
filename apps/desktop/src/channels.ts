@@ -54,6 +54,22 @@ export const PROJECT_WRITE_CHUNK = 'figureforge:project-write-chunk';
 export const PROJECT_FINISH_WRITE = 'figureforge:project-finish-write';
 export const PROJECT_ABORT_WRITE = 'figureforge:project-abort-write';
 
+/**
+ * The working directory: the folder both dialogs start in.
+ *
+ * Three channels, and note which one is missing. There is no "set" — the pick
+ * channel takes no argument, so the value can only ever originate in
+ * Electron's own folder dialog, and a compromised renderer has no way to name
+ * a path. The directory is composed into a `defaultPath` and nothing else: it
+ * is never opened, never read, never written, and never passed through
+ * `AuthorisedPaths` (which would refuse it anyway, having no project
+ * extension). The trust boundary is unchanged — the *file* a dialog returns is
+ * authorised exactly as it was before.
+ */
+export const PROJECT_WORKING_DIRECTORY = 'figureforge:project-working-directory';
+export const PROJECT_PICK_WORKING_DIRECTORY = 'figureforge:project-pick-working-directory';
+export const PROJECT_CLEAR_WORKING_DIRECTORY = 'figureforge:project-clear-working-directory';
+
 /** Main → renderer. A menu item was chosen. */
 export const MENU_COMMAND = 'figureforge:menu-command';
 
@@ -89,6 +105,7 @@ export type MenuCommand =
   | { type: 'save' }
   | { type: 'save-as' }
   | { type: 'close-file' }
+  | { type: 'set-working-directory' }
   | { type: 'export'; format: 'svg' | 'pdf' | 'eps' | 'png' | 'tiff' }
   | { type: 'undo' }
   | { type: 'redo' }

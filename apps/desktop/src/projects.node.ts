@@ -8,6 +8,7 @@
 
 import { dialog, type BrowserWindow } from 'electron';
 import { open, rename, rm, type FileHandle } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { AuthorisedPaths, PROJECT_EXTENSIONS, basename } from './projects';
 
@@ -45,10 +46,26 @@ export class ProjectFiles {
     return this.authorised.grant(path);
   }
 
-  async pickSave(window: BrowserWindow, suggestedName: string): Promise<SaveLocation | null> {
+  /**
+   * `directory` is the working directory, or null for the platform default.
+   *
+   * It arrives as a parameter rather than being held here because the main
+   * process owns it, exactly as it already owns the recent list — this class
+   * stays the dialog half and keeps no state but its authorisations.
+   */
+  async pickSave(
+    window: BrowserWindow,
+    suggestedName: string,
+    directory: string | null = null,
+  ): Promise<SaveLocation | null> {
     const result = await dialog.showSaveDialog(window, {
       title: 'Save figure',
-      defaultPath: suggestedName,
+      // `basename` on a renderer-supplied name, not the name itself. This
+      // composes a main-owned directory with a string the renderer chose, so
+      // without it a compromised renderer could steer the dialog's starting
+      // point with `../../../etc/x.ffg`. Not an authorisation hole — the user
+      // still confirms, and only the *result* is granted — but free to close.
+      defaultPath: directory ? join(directory, basename(suggestedName)) : suggestedName,
       filters: FILTERS,
       properties: ['createDirectory', 'showOverwriteConfirmation'],
     });
@@ -57,17 +74,53 @@ export class ProjectFiles {
     return { path: result.filePath, name: basename(result.filePath) };
   }
 
-  async pickOpen(window: BrowserWindow): Promise<SaveLocation | null> {
+  async pickOpen(
+    window: BrowserWindow,
+    directory: string | null = null,
+  ): Promise<SaveLocation | null> {
     const result = await dialog.showOpenDialog(window, {
       title: 'Open figure',
       filters: FILTERS,
       properties: ['openFile'],
+      // Spread rather than `defaultPath: directory ?? undefined`, so with no
+      // working directory the options are exactly what they were before this
+      // existed and the OS keeps choosing.
+      ...(directory ? { defaultPath: directory } : {}),
     });
     const path = result.filePaths[0];
     if (result.canceled || !path) return null;
     this.grant(path);
     // The bytes are not read here: the renderer streams them through
     // `beginRead`/`readChunk`, so nothing ever holds the whole archive.
+    return { path, name: basename(path) };
+  }
+
+  /**
+   * Choose the folder both dialogs start in.
+   *
+   * Deliberately does **not** `grant()` the result, and could not: a directory
+   * has no project extension, so `AuthorisedPaths.refuse` would reject it
+   * anyway. Nothing ever opens, reads or writes this path — it is composed
+   * into a `defaultPath` and nothing else — so authorising it would widen the
+   * renderer's reach for no purpose.
+   *
+   * No `filters`: meaningless for a folder chooser, and on GTK it renders as a
+   * file-type dropdown over a dialog that cannot select files.
+   */
+  async pickDirectory(
+    window: BrowserWindow,
+    current: string | null = null,
+  ): Promise<SaveLocation | null> {
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Choose working folder',
+      buttonLabel: 'Use folder',
+      // `createDirectory` is macOS-only and ignored elsewhere; Windows' and
+      // GTK's folder choosers have a New Folder button of their own.
+      properties: ['openDirectory', 'createDirectory'],
+      ...(current ? { defaultPath: current } : {}),
+    });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return null;
     return { path, name: basename(path) };
   }
 

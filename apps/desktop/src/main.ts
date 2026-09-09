@@ -21,6 +21,9 @@ import {
   API_BASE_CHANNEL,
   MENU_COMMAND,
   PROJECT_ABORT_WRITE,
+  PROJECT_CLEAR_WORKING_DIRECTORY,
+  PROJECT_PICK_WORKING_DIRECTORY,
+  PROJECT_WORKING_DIRECTORY,
   PROJECT_BEGIN_READ,
   PROJECT_BEGIN_WRITE,
   PROJECT_END_READ,
@@ -40,6 +43,7 @@ import { buildMenuTemplate, toElectronTemplate } from './menu';
 import { basename } from './projects';
 import { ProjectFiles } from './projects.node';
 import { addRecent, parseRecent, removeRecent, serialiseRecent } from './recent';
+import { parseWorkingDirectory, serialiseWorkingDirectory } from './workingDirectory';
 import { PythonSidecar, type SidecarStatus } from './sidecar';
 import { allocatePort, delay, makeSpawn, probe, resolvePythonLaunch } from './sidecar.node';
 
@@ -73,8 +77,20 @@ let shellState: ShellState = {
 
 let recentPaths: string[] = [];
 
+/**
+ * The folder both dialogs start in, or null for the platform's own default.
+ *
+ * Owned here rather than by `ProjectFiles` for the same reason `recentPaths`
+ * is: the value is persisted user state, and that class is the dialog and
+ * authorisation half. Note it is never granted — see `pickDirectory`.
+ */
+let workingDirectory: string | null = null;
+
 /** Where the recent list is kept. Per-user, and not inside the checkout. */
 const recentFile = (): string => join(app.getPath('userData'), 'recent.json');
+
+/** Beside it, and read the same tolerant way. */
+const workingDirectoryFile = (): string => join(app.getPath('userData'), 'working-directory.json');
 
 /** GUIDE.md ships with the checkout; a packaged build may not carry it. */
 const guidePath = (): string => join(APP_ROOT, 'GUIDE.md');
@@ -230,6 +246,32 @@ async function loadRecent(): Promise<void> {
   for (const path of recentPaths) projects.grant(path);
 }
 
+/**
+ * Read the stored working directory.
+ *
+ * Deliberately **not** granted the way the recent list is, and deliberately
+ * not checked for existence: the path is only ever composed into a dialog's
+ * `defaultPath`, so a folder that has since been deleted or is on a
+ * temporarily-unmounted share costs a dialog that opens somewhere else, where
+ * an existence check would silently forget the user's setting.
+ */
+async function loadWorkingDirectory(): Promise<void> {
+  try {
+    workingDirectory = parseWorkingDirectory(await readFile(workingDirectoryFile(), 'utf8'));
+  } catch {
+    // No file yet, which is the normal first-run state.
+    workingDirectory = null;
+  }
+}
+
+async function persistWorkingDirectory(next: string | null): Promise<void> {
+  workingDirectory = next;
+  await writeFile(workingDirectoryFile(), serialiseWorkingDirectory(next)).catch(() => {
+    // As with the recent list: a preference that cannot be written is a lost
+    // convenience, not a failure worth showing anyone.
+  });
+}
+
 async function rememberRecent(path: string): Promise<void> {
   recentPaths = addRecent(recentPaths, path);
   applyMenu();
@@ -250,17 +292,38 @@ async function forgetRecent(path: string): Promise<void> {
 function registerProjectHandlers(): void {
   ipcMain.handle(PROJECT_PICK_SAVE, async (_event, suggestedName: string) => {
     if (!mainWindow) return null;
-    const picked = await projects.pickSave(mainWindow, suggestedName);
+    const picked = await projects.pickSave(mainWindow, suggestedName, workingDirectory);
     if (picked) await rememberRecent(picked.path);
     return picked;
   });
 
   ipcMain.handle(PROJECT_PICK_OPEN, async () => {
     if (!mainWindow) return null;
-    const opened = await projects.pickOpen(mainWindow);
+    const opened = await projects.pickOpen(mainWindow, workingDirectory);
     if (opened) await rememberRecent(opened.path);
     return opened;
   });
+
+  /*
+   * The working directory. Three handlers, and note the one that is absent:
+   * nothing accepts a path from the renderer. The pick handler takes no
+   * argument at all, so the value can only ever originate in Electron's own
+   * folder dialog, and the directory is never granted, opened, read or
+   * written — it reaches exactly one place, a dialog's `defaultPath`.
+   */
+  ipcMain.handle(PROJECT_WORKING_DIRECTORY, () =>
+    workingDirectory ? { path: workingDirectory, name: basename(workingDirectory) } : null,
+  );
+
+  ipcMain.handle(PROJECT_PICK_WORKING_DIRECTORY, async () => {
+    if (!mainWindow) return null;
+    const picked = await projects.pickDirectory(mainWindow, workingDirectory);
+    // Null is a cancelled dialog, so the previous folder stays in force.
+    if (picked) await persistWorkingDirectory(picked.path);
+    return picked;
+  });
+
+  ipcMain.handle(PROJECT_CLEAR_WORKING_DIRECTORY, () => persistWorkingDirectory(null));
 
   // Authorise a path the user pointed at some other way — a recent entry, or a
   // file dropped on the window. No bytes move here; the renderer then streams
@@ -360,6 +423,7 @@ async function startUp(): Promise<void> {
   }
 
   await loadRecent();
+  await loadWorkingDirectory();
   registerProjectHandlers();
   applyMenu();
 

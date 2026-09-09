@@ -28,6 +28,19 @@ export interface DesktopProject {
   /** Authorise a dropped file, resolving its path via `webUtils`. */
   resolveDropped(file: File): Promise<DesktopPath>;
 
+  /*
+   * The folder both dialogs start in. Owned by the main process.
+   *
+   * Note what is *not* here: any way to set a path. `pickWorkingDirectory`
+   * takes no argument, so the value can only ever come from Electron's own
+   * folder dialog. The directory is composed into a `defaultPath` and nothing
+   * else — never read, never written, never authorised.
+   */
+  workingDirectory(): Promise<DesktopPath | null>;
+  /** Null means the user cancelled the dialog, never "clear it". */
+  pickWorkingDirectory(): Promise<DesktopPath | null>;
+  clearWorkingDirectory(): Promise<void>;
+
   // Chunked I/O. A project runs to hundreds of megabytes, so it never crosses
   // the IPC boundary as one message; see `archive-stream.ts` for why.
   beginRead(path: string): Promise<{ id: string; name: string }>;
@@ -61,6 +74,7 @@ export type DesktopMenuCommand =
   | { type: 'save' }
   | { type: 'save-as' }
   | { type: 'close-file' }
+  | { type: 'set-working-directory' }
   | { type: 'export'; format: 'svg' | 'pdf' | 'eps' | 'png' | 'tiff' }
   | { type: 'undo' }
   | { type: 'redo' }

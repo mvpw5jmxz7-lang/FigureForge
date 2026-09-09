@@ -31,6 +31,9 @@ import {
   API_BASE_CHANNEL,
   MENU_COMMAND,
   PROJECT_ABORT_WRITE,
+  PROJECT_CLEAR_WORKING_DIRECTORY,
+  PROJECT_PICK_WORKING_DIRECTORY,
+  PROJECT_WORKING_DIRECTORY,
   PROJECT_BEGIN_READ,
   PROJECT_BEGIN_WRITE,
   PROJECT_END_READ,
@@ -84,6 +87,19 @@ contextBridge.exposeInMainWorld('figureforge', {
      */
     resolveDropped: (file: File) =>
       ipcRenderer.invoke(PROJECT_RESOLVE_DROPPED, webUtils.getPathForFile(file)),
+
+    /*
+     * The folder both dialogs start in.
+     *
+     * Note that `pickWorkingDirectory` takes no argument: there is no bridge
+     * member by which the page can name a path, so the value can only ever
+     * come from Electron's own folder dialog. These live inside `project`
+     * rather than as new top-level keys, which also leaves the smoke run's
+     * exact top-level surface assertion untouched.
+     */
+    workingDirectory: () => ipcRenderer.invoke(PROJECT_WORKING_DIRECTORY),
+    pickWorkingDirectory: () => ipcRenderer.invoke(PROJECT_PICK_WORKING_DIRECTORY),
+    clearWorkingDirectory: () => ipcRenderer.invoke(PROJECT_CLEAR_WORKING_DIRECTORY),
 
     // Chunked I/O. A project runs to hundreds of megabytes, so it never
     // crosses this boundary as a single message.
