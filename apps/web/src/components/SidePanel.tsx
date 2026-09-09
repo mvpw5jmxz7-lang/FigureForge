@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  DISTRIBUTION_PLOT_TYPES,
   LABELLED_POINT_PLOT_TYPES,
   TREND_LINE_PLOT_TYPES,
   addAsset,
@@ -61,6 +62,7 @@ import {
   type NodeId,
   type PanelNode,
   type PlotNode,
+  type PBound,
   type StatTest,
   describeArrangement,
   explainCandidate,
@@ -109,6 +111,17 @@ const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
     id: 'replicate',
     label: 'Treatment + replicates',
     hint: 'One row per group; the replicate columns collapse into that group’s values.',
+  },
+  {
+    /*
+     * Directly under `replicate`, because the two are readings of one
+     * rectangle: replicates run across a row, a distribution runs down a
+     * column. Naming both in the hint is what lets an author tell which one
+     * their own table is, which no amount of shape detection can settle.
+     */
+    id: 'distribution',
+    label: 'Y1, Y2, Y3 … — one distribution per column',
+    hint: 'One column per group, each holding that group’s own observations; columns may be different lengths. Draws as a violin, box, histogram or cumulative curve, and unlocks the distribution tests (Kolmogorov–Smirnov and friends). Use “Treatment + replicates” above instead if your groups run across the rows.',
   },
   {
     id: 'grouped',
@@ -1767,6 +1780,36 @@ const CORRELATION_TESTS = new Set<StatTest>(['pearson', 'spearman', 'linear-regr
  */
 const COUNT_TESTS = new Set<StatTest>(['chi-square', 'fisher']);
 
+/**
+ * Tests that compare two samples' whole shapes rather than one summary of each.
+ *
+ * Offered on measurements generally, not only on a `distribution`-format table:
+ * the same numbers pasted as a replicate table are the same samples, and this
+ * app gates on what the data can support rather than on how it was declared.
+ * They stay out of the count tests' way through the existing `COUNT_TESTS`
+ * two-way gate, which already refuses anything not in that set on a
+ * contingency table.
+ */
+const DISTRIBUTION_TESTS = new Set<StatTest>([
+  'kolmogorov-smirnov',
+  'anderson-darling',
+  'cramer-von-mises',
+  'epps-singleton',
+]);
+
+/**
+ * A p-value, bracketed wherever the test would only bracket it.
+ *
+ * Without the `bound` branch Anderson–Darling's clamped 0.25 prints as
+ * "0.250" — three decimal places of precision the published table it was
+ * interpolated from explicitly declines to supply.
+ */
+function formatP(p: number, bound?: PBound | null): string {
+  if (!Number.isFinite(p)) return '—';
+  if (bound) return `${bound === 'below' ? '<' : '>'}${p}`;
+  return p < 0.001 ? '<0.001' : p.toFixed(3);
+}
+
 const TESTS: { id: StatTest; label: string }[] = [
   { id: 'ttest-welch', label: "Welch's t-test" },
   { id: 'ttest-independent', label: "Student's t-test" },
@@ -1782,6 +1825,10 @@ const TESTS: { id: StatTest; label: string }[] = [
   { id: 'spearman', label: 'Spearman correlation' },
   { id: 'linear-regression', label: 'Linear regression' },
   { id: 'log-rank', label: 'Log-rank test' },
+  { id: 'kolmogorov-smirnov', label: 'Kolmogorov-Smirnov (2-sample)' },
+  { id: 'anderson-darling', label: 'Anderson-Darling (k-sample)' },
+  { id: 'cramer-von-mises', label: 'Cramér-von Mises (2-sample)' },
+  { id: 'epps-singleton', label: 'Epps-Singleton (2-sample)' },
 ];
 
 const CORRECTIONS: { id: Correction; label: string }[] = [
@@ -1793,6 +1840,12 @@ const CORRECTIONS: { id: Correction; label: string }[] = [
 
 const CORRECTION_LABEL = Object.fromEntries(CORRECTIONS.map((c) => [c.id, c.label])) as Record<
   Correction,
+  string
+>;
+
+/** Derived from `TESTS` so a run notice cannot name a test differently from the dropdown. */
+const TEST_LABEL = Object.fromEntries(TESTS.map((t) => [t.id, t.label])) as Record<
+  StatTest,
   string
 >;
 
@@ -1938,7 +1991,41 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    */
   const survival = dataset?.format === 'survival';
   const survivalLogRank = survival && test === 'log-rank';
-  const blockedByContinuousAxis = continuousPlot && !xyCorrelation && !survivalLogRank;
+  /*
+   * A histogram or an ECDF draws each series *as* a distribution, which is
+   * exactly what the distribution tests compare — so they get the same
+   * carve-out from the continuous-axis refusal that correlation and log-rank
+   * already have, and for the same reason: the test is built for this axis
+   * shape rather than being a group comparison slipping through.
+   *
+   * Scoped to `DISTRIBUTION_PLOT_TYPES` rather than to any continuous plot.
+   * A scatter carries one series and has nothing to compare; a line plot's
+   * series are a measurement over a shared x, not samples whose shape is the
+   * reading. Those two would be the group comparison this gate exists to
+   * refuse.
+   *
+   * The distinction between this and `DISTRIBUTION_TESTS.has(test)` is
+   * load-bearing further down: on a *categorical* reading of the same table —
+   * a violin or a box — these tests bracket like any other, and only the
+   * continuous case must skip bracketing.
+   */
+  const distributionPlot = activePlot
+    ? DISTRIBUTION_PLOT_TYPES.has(activePlot.plotType)
+    : false;
+  const distributionOnContinuous = distributionPlot && DISTRIBUTION_TESTS.has(test);
+  /*
+   * Whether the distribution tests are on offer for this plot at all. Composed
+   * once because two things read it — `offeredTests` below and the hint under
+   * the button — and they must agree: a hint saying "no test is offered here"
+   * above a dropdown listing four of them is the same class of defect as a
+   * control that does nothing, and it is what the live run found here.
+   *
+   * A one-column histogram is the case that separates them: it is a
+   * distribution plot with nothing to compare against.
+   */
+  const distributionTestsOffered = distributionPlot && series.length >= 2;
+  const blockedByContinuousAxis =
+    continuousPlot && !xyCorrelation && !survivalLogRank && !distributionOnContinuous;
   /*
    * A horizontal plot's categories run down the side, not along the bottom
    * — there is nowhere flat to sit a bracket above a bar the way vertical
@@ -2010,7 +2097,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     if (t.id === 'log-rank') return survival;
     if (survival) return false;
     if (COUNT_TESTS.has(t.id) !== counts) return false;
-    if (continuousPlot) return CORRELATION_TESTS.has(t.id) && correlationPossible;
+    if (continuousPlot) {
+      // A histogram or ECDF offers the distribution tests and nothing else:
+      // the correlation family needs a paired x these plot types do not read,
+      // and the group comparisons need categories they do not have.
+      if (DISTRIBUTION_TESTS.has(t.id)) return distributionTestsOffered;
+      return CORRELATION_TESTS.has(t.id) && correlationPossible;
+    }
     return true;
   });
 
@@ -2173,7 +2266,14 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
           // bracket — the result belongs in the table and the methods sentence.
           // A Kaplan–Meier plot's x axis is continuous time for the same
           // reason: there is no categorical band for a bracket to anchor to.
-          if (!xyCorrelation && !survivalLogRank) {
+          // A histogram or ECDF is the third such case — and note this tests
+          // `distributionOnContinuous`, not the test family: the very same
+          // Kolmogorov–Smirnov result on a violin of the same columns *does*
+          // get brackets, because there the categories exist. Missing this
+          // gate would leave every comparison counted as `unplaceable`, and
+          // the notice below would then make a false claim about the group
+          // names not matching the plot's data.
+          if (!xyCorrelation && !survivalLogRank && !distributionOnContinuous) {
             result.comparisons.forEach((comparison, index) => {
               if (comparison.pAdjusted > options.alpha) return;
               // Placed provisionally; the stacking is settled below, once every
@@ -2236,6 +2336,16 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         setNotice(
           `Log-rank test on ${panelName}: the result is in the table below. A Kaplan–Meier ` +
             "curve's x axis is continuous time, not discrete categories, so no bracket is drawn.",
+        );
+      } else if (distributionOnContinuous) {
+        // Names the alternative rather than only the refusal: unlike a
+        // correlation or a survival curve, this test *can* be bracketed —
+        // just not on this reading of the table — so an author who wants the
+        // annotation on the figure has somewhere to go.
+        setNotice(
+          `${TEST_LABEL[test]} on ${panelName}: the result is in the table below. This ` +
+            'plot measures the value along x, so it has no categories for a bracket to span. ' +
+            'Draw the same columns as a violin or box plot to annotate them.',
         );
       } else if (unplaceable > 0) {
         setNotice(
@@ -2355,11 +2465,23 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 
       {continuousPlot && !noTestApplies && !survival && (
         <p className="hint">
-          This plot has a numeric x axis, so there are no groups to compare and nowhere to anchor
-          a significance bracket.{' '}
-          {correlationPossible
-            ? 'Only correlation and regression are offered, which read the paired x values instead.'
-            : 'Correlation and regression would read paired x values, and this dataset has one series carrying none — so no test is offered here. Select a categorical plot to compare groups.'}
+          {distributionTestsOffered ? (
+            <>
+              This plot draws each column as a whole distribution, so the tests that compare
+              distributions are offered here rather than the group comparisons. Its x axis
+              measures the value instead of naming categories, so a result is reported in the
+              table below rather than bracketed on the panel — draw the same columns as a violin
+              or box plot to annotate them.
+            </>
+          ) : (
+            <>
+              This plot has a numeric x axis, so there are no groups to compare and nowhere to
+              anchor a significance bracket.{' '}
+              {correlationPossible
+                ? 'Only correlation and regression are offered, which read the paired x values instead.'
+                : 'Correlation and regression would read paired x values, and this dataset has one series carrying none — so no test is offered here. Select a categorical plot to compare groups.'}
+            </>
+          )}
         </p>
       )}
 
@@ -2497,9 +2619,14 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
                   <td>
                     {c.groupA} vs {c.groupB}
                   </td>
-                  <td>{c.p < 0.001 ? '<0.001' : c.p.toFixed(3)}</td>
+                  <td>{formatP(c.p, c.pBound)}</td>
+                  {/* The bound describes the raw p-value. A correction moves
+                      the adjusted one off it, so it is carried over only when
+                      the two are still the same number — claiming a bracket on
+                      a value the bound never covered would be a stronger
+                      statement than anything that was computed. */}
                   <td className={c.pAdjusted <= 0.05 ? 'significant' : ''}>
-                    {c.pAdjusted < 0.001 ? '<0.001' : c.pAdjusted.toFixed(3)}
+                    {formatP(c.pAdjusted, c.pAdjusted === c.p ? c.pBound : null)}
                   </td>
                   <td>
                     {c.effectSize !== null && Number.isFinite(c.effectSize)

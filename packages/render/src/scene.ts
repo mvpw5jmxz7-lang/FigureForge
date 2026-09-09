@@ -147,6 +147,35 @@ export type SceneRole =
    */
   | 'censor-mark'
   /**
+   * One group's histogram drawn as a single unfilled staircase rather than as
+   * bars — `PlotNode.histogramStyle: 'step'`.
+   *
+   * Kept distinct from both 'bar' and 'line'. A count of bars must keep meaning
+   * "bars", or a figure that switched style would read as having lost its data;
+   * and 'line' means a series' connecting path, which this is not — it is the
+   * outline of a distribution, and nothing joins one observation to the next.
+   */
+  | 'histogram-outline'
+  /**
+   * The Kolmogorov–Smirnov statistic drawn where it was measured: a vertical
+   * rule between two ECDFs at the x the test reports, with a cap at each end
+   * and D printed beside it.
+   *
+   * Its own role rather than 'error-bar' or 'threshold-line', for the standing
+   * reason those two are distinct from each other. It is neither: an error bar
+   * is an interval around a summary of the data, and a threshold line is a
+   * cutoff the author chose — this is a measurement the test made, and a count
+   * of either of the others must not silently start including it.
+   */
+  | 'ks-gap'
+  /**
+   * The `D = …` caption beside a 'ks-gap' rule. Split from the rule itself the
+   * way 'bracket-label' is split from 'bracket': `checkTextSize` maps a role
+   * onto a theme size, so text has to be separable from the geometry it
+   * annotates or the size check has nothing to key on.
+   */
+  | 'ks-gap-label'
+  /**
    * A tick label's superscript exponent — the `<tspan>` set at
    * `superscriptSizePt`, not the label as a whole (which stays `'tick-label'`
    * on its containing `<text>`). Its own role so `checkTextSize` and

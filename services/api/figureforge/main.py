@@ -125,12 +125,24 @@ class ComparisonOut(BaseModel):
     effectSize: float | None
     effectSizeName: str | None
     n: list[int]
+    #: "below"/"above" when the test brackets its p-value instead of naming
+    #: one — see `stats.tests.PBound`. Absent for every other test, so no
+    #: existing client sees a change.
+    pBound: str | None = None
+    #: Where the statistic was attained and which sample was above the other
+    #: there — see `stats.tests.Comparison`. Kolmogorov-Smirnov only; null for
+    #: every other test, which is what stops a client drawing a marker for a
+    #: statistic that has no single place on the axis.
+    statisticLocation: float | None = None
+    statisticSign: int | None = None
 
 
 class OmnibusOut(BaseModel):
     statistic: float
     p: float
     df: list[float] | None
+    #: As `ComparisonOut.pBound`.
+    pBound: str | None = None
 
 
 class FitOut(BaseModel):
@@ -236,6 +248,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
                 statistic=outcome.omnibus.statistic,
                 p=outcome.omnibus.p,
                 df=outcome.omnibus.df,
+                pBound=outcome.omnibus.pBound,
             )
             if outcome.omnibus
             else None
@@ -256,6 +269,13 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
                 effectSize=_sanitize(c.effectSize),
                 effectSizeName=c.effectSizeName,
                 n=c.n,
+                pBound=c.pBound,
+                # Through `_sanitize`, not passed straight through: a NaN
+                # location would reach the client as `NaN` in JSON, which is
+                # not valid JSON at all, and the renderer would then place a
+                # marker at a coordinate that cannot be scaled.
+                statisticLocation=_sanitize(c.statisticLocation),
+                statisticSign=c.statisticSign,
             )
             for c in outcome.comparisons
         ],

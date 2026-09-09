@@ -156,7 +156,19 @@
       "Bash(grep -n \"round 29's \\\\`reverseLegend\\\\`\" CLAUDE.md)",
       "Bash(export MSYS_NO_PATHCONV=1)",
       "Bash(git -C /home/danny/Projects/SciencePlatform log --oneline --all)",
-      "Bash(grep -n \"function renderNode\\\\b\\\\|nodeId: node.id\\\\|nodeId,$\" packages/render/src/render-document.ts)"
+      "Bash(grep -n \"function renderNode\\\\b\\\\|nodeId: node.id\\\\|nodeId,$\" packages/render/src/render-document.ts)",
+      "Bash(grep -n \"pointLabelLimit\\\\` on \\\\`PlotNode\\\\`\" CLAUDE.md)",
+      "Bash(grep -n \"^---$\" CLAUDE.md)",
+      "Bash(awk -F: '$1>6960 && $1<6995')",
+      "Bash(grep -n \"^  re-reading the script.$\" CLAUDE.md)",
+      "Bash(grep -n \"All 12 \\\\`PlotType\\\\` variants\" -A 12 CLAUDE.md)",
+      "Bash(grep -n \"CascadeControls$\\\\|<CascadeControls\\\\|<h4>Axes</h4>\" apps/web/src/components/Inspector.tsx)",
+      "Bash(podman restart *)",
+      "Bash(curl -s --max-time 5 http://localhost:8000/health)",
+      "Bash(echo \"TSC_EXIT=$?\")",
+      "Bash(echo \"LINT_EXIT=$?\")",
+      "Bash(cp packages/render/src/quality.ts /tmp/claude-1000/-home-danny-Projects-SciencePlatform/e185a054-f359-44cf-8367-163567cc24cf/scratchpad/q.bak)",
+      "Bash(cp apps/web/src/components/SidePanel.tsx /tmp/claude-1000/-home-danny-Projects-SciencePlatform/e185a054-f359-44cf-8367-163567cc24cf/scratchpad/sp.bak)"
     ]
   }
 }

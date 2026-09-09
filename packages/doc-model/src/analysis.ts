@@ -26,7 +26,30 @@ export type StatTest =
   | 'pearson'
   | 'spearman'
   | 'linear-regression'
-  | 'log-rank';
+  | 'log-rank'
+  /*
+   * The distribution tests: they compare two samples' whole shapes rather
+   * than one summary of each, which is the question a column of observations
+   * drawn as a histogram or an ECDF actually poses. All four are two-sided by
+   * construction — the service refuses a directional alternative for them —
+   * and none reports a df, a confidence interval or an effect size, since the
+   * statistic *is* the discrepancy.
+   */
+  | 'kolmogorov-smirnov'
+  | 'anderson-darling'
+  | 'cramer-von-mises'
+  | 'epps-singleton';
+
+/**
+ * A p-value the test will only bracket rather than name.
+ *
+ * `'below'` means the true p is smaller than the reported number, `'above'`
+ * that it is larger. Only Anderson–Darling produces one today: SciPy
+ * interpolates its p from a published table and clamps the result to
+ * [0.001, 0.25], so reporting either endpoint as a point value would claim a
+ * precision the table cannot supply.
+ */
+export type PBound = 'below' | 'above';
 
 export type Alternative = 'two-sided' | 'less' | 'greater';
 
@@ -68,6 +91,25 @@ export interface Comparison {
   effectSize: number | null;
   effectSizeName: string | null;
   n: readonly number[];
+  /**
+   * Set only where the test brackets its p-value — see `PBound`. Optional as
+   * well as nullable so results stored before this field existed still load.
+   */
+  pBound?: PBound | null;
+  /**
+   * Where along the measured axis the statistic was attained, and which of the
+   * two samples was the higher one there (`1` for `groupA`, `-1` for
+   * `groupB`).
+   *
+   * Kolmogorov–Smirnov only. D is the largest vertical distance between two
+   * empirical CDFs, so it has one place on the x axis and can be drawn on the
+   * curve it was measured from; Cramér–von Mises and Anderson–Darling
+   * accumulate over every observation and Epps–Singleton works in the
+   * frequency domain, so for those there is nothing to point at and these stay
+   * null rather than being filled with a plausible-looking number.
+   */
+  statisticLocation?: number | null;
+  statisticSign?: number | null;
 }
 
 /**
@@ -119,7 +161,13 @@ export interface RegressionFit {
 export interface StatResult {
   test: StatTest;
   /** Omnibus statistic, for ANOVA/Kruskal-Wallis. Null for pairwise-only tests. */
-  omnibus: { statistic: number; p: number; df: readonly number[] | null } | null;
+  omnibus: {
+    statistic: number;
+    p: number;
+    df: readonly number[] | null;
+    /** As `Comparison.pBound`. */
+    pBound?: PBound | null;
+  } | null;
   comparisons: readonly Comparison[];
   /**
    * The fitted line, for the tests that fit one — Pearson and linear

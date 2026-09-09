@@ -21,6 +21,17 @@ Reference values:
   convictions   Fisher (1962) twin study, via R's `?fisher.test` example
   aml           Miller (1997), R's built-in `survival::aml` dataset, via
               `survdiff(Surv(time, status) ~ x, data = aml)`
+  smoothness  Scholz & Stephens (1987), the four-laboratory paper-smoothness
+              data. See `TestAndersonDarling` for what is and is not claimed
+              about this one.
+
+The distribution tests added in round 50 are a mixed case worth stating plainly.
+Kolmogorov-Smirnov's D on the sleep data is checked against arithmetic worked by
+hand below, which is a genuine external check; the Cramer-von Mises,
+Epps-Singleton and Anderson-Darling values are SciPy's own reproducible output
+on published datasets, because no independent implementation is available in
+this environment to derive them from. That is the same honest fallback Spearman
+already documents rather than implying a citation nobody checked.
 """
 
 from __future__ import annotations
@@ -240,6 +251,299 @@ class TestLogRank:
         # A log-rank "group" is follow-up times, not a measurement sample —
         # Shapiro/Levene have nothing meaningful to say about it.
         assert self._outcome().warnings == []
+
+
+# --- Scholz & Stephens (1987) four-laboratory paper-smoothness data ---------
+SMOOTHNESS = {
+    "Lab 1": [38.7, 41.5, 43.8, 44.5, 45.5, 46.0, 47.7, 58.0],
+    "Lab 2": [39.2, 39.3, 39.7, 41.4, 41.8, 42.9, 43.3, 45.8],
+    "Lab 3": [34.0, 35.0, 39.0, 40.0, 43.0, 43.0, 44.0, 45.0],
+    "Lab 4": [34.0, 34.8, 34.8, 35.4, 37.2, 37.8, 41.2, 42.8],
+}
+
+#: Two samples far enough apart that Anderson-Darling's p-value hits SciPy's
+#: lower clamp, and two close enough that it hits the upper one. Chosen to
+#: exercise the clamp, not to mean anything.
+AD_FLOORED = {"A": [1.0, 2, 3, 4, 5, 6, 7, 8], "B": [100.0, 101, 102, 103, 104, 105, 106, 107]}
+AD_CAPPED = {"A": [1.0, 2, 3, 4, 5, 6, 7, 8], "B": [1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1]}
+
+
+class TestKolmogorovSmirnov:
+    """The one distribution test here with a hand-checked reference value.
+
+    `scipy.stats.ks_2samp(SLEEP_1, SLEEP_2)` reports D = 0.4 at
+    `statistic_location = 0.0`, and that is verifiable without SciPy: at
+    x = 0, five of group 1's ten values are at or below it
+    (-1.6, -1.2, -0.2, -0.1, 0.0) and one of group 2's (-0.1), so the gap
+    between the two empirical CDFs there is |0.5 - 0.1| = 0.4. D is the
+    largest such gap, and no other x in the pooled sample beats it.
+    """
+
+    def test_statistic_matches_the_hand_worked_gap(self):
+        outcome = run_test("kolmogorov-smirnov", {"A": SLEEP_1, "B": SLEEP_2})
+        assert len(outcome.comparisons) == 1
+        comparison = outcome.comparisons[0]
+        assert comparison.statistic == pytest.approx(0.4, abs=1e-12)
+        assert comparison.p == pytest.approx(0.417524, abs=1e-6)
+
+    def test_reports_no_quantity_it_did_not_compute(self):
+        """D is itself the effect size, and there is no df or interval.
+
+        Filling those in with something plausible — a Hedges' g, say — would
+        describe a difference in means this test never looked at.
+        """
+        comparison = run_test("kolmogorov-smirnov", {"A": SLEEP_1, "B": SLEEP_2}).comparisons[0]
+        assert comparison.df is None
+        assert comparison.ci is None
+        assert comparison.effectSize is None
+        assert comparison.effectSizeName is None
+        assert comparison.pBound is None
+
+    def test_three_groups_give_three_pairwise_comparisons_and_no_omnibus(self):
+        outcome = run_test("kolmogorov-smirnov", {"C": CTRL, "T1": TRT1, "T2": TRT2})
+        assert len(outcome.comparisons) == 3
+        assert outcome.omnibus is None
+
+    def test_reports_where_the_gap_was_and_which_way_up(self):
+        """The two numbers that let the gap be drawn rather than only tabulated.
+
+        Both are checked against the same hand-worked reading as D itself: the
+        maximum falls at x = 0.0, and group A's CDF is the higher one there
+        (0.5 against 0.1), so the sign is +1. Reversing the two groups must
+        reverse the sign and nothing else — a marker drawn from the location
+        and the magnitude alone would otherwise be placed upside down.
+        """
+        forward = run_test("kolmogorov-smirnov", {"A": SLEEP_1, "B": SLEEP_2}).comparisons[0]
+        assert forward.statisticLocation == pytest.approx(0.0, abs=1e-12)
+        assert forward.statisticSign == 1
+
+        reverse = run_test("kolmogorov-smirnov", {"A": SLEEP_2, "B": SLEEP_1}).comparisons[0]
+        assert reverse.statisticLocation == pytest.approx(0.0, abs=1e-12)
+        assert reverse.statisticSign == -1
+        assert reverse.statistic == pytest.approx(forward.statistic, abs=1e-12)
+
+    @pytest.mark.parametrize("test", ["cramer-von-mises", "epps-singleton", "anderson-darling"])
+    def test_the_other_distribution_tests_name_no_location(self, test):
+        """None of the other three has one place on the axis to point at.
+
+        Cramer-von Mises and Anderson-Darling integrate over every observation
+        and Epps-Singleton works in the frequency domain. Leaving these null is
+        what stops the renderer drawing a marker for a statistic that was never
+        attained anywhere in particular.
+        """
+        comparison = run_test(test, {"A": SLEEP_1, "B": SLEEP_2}).comparisons[0]
+        assert comparison.statisticLocation is None
+        assert comparison.statisticSign is None
+
+
+class TestCramerVonMises:
+    """`scipy.stats.cramervonmises_2samp(SLEEP_1, SLEEP_2)` — SciPy's own value.
+
+    No independent implementation is available here to check it against, so
+    this asserts what SciPy reproducibly returns and says so, rather than
+    citing a reference nobody consulted.
+    """
+
+    def test_matches_scipy_on_the_sleep_data(self):
+        comparison = run_test("cramer-von-mises", {"A": SLEEP_1, "B": SLEEP_2}).comparisons[0]
+        assert comparison.statistic == pytest.approx(0.3625, abs=1e-6)
+        assert comparison.p == pytest.approx(0.098606, abs=1e-6)
+
+
+class TestEppsSingleton:
+    """`scipy.stats.epps_singleton_2samp` — SciPy's own value, as above."""
+
+    def test_matches_scipy_on_the_sleep_data(self):
+        comparison = run_test("epps-singleton", {"A": SLEEP_1, "B": SLEEP_2}).comparisons[0]
+        assert comparison.statistic == pytest.approx(3.643635, abs=1e-6)
+        assert comparison.p == pytest.approx(0.456377, abs=1e-6)
+
+    def test_refuses_a_sample_too_small_to_return_a_number(self):
+        """The guard that stops a fabricated null result reaching the figure.
+
+        Below five observations SciPy returns NaN rather than raising, and
+        `main.py`'s `_sanitize_or(c.p, 1.0)` turns a non-finite p into exactly
+        1.0 — so without this refusal the panel would report a confident "no
+        difference" computed from nothing at all.
+        """
+        with pytest.raises(ValueError, match="at least 5 observations"):
+            run_test("epps-singleton", {"A": [1.0, 2, 3, 4], "B": [1.0, 2, 3, 4, 5, 6]})
+
+
+class TestAndersonDarling:
+    """The k-sample test, its pairwise follow-ups, and SciPy's p-value clamp.
+
+    On R's PlantGrowth `anderson_ksamp` gives A²k = 3.187914, p = 0.012936.
+    On Scholz & Stephens' own four-laboratory data it gives 4.479780627135335,
+    p = 0.0022254 — **SciPy's value, not a figure read from the 1987 paper**,
+    which is not available in this environment to check against. It is still
+    worth pinning: it is the one fixture here with tied observations, and
+    SciPy's default midrank handling of them is a real behaviour that would
+    change the answer if it were ever altered (the same data with
+    `midrank=False` gives 4.449262).
+    """
+
+    def test_omnibus_matches_scipy_on_plant_growth(self):
+        outcome = run_test("anderson-darling", {"C": CTRL, "T1": TRT1, "T2": TRT2})
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.statistic == pytest.approx(3.187914, abs=1e-6)
+        assert outcome.omnibus.p == pytest.approx(0.012936, abs=1e-6)
+        assert outcome.omnibus.pBound is None
+        # No degrees of freedom: A²k is standardised against a fixed null
+        # distribution, not referred to a chi-square, so a number here would
+        # name a quantity the test does not have.
+        assert outcome.omnibus.df is None
+        assert len(outcome.comparisons) == 3
+
+    def test_handles_ties_the_way_scipy_does_by_default(self):
+        outcome = run_test("anderson-darling", SMOOTHNESS)
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.statistic == pytest.approx(4.479780627135335, abs=1e-9)
+        assert outcome.omnibus.p == pytest.approx(0.0022254, abs=1e-6)
+
+    def test_a_floored_p_value_is_reported_as_a_bound(self):
+        """SciPy clamps its interpolated p to [0.001, 0.25] and warns.
+
+        Passing the clamped number through as a point value would print
+        "P = 0.001" for a result the test will only call *smaller* than that —
+        a figure claiming three-decimal precision the table cannot supply.
+        """
+        outcome = run_test("anderson-darling", AD_FLOORED)
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.p == pytest.approx(0.001)
+        assert outcome.omnibus.pBound == "below"
+        assert "P < 0.001" in methods_sentence("anderson-darling", outcome)
+
+    def test_a_capped_p_value_is_reported_as_a_bound(self):
+        outcome = run_test("anderson-darling", AD_CAPPED)
+        assert outcome.omnibus is not None
+        assert outcome.omnibus.p == pytest.approx(0.25)
+        assert outcome.omnibus.pBound == "above"
+        sentence = methods_sentence("anderson-darling", outcome)
+        assert "P > 0.25" in sentence
+        # The point-value spelling must not appear anywhere in the sentence,
+        # including the pairwise clause, or the bound is undone by the half of
+        # the text a reader is most likely to copy.
+        assert "P = 0.25" not in sentence
+
+    def test_refuses_a_group_of_one(self):
+        """The dangerous input, because SciPy does not complain about it.
+
+        A one-observation group returns a large negative statistic and a
+        p-value clamped to 0.25 — a confident "no difference" from a sample
+        that cannot support any conclusion.
+        """
+        with pytest.raises(ValueError, match="at least two observations"):
+            run_test("anderson-darling", {"A": [1.0], "B": [1.0, 2.0, 3.0]})
+
+    def test_refuses_a_constant_pooled_sample(self):
+        with pytest.raises(ValueError, match="no distribution to compare"):
+            run_test("anderson-darling", {"A": [5.0] * 5, "B": [5.0] * 5})
+
+
+class TestDistributionMethodsSentence:
+    """The magnitude has to appear somewhere, and for these four it is the statistic.
+
+    Every other test in this app carries its magnitude in the effect-size
+    fragment. These four deliberately return no effect size and no confidence
+    interval, because the statistic *is* the effect — so without naming it the
+    sentence reads "Y1 vs Y2: P = 0.03" and reports no size at all. Found by
+    reading a real sentence in the running app, not by reading the formatter.
+    """
+
+    EXPECTED = {
+        "kolmogorov-smirnov": "D = ",
+        "cramer-von-mises": "T = ",
+        "epps-singleton": "W = ",
+        "anderson-darling": "A²k = ",
+    }
+
+    @pytest.mark.parametrize("test", sorted(EXPECTED))
+    def test_names_the_statistic_beside_the_p_value(self, test):
+        outcome = run_test(test, {"A": SLEEP_1, "B": SLEEP_2})
+        sentence = methods_sentence(test, outcome)
+        # Searched in the pairwise fragment specifically, not the whole
+        # sentence: Anderson-Darling's omnibus clause already prints "A²k",
+        # so a whole-sentence search would pass for that test however the
+        # comparison clause behaved. Confirmed by removing the fix and
+        # watching this catch all four rather than three.
+        assert "A vs B" in sentence
+        pairwise = sentence.split("A vs B", 1)[1]
+        assert self.EXPECTED[test] in pairwise
+
+    def test_a_test_that_reports_an_effect_size_is_unchanged(self):
+        """The symbol is added only where nothing else carries the magnitude.
+
+        A Welch t-test's sentence already gives Hedges' g and a confidence
+        interval, and quoting t alongside them would be a change to every
+        methods sentence this app has ever produced rather than a repair.
+        """
+        outcome = run_test("ttest-welch", {"A": SLEEP_1, "B": SLEEP_2})
+        sentence = methods_sentence("ttest-welch", outcome)
+        assert "Hedges" in sentence
+        assert "t = " not in sentence
+
+
+class TestDistributionTestsAreTwoSided:
+    """All four refuse a directional alternative, and refuse it the same way.
+
+    Three of them take no `alternative` at all; `ks_2samp` does, and is
+    refused anyway so that one dropdown setting cannot silently apply on one
+    plot and be silently dropped on the next. The concrete harm is in
+    `methods_sentence`, which rewrites its test name for a directional
+    alternative — a request that quietly ignored the setting would still hand
+    the author "one-tailed (lower) two-sample Cramer-von Mises test" to paste
+    into a paper.
+    """
+
+    @pytest.mark.parametrize(
+        "test",
+        ["kolmogorov-smirnov", "anderson-darling", "cramer-von-mises", "epps-singleton"],
+    )
+    @pytest.mark.parametrize("alternative", ["less", "greater"])
+    def test_refuses_a_direction(self, test, alternative):
+        with pytest.raises(ValueError, match="two-sided"):
+            run_test(test, {"A": SLEEP_1, "B": SLEEP_2}, alternative=alternative)
+
+    @pytest.mark.parametrize(
+        "test", ["kolmogorov-smirnov", "anderson-darling", "cramer-von-mises"]
+    )
+    def test_still_says_so_when_the_samples_are_far_too_small(self, test):
+        """These tests keep the assumption checks, and that is the right call.
+
+        The plan for this round had them join the counts/log-rank skip, on the
+        argument that warning a distribution-free test about non-normality is
+        backwards. It is — and it cannot happen: `check_assumptions` only runs
+        Shapiro and Levene for a *parametric* test, and none of these is one.
+        A test written to pin the skip passed identically with the skip
+        removed, which is what exposed the premise as wrong.
+
+        What the checks do contribute here is the small-sample warning, and
+        that is worth keeping: a two-sample comparison of distributions at
+        n = 2 is very nearly powerless, and an advisory warning is exactly the
+        right way to say so.
+
+        Epps-Singleton is absent from the parameters on purpose — it refuses
+        anything under five observations outright, so it can never reach a
+        sample small enough to warn about.
+        """
+        warnings = run_test(test, {"A": [1.0, 2.0], "B": [5.0, 6.0]}).warnings
+        assert any("n = 2" in w for w in warnings)
+
+    @pytest.mark.parametrize(
+        ("test", "name"),
+        [
+            ("kolmogorov-smirnov", "two-sample Kolmogorov-Smirnov test"),
+            ("anderson-darling", "Anderson-Darling k-sample test"),
+            ("cramer-von-mises", "two-sample Cramer-von Mises test"),
+            ("epps-singleton", "two-sample Epps-Singleton test"),
+        ],
+    )
+    def test_names_the_test_in_the_methods_sentence(self, test, name):
+        outcome = run_test(test, {"A": SLEEP_1, "B": SLEEP_2})
+        sentence = methods_sentence(test, outcome)
+        assert name in sentence
+        assert "one-tailed" not in sentence
 
 
 class TestCorrelation:

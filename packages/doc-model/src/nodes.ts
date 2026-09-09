@@ -115,6 +115,19 @@ export type PlotType =
   | 'violin'
   | 'beeswarm'
   | 'histogram'
+  /**
+   * The empirical cumulative distribution function: for each observed value,
+   * the proportion of the sample at or below it, drawn as a step curve.
+   *
+   * A separate type rather than a mode of `histogram` because it answers the
+   * question without a binning at all. A histogram's shape depends on how many
+   * bins it was given — the same column can read unimodal at 8 bins and ragged
+   * at 40 — whereas an ECDF has no such parameter and so no way to flatter or
+   * spoil a distribution by accident. It is also the curve the
+   * Kolmogorov–Smirnov statistic is literally defined on, which is what lets
+   * the maximum gap be drawn on the plot rather than only reported as a number.
+   */
+  | 'ecdf'
   | 'volcano'
   | 'fold-fold'
   | 'heatmap'
@@ -139,9 +152,56 @@ export const CONTINUOUS_X_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(
   'scatter',
   'line',
   'histogram',
+  'ecdf',
   'volcano',
   'fold-fold',
   'survival',
+]);
+
+/**
+ * The plot types that draw a column of observations as a distribution against a
+ * numeric value axis — the histogram and its cumulative relative.
+ *
+ * What they share is the *reading*: each column is a sample, drawn against the
+ * measured quantity on x, and the distribution tests apply to both — with no
+ * bracket, since a continuous axis has no bands for one to span. Spelled once
+ * here for the reason `CONTINUOUS_X_PLOT_TYPES` is: the renderer and the Stats
+ * tab's carve-out ask the same question, and two copies of it is two chances
+ * for a third caller to be wired into one.
+ *
+ * They do **not** share controls. The four `histogram*` fields are gated on
+ * `plotType === 'histogram'` alone, because an ECDF has no bins to count, no
+ * bar heights to normalise and is cumulative by definition — offering it any
+ * of them would be four controls that visibly do nothing.
+ *
+ * Deliberately *not* the same set as "types a `distribution` dataset can draw":
+ * violin, box and beeswarm are equally valid readings of those columns and take
+ * the categorical path, where a bracket has bands to span.
+ */
+export const DISTRIBUTION_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
+  'histogram',
+  'ecdf',
+]);
+
+/**
+ * The plot types whose connecting line an author may style — `lineStyle`
+ * plot-wide and `lineStyles` per series.
+ *
+ * The renderer has always resolved a dash pattern for *any* series carrying a
+ * `linePath`; this set is what decides where the Inspector offers to set one,
+ * and the legend reads it too so a dashed curve is never keyed by a plain
+ * block — the mismatch a real browser caught once already for per-series
+ * markers.
+ *
+ * An ECDF belongs here for a sharper reason than the line plot does: it draws
+ * no point markers at all (`points: []`), so a dash pattern is its *only*
+ * channel for telling two samples apart without colour — which is precisely
+ * what a greyscale print takes away. Scatter draws no line to style, and a
+ * survival curve's appearance has its own Inspector block.
+ */
+export const LINE_STYLED_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
+  'line',
+  'ecdf',
 ]);
 
 /**
@@ -485,6 +545,47 @@ export interface PlotNode extends NodeBase {
    * the shape a reader takes away, so it has to be overridable.
    */
   histogramBins?: number;
+  /**
+   * How several groups' histograms share one panel.
+   *
+   * `'overlay'` (the default, and what a single group has always drawn) fills
+   * each group's bars translucently so the shapes read through one another;
+   * `'step'` drops the fill and draws each group as an outline, which stays
+   * legible past about three groups where stacked translucent fills turn to
+   * mush. Absent reads as `'overlay'`, so no saved figure changes.
+   */
+  histogramStyle?: 'overlay' | 'step';
+  /**
+   * Whether each bar counts everything up to its own upper edge.
+   *
+   * The binned relative of the `ecdf` plot type: coarser, because a bin is as
+   * fine as the resolution gets, but drawn as bars alongside the ordinary
+   * histogram rather than as a separate panel.
+   */
+  histogramCumulative?: boolean;
+  /**
+   * What a bar's height means: a raw count, a share of its own group, or a
+   * density.
+   *
+   * Load-bearing whenever groups differ in size. Raw counts make a group with
+   * twice the observations twice as tall for no reason a reader can see, so
+   * comparing two unequal samples on a count axis compares their n rather
+   * than their shape. Absent is `'count'`, which is what a single histogram
+   * has always drawn.
+   */
+  histogramNormalize?: 'count' | 'frequency' | 'density';
+  /**
+   * Whether an ECDF draws the Kolmogorov–Smirnov statistic where it was
+   * measured.
+   *
+   * **Absent reads as ON**, which is the exception among the optional fields
+   * here and is justified the same way `trendLine`'s default is: the marker
+   * can only appear once the author has explicitly run a KS test on this
+   * plot, so there is no saved figure it arrives on uninvited. D is the one
+   * number that test reports, and a curve that has been tested but does not
+   * show where its answer came from leaves the reader to guess.
+   */
+  ksGapMarker?: boolean;
   /**
    * Whether an error bar is drawn on both sides of the centre.
    *

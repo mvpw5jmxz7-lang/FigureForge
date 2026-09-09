@@ -762,6 +762,68 @@ describe('adapter parity', () => {
     expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
 
+  it('draws a two-sample ECDF identically through both adapters, dashes and all', () => {
+    /*
+     * The per-series dash is the point of the fixture as much as the curves
+     * are: an ECDF draws no markers, so a dash pattern is its only way to
+     * separate two samples once colour is gone, and the legend has to key it
+     * the same way — a plain block beside a dashed curve is the exact
+     * mismatch a real browser caught once for per-series markers.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Y1,Y2\n1.0,3.0\n1.4,3.6\n1.8,4.1\n2.2,4.4');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-ecdf',
+        name: 'Two samples',
+        format: 'distribution',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/ecdf.csv',
+        sourceFilename: 'ecdf.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'ECDF',
+        datasetId: dataset.id,
+        plotType: 'ecdf',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') {
+        node.lineStyles = ['solid', 'dashed'];
+        node.legend = 'right';
+      }
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // One path per sample, and nothing that belongs to a plot type with marks.
+    expect(collectByRole(scene, 'line')).toHaveLength(2);
+    expect(collectByRole(scene, 'point')).toEqual([]);
+    expect(collectByRole(scene, 'bar')).toEqual([]);
+    // The legend draws the line, not a block, and carries the dash — the
+    // half that would silently go missing if the swatch rule stayed
+    // `line`-only.
+    const dashed = collectByRole(scene, 'legend').filter(
+      (n) => n.attrs?.['stroke-dasharray'] !== undefined,
+    );
+    expect(dashed).toHaveLength(1);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
   it('rasterizes a fold-vs-fold plot above MAX_VECTOR_POINTS, keeping its quadrant colours', () => {
     /*
      * The case a real proteomics list always hits: 2,000-8,000 features is
@@ -824,6 +886,98 @@ describe('adapter parity', () => {
     expect(collectByRole(baked, 'point')).toEqual([]);
     // The reference lines are vector regardless of how many points baked.
     expect(collectByRole(baked, 'zero-line')).toHaveLength(2);
+  });
+
+  it('draws the KS gap marker identically through both adapters', () => {
+    /*
+     * The marker is a path plus a `<text>`, and text is the half where the two
+     * adapters have most scope to drift — React writes camelCase attributes
+     * and the string serialiser writes the canonical hyphenated ones. Two
+     * non-overlapping columns, so D = 1 and the gap spans the whole axis: the
+     * largest marker there can be, and the one most likely to expose a
+     * disagreement about placement.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Y1,Y2\n1,10\n2,11\n3,12\n4,13');
+
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-ecdf',
+        name: 'Samples',
+        format: 'distribution',
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/ecdf.csv',
+        sourceFilename: 'ecdf.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Samples',
+        datasetId: dataset.id,
+        plotType: 'ecdf',
+      });
+      draft.analyses = [
+        {
+          id: 'analysis-ks',
+          name: 'Y1 vs Y2',
+          test: 'kolmogorov-smirnov',
+          spec: { datasetId: dataset.id, groups: ['Y1', 'Y2'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'kolmogorov-smirnov',
+            omnibus: null,
+            comparisons: [
+              {
+                groupA: 'Y1',
+                groupB: 'Y2',
+                statistic: 1,
+                p: 0.0286,
+                pAdjusted: 0.0286,
+                df: null,
+                ci: null,
+                effectSize: null,
+                effectSizeName: null,
+                n: [4, 4],
+                statisticLocation: 4,
+                statisticSign: 1,
+              },
+            ],
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    // Distinguishable by role from everything already drawn on this plot. The
+    // rule is not an 'error-bar' and the caption is not a 'bracket-label', and
+    // a count of either must not start including it.
+    expect(collectByRole(scene, 'ks-gap')).toHaveLength(1);
+    expect(collectByRole(scene, 'ks-gap-label')).toHaveLength(1);
+    expect(collectByRole(scene, 'error-bar')).toHaveLength(0);
+    expect(collectByRole(scene, 'bracket-label')).toHaveLength(0);
+    // Two curves still drawn: the marker is emitted alongside them, not
+    // instead of one.
+    expect(collectByRole(scene, 'line')).toHaveLength(2);
+
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
   });
 
   it('draws a fitted line and its confidence band identically through both adapters', () => {

@@ -738,7 +738,26 @@ export interface HistogramBin {
   /** Bin bounds in data units, half-open [x0, x1). */
   x0: number;
   x1: number;
+  /** Raw observation count, whatever the bar is scaled to show. */
   count: number;
+  /**
+   * The quantity actually drawn — the count, a relative frequency, a density,
+   * or any of those accumulated. Kept beside `count` rather than overwriting
+   * it so a bar can still report how many observations it stands for.
+   */
+  value: number;
+  /**
+   * Which series this bar belongs to; several groups share one bin array.
+   * The renderer colours by it, so without it every group would be drawn in
+   * palette slot 0 and an overlay would say nothing.
+   *
+   * **Absent on a single-group histogram, and that absence is load-bearing.**
+   * The renderer's top-level bin loop draws exactly the bins that carry no
+   * index and the per-series loop draws the rest, so a one-group histogram
+   * emits the markup it always has — no series entry, and therefore none of
+   * the empty `<g>` wrappers the per-series loop pushes unconditionally.
+   */
+  seriesIndex?: number;
   /** Bar geometry in mm. */
   x: number;
   y: number;
@@ -774,39 +793,131 @@ export function binCountFor(values: readonly number[]): number {
 export interface HistogramMarkOptions {
   x: NumericScale;
   y: NumericScale;
-  bins: readonly { x0: number; x1: number; count: number }[];
+  bins: readonly { x0: number; x1: number; count: number; value?: number }[];
   /** Fraction of the bin width the bar fills; 1 leaves no gap, as is conventional. */
   barWidthFraction: number;
+  /** Which series these bars belong to. Absent is the single-group case. */
+  seriesIndex?: number;
 }
 
-/** Uniform-width bins over the observed range. */
-export function histogramBins(
-  values: readonly number[],
-  binCount?: number | null,
-): { x0: number; x1: number; count: number }[] {
+/**
+ * A uniform binning: the boundaries, and the arithmetic that put them there.
+ *
+ * `min`/`step`/`count` travel *with* `edges` rather than being recovered from
+ * it, and that is load-bearing rather than convenient. Assigning a value by
+ * `floor((v - min) / step)` and assigning it by looking through `edges`
+ * disagree for a value sitting exactly on a boundary, because `min + i*step`
+ * and the accumulated subtraction `edges[1] - edges[0]` are not always the
+ * same float. Integer data with integer bin widths lands on boundaries
+ * constantly, so this is the common case rather than a pathological one.
+ * Carrying the terms means every consumer bins with the identical arithmetic.
+ */
+export interface BinEdges {
+  min: number;
+  step: number;
+  count: number;
+  /** `min + i*step` for i = 0..count. */
+  edges: number[];
+}
+
+/**
+ * Uniform bin boundaries over the observed range.
+ *
+ * Split out from `histogramBins` so several groups can be counted into *one*
+ * shared binning. Binning each group over its own min/max instead would give
+ * every histogram different bar positions and widths, and two histograms
+ * binned differently cannot be compared at all — which is the whole question
+ * an overlay is drawn to answer.
+ */
+export function binEdges(values: readonly number[], binCount?: number | null): BinEdges | null {
   const clean = values.filter((v) => Number.isFinite(v));
-  if (clean.length === 0) return [];
+  if (clean.length === 0) return null;
 
   const stats = summarize(clean);
   const count = Math.max(1, Math.floor(binCount ?? binCountFor(clean)));
   const step = (stats.max - stats.min) / count || 1;
 
-  const bins = Array.from({ length: count }, (_, i) => ({
-    x0: stats.min + i * step,
-    x1: stats.min + (i + 1) * step,
-    count: 0,
-  }));
+  return {
+    min: stats.min,
+    step,
+    count,
+    edges: Array.from({ length: count + 1 }, (_, i) => stats.min + i * step),
+  };
+}
 
-  for (const v of clean) {
+/** Count values into a pre-computed binning; the other half of `binEdges`. */
+export function binCounts(values: readonly number[], bins: BinEdges): number[] {
+  const counts = new Array<number>(bins.count).fill(0);
+
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
     // Half-open bins, except the last: without this the maximum value falls
     // outside every bin and silently vanishes from its own histogram.
-    let index = Math.floor((v - stats.min) / step);
-    if (index >= count) index = count - 1;
+    let index = Math.floor((v - bins.min) / bins.step);
+    if (index >= bins.count) index = bins.count - 1;
     if (index < 0) index = 0;
-    bins[index]!.count++;
+    counts[index]!++;
   }
 
-  return bins;
+  return counts;
+}
+
+/**
+ * Uniform-width bins over the observed range.
+ *
+ * A thin composition of `binEdges` and `binCounts` rather than a third
+ * implementation, so the single-group path is provably the same arithmetic
+ * the shared-binning path uses. The existing histogram tests pass over this
+ * unedited, which is what shows the behaviour did not move.
+ */
+export function histogramBins(
+  values: readonly number[],
+  binCount?: number | null,
+): { x0: number; x1: number; count: number }[] {
+  const bins = binEdges(values, binCount);
+  if (!bins) return [];
+
+  return binCounts(values, bins).map((count, i) => ({
+    x0: bins.edges[i]!,
+    x1: bins.edges[i + 1]!,
+    count,
+  }));
+}
+
+/** What a histogram bar's height means. */
+export type HistogramNormalize = 'count' | 'frequency' | 'density';
+
+/**
+ * Turn raw bin counts into the quantity actually drawn.
+ *
+ * Normalisation is not a cosmetic option once several groups share one axis:
+ * with unequal group sizes raw counts make the larger sample tower over the
+ * smaller one purely because it has more observations, and the comparison the
+ * plot exists for cannot be read at all. `'frequency'` and `'density'` are
+ * what put groups of different n on the same footing.
+ *
+ * `cumulative` sums the counts first and normalises after, so a cumulative
+ * frequency ends at exactly 1. A cumulative *density* is not a density — the
+ * running total of density x width is a proportion — so it is reported as a
+ * frequency rather than silently scaled by a bin width it no longer has. The
+ * Inspector does not offer that combination in the first place.
+ */
+export function histogramValues(
+  counts: readonly number[],
+  bins: BinEdges,
+  normalize: HistogramNormalize = 'count',
+  cumulative = false,
+): number[] {
+  const total = counts.reduce((sum, c) => sum + c, 0);
+
+  let running = 0;
+  return counts.map((c) => {
+    const raw = cumulative ? (running += c) : c;
+    if (total === 0) return 0;
+    if (normalize === 'frequency') return raw / total;
+    if (normalize === 'density') return cumulative ? raw / total : raw / (total * bins.step);
+    return raw;
+  });
 }
 
 /** Bar geometry for a histogram, against a numeric x scale. */
@@ -818,12 +929,17 @@ export function histogramMarks(options: HistogramMarkOptions): HistogramBin[] {
     const right = options.x.scale(b.x1);
     const full = Math.abs(right - left);
     const width = full * options.barWidthFraction;
-    const top = options.y.scale(b.count);
+    // Absent `value` is the raw count, so a caller that never normalises —
+    // every existing one — draws exactly the bars it always did.
+    const value = b.value ?? b.count;
+    const top = options.y.scale(value);
 
     return {
       x0: b.x0,
       x1: b.x1,
       count: b.count,
+      value,
+      ...(options.seriesIndex === undefined ? {} : { seriesIndex: options.seriesIndex }),
       x: Math.min(left, right) + (full - width) / 2,
       y: Math.min(top, baseline),
       width,

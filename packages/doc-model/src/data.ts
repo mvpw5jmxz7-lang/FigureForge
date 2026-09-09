@@ -33,6 +33,32 @@ export type DataFormat =
   /** Treatment,Replicate1,Replicate2,… */
   | 'replicate'
   /**
+   * Y1,Y2,Y3,… — one *column* per group, each holding that group's own stack
+   * of observations. Prism calls this a Column table.
+   *
+   * This is `replicate` read down the columns instead of across the rows, and
+   * it is a separate member for the same reason `contingency` and `proteomics`
+   * are: the numbers mean something different, so a different set of tests
+   * applies. A replicate row is several measurements of *one* thing, and its
+   * mean and SEM are the reading. A column here is a *sample from a
+   * distribution* — its shape is the reading, its n is routinely hundreds, and
+   * what one asks of it is whether two such samples were drawn from the same
+   * distribution (Kolmogorov–Smirnov and its relatives), not whether two means
+   * differ.
+   *
+   * Columns are also allowed to be **ragged** — groups genuinely differ in
+   * size, unlike replicates of a single measurement, which come in matched
+   * sets. That needs no special handling: `parseDelimited` pads short rows
+   * with nulls, `columnKindFor` still reports `'number'` for an all-null-or-
+   * number column, and `toSeries` drops the non-numbers per column.
+   *
+   * Never auto-inferred, the same stance every declared format takes. Nothing
+   * at the cell level separates a table of observation columns from a shared-x
+   * table with several y series — which is exactly what `inferFormat` would
+   * otherwise call it, silently consuming the first group as an axis.
+   */
+  | 'distribution'
+  /**
    * RowLabel,CategoryA,CategoryB,… — a table of *counts*, not measurements.
    *
    * Structurally identical to `replicate`, and deliberately a separate member
@@ -857,6 +883,25 @@ export function toSeries(ds: Dataset): Series[] {
             .filter((v): v is number => typeof v === 'number');
           return { name, values };
         })
+        .filter((s) => s.name !== '' && s.values.length > 0);
+    }
+
+    // The transpose of the arm above: a group per *column*, named by its own
+    // header, holding that column's stack of observations.
+    //
+    // Columns are read independently rather than by row, which is what lets
+    // them be ragged — a shorter group is simply a column with fewer numbers
+    // in it, not a row that has to be padded to match its neighbours. A text
+    // column declared into this layout by mistake filters down to no numbers
+    // and drops out here, rather than drawing an empty group.
+    case 'distribution': {
+      return ds.columns
+        .map((column, index) => ({
+          name: column.name,
+          values: ds.rows
+            .map((row) => row[index])
+            .filter((v): v is number => typeof v === 'number'),
+        }))
         .filter((s) => s.name !== '' && s.values.length > 0);
     }
 

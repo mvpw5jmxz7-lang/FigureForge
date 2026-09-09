@@ -131,6 +131,9 @@ const THEME_SIZE_KEYS: Partial<Record<string, keyof Theme['type']>> = {
   'axis-title': 'axisTitlePt',
   'panel-label': 'panelLabelPt',
   'bracket-label': 'statisticPt',
+  // The same size as a bracket's own label, because it is the same kind of
+  // thing: a test's answer annotated onto the plot it was run on.
+  'ks-gap-label': 'statisticPt',
   'scale-bar-label': 'scaleBarPt',
   'point-label': 'annotationPt',
   'cascade-axis-label': 'tickLabelPt',
@@ -508,7 +511,20 @@ const checkScaleBarCalibration: Rule = ({ document }) => {
 const checkColorAccessibility: Rule = ({ scene, document }) => {
   // Every role that carries a *series* colour. A new mark family left off this
   // list still renders, but drops silently out of the colour-vision check.
-  const MARK_ROLES = new Set(['bar', 'point', 'line', 'box', 'violin', 'outlier']);
+  // 'histogram-outline' belongs here for the same reason 'bar' does: it is one
+  // group's data drawn in that group's own series colour, so two groups that a
+  // reader cannot tell apart is exactly the defect this rule reports. Left out,
+  // switching a multi-group histogram from bars to outlines would silently
+  // withdraw it from the colour check.
+  const MARK_ROLES = new Set([
+    'bar',
+    'point',
+    'line',
+    'box',
+    'violin',
+    'outlier',
+    'histogram-outline',
+  ]);
   const seriesColors = new Set<string>();
   /** Which plot each colour came from, so the finding can select them. */
   const plotsByColor = new Map<string, Set<string>>();

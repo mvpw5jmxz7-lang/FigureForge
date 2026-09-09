@@ -132,6 +132,7 @@ const plotSchema = z.object({
     'violin',
     'beeswarm',
     'histogram',
+    'ecdf',
     'volcano',
     'fold-fold',
     'heatmap',
@@ -156,6 +157,12 @@ const plotSchema = z.object({
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   pointsUseSeriesColor: z.boolean().optional(),
   histogramBins: z.number().int().positive().optional(),
+  histogramStyle: z.enum(['overlay', 'step']).optional(),
+  histogramCumulative: z.boolean().optional(),
+  histogramNormalize: z.enum(['count', 'frequency', 'density']).optional(),
+  // Absent reads as on, so this line exists to carry an explicit `false` —
+  // without it, turning the marker off would not survive a save.
+  ksGapMarker: z.boolean().optional(),
   errorBarDirection: z.enum(['both', 'up']).optional(),
   pointShape: z
     .enum(['circle', 'square', 'triangle', 'triangle-down', 'diamond', 'pentagon', 'cross', 'star'])
@@ -427,6 +434,7 @@ const datasetSchema = z.object({
     'pca',
     'umap',
     'proteomics',
+    'distribution',
   ]),
   columns: z.array(z.object({ name: z.string(), kind: z.enum(['number', 'text']) })),
   rows: z.array(z.array(cellSchema)),
@@ -457,6 +465,20 @@ const comparisonSchema = z.object({
   effectSize: finite.nullable(),
   effectSizeName: z.string().nullable(),
   n: z.array(nonNeg),
+  /**
+   * Optional: post-dates SCHEMA_VERSION 1. Not cosmetic — without this line
+   * zod would strip the bracket on save, so a stored Anderson–Darling result
+   * would reopen reporting its clamped 0.001 as a point value.
+   */
+  pBound: z.enum(['below', 'above']).nullable().optional(),
+  /**
+   * Also optional and post-SCHEMA_VERSION-1, and load-bearing for the same
+   * reason: without these two lines zod strips them on save, and a saved
+   * figure reopens with its KS gap marker silently gone from a plot that was
+   * drawing one when it was saved.
+   */
+  statisticLocation: finite.nullable().optional(),
+  statisticSign: finite.nullable().optional(),
 });
 
 /**
@@ -481,7 +503,13 @@ const regressionFitSchema = z.object({
 const statResultSchema = z.object({
   test: z.string(),
   omnibus: z
-    .object({ statistic: finite, p: finite, df: z.array(finite).nullable() })
+    .object({
+      statistic: finite,
+      p: finite,
+      df: z.array(finite).nullable(),
+      /** As the comparison's own `pBound`. */
+      pBound: z.enum(['below', 'above']).nullable().optional(),
+    })
     .nullable(),
   comparisons: z.array(comparisonSchema),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */

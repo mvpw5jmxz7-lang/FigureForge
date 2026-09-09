@@ -67,7 +67,9 @@ import {
   alignSelection,
   applyAutoLayout,
   distributeSelection,
+  DISTRIBUTION_Y_TITLES,
   defaultPlotTypeFor,
+  distributionYTitle,
   deleteNode,
   duplicateNode,
   fillPanelChildren,
@@ -612,6 +614,56 @@ describe('series extraction', () => {
     expect(series).toHaveLength(2);
     expect(series[0]).toEqual({ name: 'Vehicle', values: [10, 11, 12] });
     expect(series[1]).toEqual({ name: 'Drug', values: [4, 5, 6] });
+  });
+
+  it('reads a distribution table as one series per column', () => {
+    // The transpose of the replicate case above: groups run down the columns.
+    const table: Dataset = {
+      ...dataset('Y1,Y2,Y3\n10,4,7\n11,5,8\n12,6,9'),
+      format: 'distribution',
+    };
+    const series = toSeries(table);
+    expect(series).toHaveLength(3);
+    expect(series[0]).toEqual({ name: 'Y1', values: [10, 11, 12] });
+    expect(series[1]).toEqual({ name: 'Y2', values: [4, 5, 6] });
+    expect(series[2]).toEqual({ name: 'Y3', values: [7, 8, 9] });
+  });
+
+  it('keeps ragged distribution columns at their own lengths', () => {
+    /*
+     * The property that separates this layout from `replicate`: groups really
+     * do differ in size, so a short column is a group with fewer observations
+     * — not a row to pad out. Read by row instead, the blanks would either
+     * drop whole rows out of the long columns or pad the short ones with
+     * numbers nobody measured.
+     */
+    const table: Dataset = {
+      ...dataset('Y1,Y2,Y3\n10,4,7\n11,5,\n12,,\n13,,'),
+      format: 'distribution',
+    };
+    const series = toSeries(table);
+    expect(series.map((s) => s.values)).toEqual([[10, 11, 12, 13], [4, 5], [7]]);
+  });
+
+  it('drops a text column declared into a distribution table', () => {
+    // It filters down to no numbers rather than drawing an empty group.
+    const table: Dataset = {
+      ...dataset('Label,Y1\nA,10\nB,11'),
+      format: 'distribution',
+    };
+    expect(toSeries(table).map((s) => s.name)).toEqual(['Y1']);
+  });
+
+  it('never infers distribution from a table of numeric columns', () => {
+    /*
+     * Nothing at the cell level separates "three columns of observations"
+     * from "a shared x and two y series", so the author declares it. This is
+     * also the misreading the format exists to fix: left to detection the
+     * first group is consumed as an x axis and never plotted at all.
+     */
+    const columns = parseDelimited('Y1,Y2,Y3\n10,4,7\n11,5,8').columns;
+    expect(inferFormat(columns)).not.toBe('distribution');
+    expect(inferFormat(columns)).toBe('prism');
   });
 
   it('groups long-form data by label', () => {
@@ -1438,9 +1490,61 @@ describe('operations', () => {
     expect(defaultPlotTypeFor('survival')).toBe('survival');
     expect(defaultPlotTypeFor('pca')).toBe('scatter');
     expect(defaultPlotTypeFor('umap')).toBe('scatter');
+    // A column of observations is a distribution; a bar over its mean throws
+    // away the shape that is the whole reading.
+    expect(defaultPlotTypeFor('distribution')).toBe('histogram');
     // Same reading as `replicate`, whose shape it shares — what differs is
     // which tests apply, which is not this function's business.
     expect(defaultPlotTypeFor('proteomics')).toBe('bar-dot');
+  });
+
+  it('titles a distribution panel’s axes for what each one actually shows', () => {
+    /*
+     * The Data tab cannot name either axis for this layout — `axisTitlesFor`
+     * returns nothing, because the headers name the *groups* — so it passes its
+     * generic `?? 'Value'` placeholder for y, exactly as it does for every other
+     * unnameable table.
+     *
+     * That placeholder is right for x and wrong for y, and passing it is what
+     * this pins: an earlier version shipped with **both** axes reading "Value",
+     * because `retitleDistributionY` correctly declines to overwrite a title
+     * somebody set. Every unit test called `addPlot` with no `yTitle` at all, so
+     * only running the app showed it.
+     */
+    const newId = createIdFactory();
+    const doc = editDocument(
+      createDocument({ widthMm: 183, heightMm: 75, idFactory: newId }),
+      (draft) => {
+        const ds: Dataset = {
+          ...dataset('Y1,Y2\n1,3\n2,4', newId()),
+          format: 'distribution',
+        };
+        draft.datasets = [ds];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 0, y: 0, width: 80, height: 60 },
+          datasetId: ds.id,
+          name: 'Groups',
+          // What `DataTab.importDataset` really passes for this format.
+          yTitle: 'Value',
+        });
+      },
+    );
+
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    expect(plot.type === 'plot' && plot.x.title).toBe('Value');
+    expect(plot.type === 'plot' && plot.y.title).toBe('Count');
+  });
+
+  it('leaves a hand-written distribution y title alone', () => {
+    // The other half of the rule: only a title this code could have generated
+    // — or the generic placeholder above — is ever replaced.
+    const plot = {
+      plotType: 'histogram' as const,
+      y: { title: 'Cells counted' },
+      histogramNormalize: 'density' as const,
+    };
+    expect(DISTRIBUTION_Y_TITLES.has(plot.y.title)).toBe(false);
+    expect(distributionYTitle(plot)).toBe('Density');
   });
 
   it('gives an imported xy panel a numeric x axis with ticks', () => {
@@ -3525,6 +3629,67 @@ describe('.figureforge archive', () => {
     expect(loaded.document).toEqual(doc);
   });
 
+  it('round-trips a distribution figure: the ecdf plot type and all three histogram fields', () => {
+    /*
+     * The two halves of round 50's schema surface, checked together because
+     * they fail the same way and only a round trip can see it: zod strips a
+     * key present only on the TS type, and it validates `plotType` against an
+     * enum, so a missing member would make the *whole document* refuse to
+     * load rather than merely losing a setting.
+     *
+     * Two plots, because the two cases are genuinely different. The ECDF
+     * exercises the widened enum and the per-series `lineStyles` that are its
+     * only non-colour way to tell samples apart; the histogram carries all
+     * three `histogram*` fields at once, each set to a non-default so a
+     * dropped one cannot pass by coinciding with what the renderer would have
+     * chosen anyway.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Y1,Y2\n1.0,3.0\n1.4,3.6\n1.8,4.1', newId()),
+        format: 'distribution',
+      };
+      draft.datasets = [ds];
+
+      const { plot: hist } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Histogram',
+        plotType: 'histogram',
+      });
+      const histNode = draft.nodes[hist.id];
+      if (histNode?.type === 'plot') {
+        histNode.histogramStyle = 'step';
+        histNode.histogramCumulative = true;
+        histNode.histogramNormalize = 'frequency';
+        histNode.histogramBins = 7;
+      }
+
+      const { plot: curve } = addPanelWithPlot(draft, newId, {
+        frame: { x: 90, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'ECDF',
+        plotType: 'ecdf',
+      });
+      const curveNode = draft.nodes[curve.id];
+      if (curveNode?.type === 'plot') {
+        curveNode.lineStyles = ['solid', 'dashed'];
+      }
+    });
+
+    const bytes = saveArchive(buildArchiveContents(doc));
+    const loaded = loadArchive(bytes);
+    expect(loaded.document).toEqual(doc);
+  });
+
   it('round-trips a proteomics dataset and its derivedFrom link', () => {
     /*
      * Both are optional additions, so `SCHEMA_VERSION` stays 1 — and zod
@@ -4310,6 +4475,161 @@ describe('.figureforge archive', () => {
     expect(untouchedPlot?.type === 'plot' && 'showGridlines' in untouchedPlot).toBe(false);
     expect(untouchedPlot?.type === 'plot' && 'gridlineColor' in untouchedPlot).toBe(false);
     expect(untouchedPlot?.type === 'plot' && 'gridlineStyle' in untouchedPlot).toBe(false);
+  });
+
+  it("round-trips a bracketed p-value on both a comparison and its omnibus", () => {
+    /*
+     * Anderson–Darling is the one test here whose p-value is a bracket rather
+     * than a number: SciPy interpolates it from a published table and clamps
+     * the result to [0.001, 0.25]. `pBound` is what carries that fact, and
+     * zod strips any key the schema does not name — so without its two schema
+     * lines a saved result would reopen reporting the clamp as a point value,
+     * turning "P > 0.25" into a confident "P = 0.250".
+     *
+     * Both places are set, and to *different* bounds, because they are two
+     * separate schema entries: one covering the other would leave the missing
+     * half silently passing.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = { ...dataset('Y1\tY2\n1\t5\n2\t6\n3\t7', newId()), format: 'distribution' };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Distributions',
+        plotType: 'histogram',
+      });
+      draft.analyses = [
+        {
+          id: newId(),
+          name: 'Y1 vs Y2',
+          test: 'anderson-darling',
+          spec: { datasetId: ds.id, groups: ['Y1', 'Y2'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'anderson-darling',
+            omnibus: { statistic: 7.81, p: 0.001, df: null, pBound: 'below' },
+            comparisons: [
+              {
+                groupA: 'Y1',
+                groupB: 'Y2',
+                statistic: -1.15,
+                p: 0.25,
+                pAdjusted: 0.25,
+                df: null,
+                ci: null,
+                effectSize: null,
+                effectSizeName: null,
+                n: [3, 3],
+                pBound: 'above',
+              },
+            ],
+            methodsSentence: 'A²k = 7.81, P < 0.001.',
+            warnings: [],
+            softwareVersions: { scipy: '1.15.0' },
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    expect(loaded.document.analyses[0]?.result?.omnibus?.pBound).toBe('below');
+    expect(loaded.document.analyses[0]?.result?.comparisons[0]?.pBound).toBe('above');
+  });
+
+  it("round-trips the KS gap's location and sign, and an explicit marker off", () => {
+    /*
+     * The three fields the ECDF's gap marker is drawn from. All three are
+     * post-SCHEMA_VERSION-1 and therefore optional, which is exactly why each
+     * needs its own schema line and its own assertion: zod strips whatever it
+     * is not told about, so a missing line would show up only as a saved
+     * figure reopening without the marker it was drawing when it was saved.
+     *
+     * `ksGapMarker` is set to `false` deliberately. It is the one optional
+     * field here whose *absent* reading is on, so `true` would survive a
+     * stripped schema line by accident and prove nothing.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const doc = editDocument(base, (draft) => {
+      const ds: Dataset = {
+        ...dataset('Y1\tY2\n1\t5\n2\t6\n3\t7', newId()),
+        format: 'distribution',
+      };
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Distributions',
+        plotType: 'ecdf',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') plotNode.ksGapMarker = false;
+      draft.analyses = [
+        {
+          id: newId(),
+          name: 'Y1 vs Y2',
+          test: 'kolmogorov-smirnov',
+          spec: { datasetId: ds.id, groups: ['Y1', 'Y2'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: 'kolmogorov-smirnov',
+            omnibus: null,
+            comparisons: [
+              {
+                groupA: 'Y1',
+                groupB: 'Y2',
+                statistic: 1,
+                p: 0.1,
+                pAdjusted: 0.1,
+                df: null,
+                ci: null,
+                effectSize: null,
+                effectSizeName: null,
+                n: [3, 3],
+                // A negative sign as well as a non-zero location: a schema
+                // line that dropped the sign would leave a marker that could
+                // be drawn the wrong way up with nothing to say so.
+                statisticLocation: 3,
+                statisticSign: -1,
+              },
+            ],
+            methodsSentence: 'D = 1.000, P = 0.100.',
+            warnings: [],
+            softwareVersions: { scipy: '1.15.0' },
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+    const comparison = loaded.document.analyses[0]?.result?.comparisons[0];
+    expect(comparison?.statisticLocation).toBe(3);
+    expect(comparison?.statisticSign).toBe(-1);
+    const reloaded = Object.values(loaded.document.nodes).find((n) => n.type === 'plot');
+    expect(reloaded?.type === 'plot' && reloaded.ksGapMarker).toBe(false);
   });
 
   it('round-trips the fitted-line fields and the analysis fit, absent when never set', () => {

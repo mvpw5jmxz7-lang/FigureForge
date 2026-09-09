@@ -11,6 +11,8 @@
 import { useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
+  DISTRIBUTION_Y_TITLES,
+  LINE_STYLED_PLOT_TYPES,
   TREND_LINE_PLOT_TYPES,
   DEFAULT_FOLD_FOLD_THRESHOLDS,
   DEFAULT_VOLCANO_THRESHOLDS,
@@ -22,6 +24,7 @@ import {
   addAsset,
   addGroupLabel,
   childrenOf,
+  distributionYTitle,
   effectiveDpi,
   fillPanelChildren,
   fitMontageToImages,
@@ -122,6 +125,7 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
   { id: 'scatter', label: 'Scatter' },
   { id: 'line', label: 'Line' },
   { id: 'histogram', label: 'Histogram' },
+  { id: 'ecdf', label: 'Cumulative distribution (ECDF)' },
   { id: 'volcano', label: 'Volcano' },
   { id: 'fold-fold', label: 'Fold change vs fold change' },
   { id: 'heatmap', label: 'Heatmap' },
@@ -132,8 +136,8 @@ const OFFERED_PLOT_TYPES: { id: PlotType; label: string }[] = [
  * Which types this particular dataset can actually support.
  *
  * Scatter and line need paired x values, which `toSeries` supplies only for the
- * xy-shaped formats; a histogram needs a single distribution, since pooling
- * several groups invents a bimodal shape belonging to neither; a volcano plot
+ * xy-shaped formats; a histogram or an ECDF needs either a single distribution
+ * or a table that declares its columns to be several (see below); a volcano plot
  * needs a per-point identity, which only the `differential` format supplies —
  * gated on that data shape rather than on the format's name, the same way
  * scatter/line gate on "does `.x` exist" rather than on a format list. A
@@ -150,6 +154,7 @@ function typesFor(
   hasMatrix: boolean,
   hasSurvival: boolean,
   hasFoldFold: boolean,
+  hasDistribution: boolean,
 ): typeof OFFERED_PLOT_TYPES {
   const hasX = series.length > 0 && series.every((s) => s.x !== undefined && s.x.length > 0);
   const single = series.length === 1;
@@ -157,7 +162,20 @@ function typesFor(
 
   return OFFERED_PLOT_TYPES.filter((t) => {
     if (t.id === 'scatter' || t.id === 'line') return hasX;
-    if (t.id === 'histogram') return single;
+    /*
+     * Several groups now draw over one *shared* binning rather than being
+     * pooled into a single array, so more than one series is no longer a
+     * reason to withhold these — pooling was, and still would be, an invented
+     * shape belonging to no group.
+     *
+     * Widened on the dataset's declared format rather than on series count, so
+     * every existing table's dropdown is byte-identical to before. That is not
+     * timidity: a `replicate` row is three measurements of one thing, and a
+     * three-bar histogram of it reads as a distribution the design never
+     * sampled. Declaring the `distribution` layout is precisely the statement
+     * that each column *is* a sample, which is the claim these two types draw.
+     */
+    if (t.id === 'histogram' || t.id === 'ecdf') return single || hasDistribution;
     /*
      * A fold-fold table satisfies `hasLabels` exactly as a differential one
      * does — same three columns, same label in column 0 — so volcano has to
@@ -174,8 +192,17 @@ function typesFor(
   });
 }
 
-/** Types that draw the whole distribution, so a centre and error bar say nothing extra. */
-const DISTRIBUTION_TYPES: ReadonlySet<PlotType> = new Set<PlotType>(['box', 'violin']);
+/**
+ * Marks that draw the whole distribution, so a centre and error bar say nothing
+ * extra.
+ *
+ * Named for the *mark* rather than "distribution types" so it cannot be read as
+ * `DISTRIBUTION_PLOT_TYPES`, which is a different set answering a different
+ * question — histogram and ECDF, the types that read the `histogram*` fields.
+ * A box and a violin are the categorical readings of the same columns and are
+ * deliberately not in that set.
+ */
+const WHOLE_DISTRIBUTION_MARKS: ReadonlySet<PlotType> = new Set<PlotType>(['box', 'violin']);
 
 const VOLCANO_CATEGORY_LABELS: Record<VolcanoCategory, string> = {
   down: 'Down',
@@ -1295,6 +1322,7 @@ function PlotFields({
     dataset?.format === 'matrix',
     dataset?.format === 'survival',
     dataset?.format === 'fold-fold',
+    dataset?.format === 'distribution',
   );
 
   /*
@@ -1389,7 +1417,12 @@ function PlotFields({
    * already names it.
    */
   const perSeriesShapes =
-    CONTINUOUS_X_PLOT_TYPES.has(node.plotType) && node.plotType !== 'survival' && series.length > 1;
+    CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
+    node.plotType !== 'survival' &&
+    // No markers are drawn at all on an ECDF, so a per-series shape would set
+    // a field nothing reads.
+    node.plotType !== 'ecdf' &&
+    series.length > 1;
 
   /*
    * Per-series line styles, indexed by series order — the same key the
@@ -1407,12 +1440,13 @@ function PlotFields({
 
   /*
    * A different dash pattern per series is a second way to carry series
-   * identity where colour cannot. Offered only for `line`: it is the only
-   * plot type whose connecting line is both drawn and user-styleable —
-   * scatter never draws one, and survival's own curve has its own Inspector
-   * surface and is not exposed here.
+   * identity where colour cannot — and on an ECDF it is the *only* one, since
+   * that plot type draws no markers to vary. `LINE_STYLED_PLOT_TYPES` is
+   * where the set is stated; the legend reads it too, so a dashed curve can
+   * never be keyed by a plain block.
    */
-  const perSeriesLineStyles = node.plotType === 'line' && series.length > 1;
+  const perSeriesLineStyles =
+    LINE_STYLED_PLOT_TYPES.has(node.plotType) && series.length > 1;
 
   /*
    * Band spacing, and what to call it. Two factors put marks inside a category,
@@ -1429,7 +1463,9 @@ function PlotFields({
    * "Hide points outside min/max" only affects a plot whose marks `xyMarks`
    * builds — a histogram's x is bin edges and its y a derived count, and
    * survival's y is hardcoded to [0, 1] and never reads this either, since
-   * neither goes through `xyMarks`.
+   * neither goes through `xyMarks`. An ECDF is the same case again: it is one
+   * polyline built from the sample directly, with no per-point mark for a
+   * range filter to remove.
    */
   const clipToRangeRelevant =
     node.plotType === 'scatter' || node.plotType === 'line' || node.plotType === 'volcano';
@@ -1439,14 +1475,15 @@ function PlotFields({
    * than assumed. `computePlotGeometry`'s volcano branch hardcodes
    * `showPoints: true`, its scatter/line branch forces it true for a scatter,
    * and its histogram branch never reads the field — so on those three the
-   * checkbox was a control that visibly did nothing. Heatmap and survival
-   * never had it.
+   * checkbox was a control that visibly did nothing. Heatmap, survival and
+   * the ECDF (one polyline, `points: []`) never had it.
    */
   const showPointsRelevant =
     node.plotType !== 'heatmap' &&
     node.plotType !== 'survival' &&
     node.plotType !== 'volcano' &&
     node.plotType !== 'scatter' &&
+    node.plotType !== 'ecdf' &&
     node.plotType !== 'histogram';
 
   /*
@@ -1454,13 +1491,16 @@ function PlotFields({
    * vertical axis on separation; a categorical plot's bands carry the reading
    * rather than its values; a volcano is always exactly one series; and
    * comparing survival arms against different probability scales would defeat
-   * the comparison. Composed once so the heading can be hidden with the
-   * control rather than left standing over nothing.
+   * the comparison — and an ECDF's y axis is that same fixed [0, 1]
+   * proportion, so a second one could only ever be the same axis twice.
+   * Composed once so the heading can be hidden with the control rather than
+   * left standing over nothing.
    */
   const secondAxisRelevant =
     !hasCascadeOffset(node, series.length) &&
     CONTINUOUS_X_PLOT_TYPES.has(node.plotType) &&
     node.plotType !== 'volcano' &&
+    node.plotType !== 'ecdf' &&
     node.plotType !== 'survival';
 
   return (
@@ -1659,12 +1699,27 @@ function PlotFields({
           value={node.plotType}
           onChange={(e) => {
             const plotType = e.target.value as PlotType;
-            // A numeric x axis is unreadable without ticks; a categorical one
-            // needs none. The default is set at creation, so switching type
-            // afterwards has to carry it across too.
+            /*
+             * A numeric x axis is unreadable without ticks; a categorical one
+             * needs none. The default is set at creation, so switching type
+             * afterwards has to carry it across too.
+             *
+             * The y title moves with the type for the same reason it moves with
+             * the normalisation: switching a histogram to an ECDF turns the axis
+             * from a count into a cumulative probability, and an axis left
+             * reading "Count" beside a curve running 0 to 1 misdescribes the
+             * figure. A title the author typed is not in `DISTRIBUTION_Y_TITLES`
+             * and so is never touched.
+             */
+            const generatedTitle = DISTRIBUTION_Y_TITLES.has(node.y.title) || node.y.title === '';
+            const retitles =
+              generatedTitle && (plotType === 'histogram' || plotType === 'ecdf');
             setPlot('Change plot type', {
               plotType,
               x: { ...node.x, showTicks: CONTINUOUS_X_PLOT_TYPES.has(plotType) },
+              ...(retitles
+                ? { y: { ...node.y, title: distributionYTitle({ ...node, plotType }) } }
+                : {}),
             });
           }}
         >
@@ -1675,6 +1730,167 @@ function PlotFields({
           ))}
         </select>
       </label>
+
+      {/*
+       * The histogram's own four controls. Gated on `histogram` rather than on
+       * `DISTRIBUTION_PLOT_TYPES`, because an ECDF reads none of them: it has no
+       * binning to size, no bars to style, is cumulative by definition, and its
+       * y axis is a probability fixed at [0, 1]. Offering them there would be
+       * four controls that visibly do nothing.
+       */}
+      {node.plotType === 'histogram' && (
+        <>
+          <div className="field-row">
+            <label className="field">
+              Bins
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={node.histogramBins ?? ''}
+                placeholder="Auto"
+                onChange={(e) => {
+                  const raw = Number(e.target.value);
+                  setPlot(
+                    'Change bin count',
+                    e.target.value === '' || !Number.isFinite(raw) || raw < 1
+                      ? { histogramBins: undefined }
+                      : { histogramBins: Math.min(200, Math.round(raw)) },
+                  );
+                }}
+              />
+            </label>
+            <label className="field">
+              Bar heights
+              <select
+                value={node.histogramNormalize ?? 'count'}
+                onChange={(e) => {
+                  const histogramNormalize = e.target.value as NonNullable<
+                    PlotNode['histogramNormalize']
+                  >;
+                  /*
+                   * The y title is re-derived in the same patch, so the axis can
+                   * never be left reading "Count" over a set of densities — a
+                   * figure stating something false about its own numbers.
+                   * `retitleDistributionY`'s rule lives in `distributionYTitle`
+                   * plus `DISTRIBUTION_Y_TITLES`, so a title the author typed is
+                   * left exactly as they wrote it.
+                   */
+                  const next = { ...node, histogramNormalize };
+                  setPlot('Change bar heights', {
+                    histogramNormalize,
+                    ...(DISTRIBUTION_Y_TITLES.has(node.y.title) || node.y.title === ''
+                      ? { y: { ...node.y, title: distributionYTitle(next) } }
+                      : {}),
+                  });
+                }}
+              >
+                <option value="count">Count</option>
+                <option value="frequency">Relative frequency</option>
+                <option value="density">Density</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={node.histogramCumulative === true}
+              onChange={(e) => {
+                const histogramCumulative = e.target.checked;
+                const next = { ...node, histogramCumulative };
+                setPlot('Toggle cumulative', {
+                  histogramCumulative,
+                  /*
+                   * A cumulative density is not a density — the running total of
+                   * density x width is a proportion — so the combination is not
+                   * offered at all rather than drawn and mislabelled. Switching
+                   * it on over a density falls back to relative frequency, which
+                   * is what the accumulation actually produces.
+                   */
+                  ...(histogramCumulative && node.histogramNormalize === 'density'
+                    ? { histogramNormalize: 'frequency' as const }
+                    : {}),
+                  ...(DISTRIBUTION_Y_TITLES.has(node.y.title) || node.y.title === ''
+                    ? {
+                        y: {
+                          ...node.y,
+                          title: distributionYTitle(
+                            histogramCumulative && node.histogramNormalize === 'density'
+                              ? { ...next, histogramNormalize: 'frequency' }
+                              : next,
+                          ),
+                        },
+                      }
+                    : {}),
+                });
+              }}
+            />
+            Cumulative
+          </label>
+
+          {series.length > 1 && (
+            <>
+              <label className="field block">
+                Several groups
+                <select
+                  value={node.histogramStyle ?? 'overlay'}
+                  onChange={(e) =>
+                    setPlot('Change histogram style', {
+                      histogramStyle: e.target.value as NonNullable<PlotNode['histogramStyle']>,
+                    })
+                  }
+                >
+                  <option value="overlay">Overlaid, translucent</option>
+                  <option value="step">Step outlines</option>
+                </select>
+              </label>
+              <p className="hint">
+                Every group is counted into one shared set of bins, so the bars line up and the
+                shapes can be compared. Translucent fills read well at two or three groups; past
+                that, outlines stay legible where stacked fills do not.
+                {(node.histogramNormalize ?? 'count') === 'count' &&
+                  ' Groups of unequal size are hard to compare on a count axis — relative frequency or density puts them on the same footing.'}
+              </p>
+            </>
+          )}
+        </>
+      )}
+
+      {/*
+       * The ECDF's one control. Offered only where it can do something: with
+       * one curve there is no gap, and with three or more a KS run reports a
+       * separate gap for every pair with no honest way to pick one, so the
+       * marker is withheld and the reason is stated rather than a dead
+       * checkbox being left on screen.
+       */}
+      {node.plotType === 'ecdf' &&
+        (series.length === 2 ? (
+          <>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={node.ksGapMarker !== false}
+                onChange={(e) =>
+                  setPlot('Toggle KS gap marker', { ksGapMarker: e.target.checked })
+                }
+              />
+              Mark the Kolmogorov–Smirnov gap
+            </label>
+            <p className="hint">
+              Draws D where the test measured it — the largest vertical distance between the two
+              curves. Appears once a Kolmogorov–Smirnov test has been run on this plot from the
+              Stats tab, and nothing is drawn before that.
+            </p>
+          </>
+        ) : (
+          <p className="hint">
+            The Kolmogorov–Smirnov gap is marked on a plot drawing exactly two curves.{' '}
+            {series.length < 2
+              ? 'One sample has nothing to be compared against.'
+              : `With ${series.length} groups the test reports a separate gap for every pair, and no one of them is the plot's answer.`}
+          </p>
+        ))}
 
       {node.plotType === 'heatmap' ? null : node.plotType === 'survival' ? (
         <>
@@ -1700,7 +1916,7 @@ function PlotFields({
             clutter before they read as data, so the band is off by default.
           </p>
         </>
-      ) : DISTRIBUTION_TYPES.has(node.plotType) ? null : CONTINUOUS_X_PLOT_TYPES.has(
+      ) : WHOLE_DISTRIBUTION_MARKS.has(node.plotType) ? null : CONTINUOUS_X_PLOT_TYPES.has(
           node.plotType,
         ) && !summarisable ? null : (
         <>
@@ -1844,7 +2060,12 @@ function PlotFields({
         </>
       )}
 
-      {node.plotType !== 'heatmap' && node.plotType !== 'survival' && (
+      {/* An ECDF joins heatmap and survival here: it is one polyline with
+          `points: []`, so every marker control below would adjust something
+          that is never drawn. */}
+      {node.plotType !== 'heatmap' &&
+        node.plotType !== 'survival' &&
+        node.plotType !== 'ecdf' && (
         <>
           <div className="field-row">
             <label className="field">
@@ -1916,7 +2137,7 @@ function PlotFields({
         </>
       )}
 
-      {node.plotType === 'line' && (
+      {LINE_STYLED_PLOT_TYPES.has(node.plotType) && (
         <label className="field block">
           Line style
           <select
@@ -1999,7 +2220,11 @@ function PlotFields({
         label="Y"
         axis={node.y}
         seriesValues={series.flatMap((s) => s.values)}
-        numeric={node.plotType !== 'heatmap' && node.plotType !== 'survival'}
+        numeric={
+          node.plotType !== 'heatmap' &&
+          node.plotType !== 'survival' &&
+          node.plotType !== 'ecdf'
+        }
         clipRelevant={clipToRangeRelevant}
         onChange={(patch, label) => setPlot(label, { y: { ...node.y, ...patch } })}
       />

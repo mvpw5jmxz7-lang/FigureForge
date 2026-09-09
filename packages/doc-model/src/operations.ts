@@ -220,8 +220,67 @@ export function defaultPlotTypeFor(format: DataFormat | undefined): PlotType {
     case 'pca':
     case 'umap':
       return 'scatter';
+    /*
+     * Columns of observations open as a histogram: the shape of each sample is
+     * the reading, and a bar over its mean throws exactly that away.
+     *
+     * The groups are drawn over one shared set of bin edges rather than pooled
+     * — pooling really would invent a shape belonging to no group, which is
+     * why a histogram refused more than one series before this. Violin, box
+     * and beeswarm are the categorical readings of the same columns and stay
+     * on the menu for a table with too many groups to overlay legibly.
+     */
+    case 'distribution':
+      return 'histogram';
     default:
       return 'bar-dot';
+  }
+}
+
+/**
+ * The y-axis title a distribution plot writes for itself.
+ *
+ * Composed in exactly one place because four separate controls change the
+ * answer — the plot type, the normalisation, the cumulative toggle, and the
+ * import that creates the plot at all. Left to each of them, an axis ends up
+ * labelled "Count" over densities, which is a figure stating something false
+ * about its own numbers. Same discipline as `scaleBarWidthMm` and
+ * `analysisInputHash`.
+ */
+export function distributionYTitle(
+  node: Pick<PlotNode, 'plotType' | 'histogramNormalize' | 'histogramCumulative'>,
+): string {
+  if (node.plotType === 'ecdf') return 'Cumulative probability';
+
+  const normalize = node.histogramNormalize ?? 'count';
+  if (node.histogramCumulative) {
+    // A cumulative density is not a density — the running total of
+    // density x width is a proportion — so it is named as one.
+    return normalize === 'count' ? 'Cumulative count' : 'Cumulative probability';
+  }
+  if (normalize === 'frequency') return 'Relative frequency';
+  if (normalize === 'density') return 'Density';
+  return 'Count';
+}
+
+/**
+ * Every title `distributionYTitle` can produce — the set that may be
+ * overwritten when the answer changes. A title the author typed is never one
+ * of these, so their wording survives every control on the panel.
+ */
+export const DISTRIBUTION_Y_TITLES: ReadonlySet<string> = new Set([
+  'Count',
+  'Relative frequency',
+  'Density',
+  'Cumulative count',
+  'Cumulative probability',
+]);
+
+/** Re-title a distribution plot's y axis, leaving a hand-written one alone. */
+export function retitleDistributionY(plot: PlotNode): void {
+  const current = plot.y.title;
+  if (current === '' || DISTRIBUTION_Y_TITLES.has(current)) {
+    plot.y.title = distributionYTitle(plot);
   }
 }
 
@@ -278,6 +337,46 @@ export function addPlot(
     plot.errorBars = 'none';
     plot.showPoints = false;
     if (plot.y.title === '') plot.y.title = 'Count';
+  }
+
+  /*
+   * A column of observations is a distribution, and its violin already draws
+   * the shape. The individual points stay *off* by default here, unlike every
+   * other categorical plot, for a reason that is about volume rather than
+   * taste: `categoricalMarks` emits one marker per observation
+   * (`marks.ts`, `showPoints ? s.values : []`), and categorical plots have no
+   * equivalent of `planPointClouds`' rasterization — so a table with a few
+   * hundred rows across a few columns would put tens of thousands of markers
+   * in the DOM and choke every interaction frame.
+   *
+   * Off by default, never unavailable: the Inspector's own checkbox turns them
+   * back on, and at the small n where individual points are worth seeing that
+   * is a deliberate choice rather than an accident of the table's size.
+   */
+  if (dataset && dataset.format === 'distribution') {
+    plot.showPoints = false;
+    /*
+     * The measured quantity runs along x on a histogram or an ECDF, and
+     * nothing in the table names it — the headers name the *groups*, which is
+     * why `axisTitlesFor` deliberately offers nothing for this format. The
+     * same generic placeholder the Data tab already falls back to elsewhere.
+     */
+    if (plot.x.title === '') plot.x.title = 'Value';
+    /*
+     * The Data tab fills an axis it cannot name with a generic `?? 'Value'`.
+     * For this format that placeholder is right for x — the measured quantity
+     * really does run along it — and exactly wrong for y, which counts
+     * observations rather than measuring anything. Cleared so the derived title
+     * wins, rather than adding 'Value' to `DISTRIBUTION_Y_TITLES`, which is the
+     * set that decides whether the *author* wrote a title and must keep meaning
+     * only that.
+     *
+     * Found by running the app: every unit test called `addPlot` with no
+     * `yTitle` at all, so the placeholder never arrived and both axes shipped
+     * reading "Value".
+     */
+    if (plot.y.title === 'Value') plot.y.title = '';
+    retitleDistributionY(plot);
   }
 
   /*

@@ -6,3 +6,4 @@ export * from './fold-fold.js';
 export * from './regression.js';
 export * from './heatmap.js';
 export * from './survival.js';
+export * from './ecdf.js';

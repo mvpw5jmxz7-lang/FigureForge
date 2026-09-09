@@ -13,6 +13,7 @@ returns numbers.
 from __future__ import annotations
 
 import itertools
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -25,6 +26,10 @@ from statsmodels.stats.multitest import multipletests
 
 Alternative = Literal["two-sided", "less", "greater"]
 Correction = Literal["none", "bonferroni", "holm", "benjamini-hochberg", "tukey", "dunn"]
+
+#: A p-value that is known only to lie on one side of the reported number.
+#: "below" means the true p is smaller than `p`, "above" that it is larger.
+PBound = Literal["below", "above"]
 
 
 @dataclass
@@ -39,6 +44,23 @@ class Comparison:
     effectSize: float | None
     effectSizeName: str | None
     n: list[int]
+    #: Set only where the test itself will not commit to a point value — see
+    #: `PBound`. Appended with a default because every construction site in
+    #: this module passes positionally.
+    pBound: PBound | None = None
+    #: Where along the measured axis the statistic was attained, for the tests
+    #: whose statistic is a quantity read at one place rather than accumulated
+    #: over the whole range. Only Kolmogorov-Smirnov sets it: D is the largest
+    #: vertical distance between the two empirical CDFs, so it has a location
+    #: on the x axis and can be drawn. Cramer-von Mises and Anderson-Darling
+    #: integrate over every observation and Epps-Singleton works in the
+    #: frequency domain, so for those there is no single x to point at and the
+    #: field stays None rather than being filled with something plausible.
+    statisticLocation: float | None = None
+    #: Which sample's CDF was the higher one at that location: +1 for `groupA`,
+    #: -1 for `groupB`. Without it a marker drawn from the location and the
+    #: magnitude alone could be placed the wrong way up.
+    statisticSign: int | None = None
 
 
 @dataclass
@@ -46,6 +68,8 @@ class Omnibus:
     statistic: float
     p: float
     df: list[float] | None
+    #: As `Comparison.pBound`, and appended for the same reason.
+    pBound: PBound | None = None
 
 
 @dataclass
@@ -290,17 +314,20 @@ def check_assumptions(groups: dict[str, np.ndarray], parametric: bool) -> list[s
     These are advisory. The point is that an author choosing a t-test on n=3
     skewed data should be told, not blocked.
     """
-    warnings: list[str] = []
+    # Named `notes`, not `warnings`: this module imports the stdlib `warnings`
+    # module to capture SciPy's own p-value clamp warning, and a local of that
+    # name here would shadow it for anyone who later reaches for it.
+    notes: list[str] = []
 
     for name, values in groups.items():
         if len(values) < 3:
-            warnings.append(f'Group "{name}" has n = {len(values)}; results are unreliable.')
+            notes.append(f'Group "{name}" has n = {len(values)}; results are unreliable.')
             continue
         if parametric and 3 <= len(values) <= 5000:
             try:
                 p = sps.shapiro(values).pvalue
                 if p < 0.05:
-                    warnings.append(
+                    notes.append(
                         f'Group "{name}" deviates from normality '
                         f"(Shapiro-Wilk P = {p:.3f}); consider a rank-based test."
                     )
@@ -313,14 +340,14 @@ def check_assumptions(groups: dict[str, np.ndarray], parametric: bool) -> list[s
             try:
                 p = sps.levene(*sized, center="median").pvalue
                 if p < 0.05:
-                    warnings.append(
+                    notes.append(
                         f"Group variances differ (Levene P = {p:.3f}); "
                         "Welch's correction is advisable."
                     )
             except ValueError:
                 pass
 
-    return warnings
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +386,124 @@ def _pairwise(
     for (name_a, a), (name_b, b) in itertools.combinations(groups.items(), 2):
         out.append(fn(name_a, a, name_b, b))
     return out
+
+
+#: The distribution tests: they compare two samples' whole shapes rather than
+#: one summary of each, which is what makes them the right question to ask of a
+#: column of observations drawn as a histogram or an ECDF.
+DISTRIBUTION_TESTS = frozenset(
+    {"kolmogorov-smirnov", "anderson-darling", "cramer-von-mises", "epps-singleton"}
+)
+
+#: Below this many observations per sample, `epps_singleton_2samp` returns NaN
+#: rather than raising. Measured against SciPy 1.15.0: n = 4 gives NaN with a
+#: `SmallSampleWarning`, n = 5 gives a real statistic.
+MIN_EPPS_SINGLETON_N = 5
+
+
+def _require_two_sided(test: str, alternative: Alternative) -> None:
+    """Refuse a directional distribution test rather than silently ignoring it.
+
+    Three of the four take no `alternative` at all — `cramervonmises_2samp` and
+    `epps_singleton_2samp` have no such parameter, and `anderson_ksamp` is
+    k-sample and inherently omnidirectional. Kolmogorov-Smirnov *does* accept
+    one, and it is refused here anyway, deliberately: accepting it for one test
+    of four would mean the same dropdown setting silently applied on one plot
+    and silently ignored on the next.
+
+    The concrete harm of ignoring it is not abstract. `methods_sentence`
+    rewrites its test name whenever `alternative` is directional, so a request
+    that quietly dropped the setting would still hand the author a sentence
+    reading "one-tailed (lower) two-sample Cramer-von Mises test" to paste into
+    a paper — a claim about an analysis that never ran.
+    """
+    if alternative != "two-sided":
+        raise ValueError(
+            f"The {test} test is two-sided: it compares the whole shape of two "
+            "distributions, so there is no single direction to test. Set the "
+            "alternative to two-sided."
+        )
+
+
+def _anderson_ksamp(arrays: list[np.ndarray]) -> tuple[float, float, PBound | None]:
+    """Anderson-Darling k-sample, with SciPy's p-value clamp reported as a bound.
+
+    `anderson_ksamp` interpolates its p-value from a published table and
+    **clamps the result to [0.001, 0.25]**, emitting a `UserWarning` when it
+    does. Passing that clamped number through as a point value would print
+    "P = 0.25" for a result the test is only willing to call "larger than 0.25",
+    and "P = 0.001" for one it will only call smaller — the second of which a
+    reader would take as significant at three decimal places.
+
+    The warning is the only channel SciPy offers for this, so it is captured
+    rather than parsed out of the value: `p == 0.25` is also a legitimate
+    interpolated answer, and the two cases are indistinguishable from the
+    number alone.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = sps.anderson_ksamp(arrays)
+
+    bound: PBound | None = None
+    for entry in caught:
+        message = str(entry.message)
+        if "floored" in message:
+            bound = "below"
+        elif "capped" in message:
+            bound = "above"
+
+    return float(result.statistic), float(result.pvalue), bound
+
+
+def _check_anderson_darling_inputs(groups: dict[str, np.ndarray]) -> None:
+    """Refuse the two inputs on which `anderson_ksamp` misleads or raises.
+
+    A one-observation sample is the dangerous one: SciPy does *not* complain,
+    it returns a large negative statistic and a p-value clamped to 0.25 —
+    a confident "no difference" derived from a sample that cannot support any
+    conclusion at all.
+
+    An entirely constant pooled sample raises `ValueError("anderson_ksamp needs
+    more than one distinct observation")`, which already reaches the client as
+    a 422; it is pre-empted here only so the message names the author's data
+    rather than SciPy's internals.
+    """
+    small = [name for name, values in groups.items() if len(values) < 2]
+    if small:
+        raise ValueError(
+            "The Anderson-Darling k-sample test needs at least two observations in "
+            f"every group; {', '.join(sorted(small))} has fewer. With one observation "
+            "the test reports a difference of nothing at all rather than refusing."
+        )
+
+    pooled = np.concatenate(list(groups.values()))
+    if len(np.unique(pooled)) < 2:
+        raise ValueError(
+            "Every observation across all groups is the same value, so there is no "
+            "distribution to compare."
+        )
+
+
+def _check_epps_singleton_inputs(groups: dict[str, np.ndarray]) -> None:
+    """Refuse below the sample size at which SciPy stops returning a number.
+
+    This is a hard refusal rather than a warning because of what happens
+    downstream if it is not: `epps_singleton_2samp` returns NaN below
+    `MIN_EPPS_SINGLETON_N`, and `main.py`'s `_sanitize_or(c.p, 1.0)` turns a
+    non-finite p into **1.0** — so the figure would report a perfectly
+    confident null result computed from nothing. The empirical characteristic
+    function this test compares is estimated from too few points to be one.
+    """
+    small = {
+        name: len(values) for name, values in groups.items() if len(values) < MIN_EPPS_SINGLETON_N
+    }
+    if small:
+        detail = ", ".join(f'"{name}" has {n}' for name, n in sorted(small.items()))
+        raise ValueError(
+            f"The Epps-Singleton test needs at least {MIN_EPPS_SINGLETON_N} observations "
+            f"per group ({detail}). Below that it returns no result at all rather than "
+            "a weak one."
+        )
 
 
 def _logrank_terms(
@@ -544,10 +689,21 @@ def run_test(
     # wrong thing. The count tests carry their own validation instead. A
     # log-rank "group" is a set of follow-up times, not measurements either —
     # Shapiro/Levene say nothing meaningful about a time-to-event sample.
+    #
+    # The distribution tests are deliberately NOT skipped here, though the
+    # obvious argument says they should be: warning that a distribution-free
+    # test's input is non-normal would indeed be backwards. It cannot happen.
+    # `check_assumptions` runs Shapiro and Levene only when `parametric` is
+    # true, and none of these four is in that set — measured, not reasoned
+    # about, after a test written to pin the skip passed just as happily with
+    # the skip removed. What the checks actually contribute for these tests is
+    # the small-sample warning, and that one is if anything more apt here than
+    # elsewhere: a two-sample Kolmogorov-Smirnov at n = 2 is very nearly
+    # powerless, and saying so is the whole job of an advisory warning.
     counts = test in ("chi-square", "fisher")
-    warnings = [] if (counts or test == "log-rank") else check_assumptions(cleaned, parametric)
+    checks = [] if (counts or test == "log-rank") else check_assumptions(cleaned, parametric)
     outcome = _dispatch(test, cleaned, alternative, alpha, welch, cleaned_events)
-    outcome.warnings = warnings + outcome.warnings
+    outcome.warnings = checks + outcome.warnings
 
     adjusted = apply_correction([c.p for c in outcome.comparisons], correction, alpha)
     # strict=True on purpose: a length mismatch would leave some comparison
@@ -713,6 +869,81 @@ def _dispatch(
             _pairwise(groups, run),
             Omnibus(float(h_stat), float(p), [float(len(arrays) - 1)]),
         )
+
+    if test in DISTRIBUTION_TESTS:
+        _require_two_sided(test, alternative)
+
+    if test == "kolmogorov-smirnov":
+        # Two-sample, so pairwise with no omnibus — the shape `wilcoxon`
+        # already uses. No df, no confidence interval and no effect size: D is
+        # itself the effect, being the largest gap between the two empirical
+        # CDFs, and inventing a Hedges' g beside it would describe a difference
+        # in means the test never looked at.
+        def run(na, a, nb, b):
+            result = sps.ks_2samp(a, b, alternative="two-sided")
+            # `statistic_location` and `statistic_sign` are what let the gap be
+            # drawn on an ECDF rather than only tabulated. They are taken from
+            # SciPy rather than re-derived on the client: recomputing the
+            # argmax there would be a second answer to a question this one has
+            # already settled, and the two would disagree wherever a tie makes
+            # the maximum non-unique.
+            return Comparison(
+                na, nb, float(result.statistic), float(result.pvalue), float(result.pvalue),
+                None, None, None, None, [len(a), len(b)], None,
+                float(result.statistic_location), int(result.statistic_sign),
+            )
+
+        return TestOutcome(_pairwise(groups, run))
+
+    if test == "cramer-von-mises":
+        # Integrates the squared distance between the two ECDFs over the whole
+        # range rather than reading only its maximum, so it notices a
+        # difference spread thinly across the distribution that KS can miss.
+        def run(na, a, nb, b):
+            result = sps.cramervonmises_2samp(a, b)
+            return Comparison(
+                na, nb, float(result.statistic), float(result.pvalue), float(result.pvalue),
+                None, None, None, None, [len(a), len(b)],
+            )
+
+        return TestOutcome(_pairwise(groups, run))
+
+    if test == "epps-singleton":
+        _check_epps_singleton_inputs(groups)
+
+        # Compares empirical characteristic functions, so unlike the other
+        # three it is not rank-based — which is what makes it sensitive to
+        # differences in spread that leave the ECDFs close together.
+        def run(na, a, nb, b):
+            result = sps.epps_singleton_2samp(a, b)
+            return Comparison(
+                na, nb, float(result.statistic), float(result.pvalue), float(result.pvalue),
+                None, None, None, None, [len(a), len(b)],
+            )
+
+        return TestOutcome(_pairwise(groups, run))
+
+    if test == "anderson-darling":
+        _check_anderson_darling_inputs(groups)
+
+        # The one genuinely k-sample test of the four, so it takes the
+        # omnibus-plus-pairwise shape `anova-one-way` and `kruskal-wallis`
+        # already use rather than being reduced to a series of pairs.
+        arrays = [groups[n] for n in names]
+        statistic, p, bound = _anderson_ksamp(arrays)
+
+        def run(na, a, nb, b):
+            pair_stat, pair_p, pair_bound = _anderson_ksamp([a, b])
+            return Comparison(
+                na, nb, pair_stat, pair_p, pair_p,
+                None, None, None, None, [len(a), len(b)], pair_bound,
+            )
+
+        # `df` is None on purpose: the k-sample A² statistic is standardised to
+        # a fixed null distribution rather than referred to a chi-square with
+        # degrees of freedom, so reporting a number there would name a quantity
+        # the test does not have.
+        return TestOutcome(_pairwise(groups, run), Omnibus(statistic, p, None, bound))
 
     if test in ("pearson", "spearman"):
         if len(names) != 2:

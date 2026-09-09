@@ -16,6 +16,7 @@ import {
   GROUP_LABEL_RULE_TEXT_GAP_MM,
   GRID_PLOT_TYPES,
   LABELLED_POINT_PLOT_TYPES,
+  LINE_STYLED_PLOT_TYPES,
   TREND_LINE_PLOT_TYPES,
   absoluteFrame,
   isLocked,
@@ -67,10 +68,13 @@ import { paletteColors, parseHex, toHex, type Theme } from '@figureforge/theme';
 import {
   DEFAULT_BAR_GAP_FRACTION,
   DEFAULT_GROUP_GAP_FRACTION,
+  binCounts,
+  binEdges,
   categoricalMarks,
   formatTick,
-  histogramBins,
+  ecdfSteps,
   histogramMarks,
+  histogramValues,
   kaplanMeier,
   makeBandScale,
   makeGroupedBandScale,
@@ -1523,6 +1527,147 @@ export function renderCascadeAxis(node: PlotNode, theme: Theme, geometry: Contin
   return out;
 }
 
+/**
+ * A group's entry in a multi-group histogram's `series`: a name and a colour,
+ * and nothing else.
+ *
+ * The bars are the marks and they travel in `geometry.bins`, so every
+ * mark-bearing field here is deliberately empty. This exists purely so
+ * `renderLegend` — which reads `geometry.series`, never the dataset — has a
+ * name and a swatch colour per group, and so `renderContinuousMarks`' per-series
+ * loop has something to iterate while drawing each group's bars in its own
+ * colour.
+ *
+ * `baselineMm`/`baselineXMm` are null for the same reason survival's are: those
+ * fields exist so a cascade fill knows where its zero line went, and neither
+ * concept applies to a histogram, which never cascades.
+ */
+function histogramSeriesIdentity(name: string, color: string, n: number): XySeriesMarks {
+  return {
+    name,
+    color,
+    points: [],
+    linePath: null,
+    band: null,
+    capHalfWidthMm: 0,
+    replicatePoints: [],
+    censorPoints: [],
+    errorLabel: '',
+    n,
+    topMm: 0,
+    baselineMm: null,
+    baselineXMm: null,
+    offsetMm: { x: 0, y: 0 },
+  };
+}
+
+/**
+ * How close together two consecutive ECDF vertices may sit before the second
+ * is dropped.
+ *
+ * A 10,000-row column is 10,000 risers, and `planPointClouds` cannot rescue
+ * it: that mechanism counts `s.points.length`, which is 0 for a curve drawn
+ * entirely as one `<path>`. So the polyline is thinned here instead — and
+ * unlike a point cloud, thinning a staircase loses nothing a reader could
+ * have seen, because the vertices being merged are closer together than the
+ * device can resolve.
+ *
+ * 0.02 mm is under one dot at 1200 dpi (0.0212 mm), so the decision is
+ * invisible at any resolution this app exports at. It is a fixed millimetre
+ * quantity rather than a fraction of the plot, so the same curve on the same
+ * panel decimates identically on the canvas and in the exporter — the
+ * determinism every layout decision inside the renderer is held to.
+ */
+const ECDF_VERTEX_EPSILON_MM = 0.02;
+
+/**
+ * Drop every vertex within `epsMm` of the last one kept, on both axes.
+ *
+ * The first and last vertices always survive: an ECDF's ends are its flat
+ * runs out to the axis edges, and losing either would leave the curve
+ * starting or stopping in mid-air.
+ */
+function decimatePolyline(
+  points: readonly { x: number; y: number }[],
+  epsMm: number,
+): { x: number; y: number }[] {
+  if (points.length <= 2) return points.slice();
+  const out = [points[0]!];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const p = points[i]!;
+    const last = out[out.length - 1]!;
+    if (Math.abs(p.x - last.x) >= epsMm || Math.abs(p.y - last.y) >= epsMm) out.push(p);
+  }
+  out.push(points[points.length - 1]!);
+  return out;
+}
+
+/**
+ * One group's empirical CDF, in the same `XySeriesMarks` shape every other
+ * continuous series carries — built straight from `ecdfSteps` rather than
+ * through `xyMarks`, since a sample is a bare list of values with no paired x
+ * for that function's pairing logic to work on.
+ *
+ * **The curve runs flat to both axis edges**, held at 0 left of the smallest
+ * observation and at 1 right of the largest. That is not cosmetic tidying:
+ * where two groups' ranges only partly overlap, the largest vertical distance
+ * between their curves — the quantity a Kolmogorov–Smirnov test reports —
+ * very often falls in the stretch where one group has no data at all, and
+ * without the flat runs that gap is simply not on the page.
+ */
+function ecdfSeriesMarks(
+  name: string,
+  color: string,
+  values: readonly number[],
+  xScale: NumericScale,
+  yScale: NumericScale,
+  plotWidth: number,
+): XySeriesMarks {
+  const steps = ecdfSteps(values);
+  const zeroY = yScale.scale(0);
+  const vertices: { x: number; y: number }[] = [];
+
+  if (Number.isFinite(zeroY)) {
+    let holdY = zeroY;
+    vertices.push({ x: 0, y: holdY });
+    for (const step of steps) {
+      const x = xScale.scale(step.x);
+      const y = yScale.scale(step.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      // Hold at the previous height until this observation, then rise: two
+      // vertices per step, which is the same way `survivalSeriesMarks` turns
+      // an ordered list of steps into a polyline the generic line renderer
+      // already knows how to draw.
+      vertices.push({ x, y: holdY });
+      vertices.push({ x, y });
+      holdY = y;
+    }
+    vertices.push({ x: plotWidth, y: holdY });
+  }
+
+  const linePath = decimatePolyline(vertices, ECDF_VERTEX_EPSILON_MM);
+
+  return {
+    name,
+    color,
+    points: [],
+    linePath: linePath.length > 1 ? linePath : null,
+    band: null,
+    capHalfWidthMm: 0,
+    replicatePoints: [],
+    censorPoints: [],
+    errorLabel: '',
+    n: values.length,
+    topMm: linePath.length > 0 ? Math.min(...linePath.map((p) => p.y)) : 0,
+    // A cumulative probability has no zero quantity a fill would close
+    // against, and an ECDF never cascades — the same reasoning survival's
+    // nulls carry.
+    baselineMm: null,
+    baselineXMm: null,
+    offsetMm: { x: 0, y: 0 },
+  };
+}
+
 function continuousGeometry(
   node: PlotNode,
   series: ReturnType<typeof toSeries>,
@@ -1532,19 +1677,70 @@ function continuousGeometry(
   const colors = paletteColors(node.palette, series.length);
 
   if (node.plotType === 'histogram') {
-    // One distribution only. Pooling several groups into one histogram invents a
-    // bimodal shape that belongs to neither of them.
-    if (series.length !== 1) return null;
-    const values = series[0]!.values.filter(Number.isFinite);
-    if (values.length === 0) return null;
+    /*
+     * Several groups are drawn over *one shared binning*, never pooled into a
+     * single array. The distinction is the whole reason this branch can accept
+     * more than one series at all: pooling really does invent a bimodal shape
+     * belonging to neither group, which is what the old one-series-only
+     * restriction was protecting against. Sharing the edges instead leaves each
+     * group's own counts intact and merely puts them on comparable footing —
+     * two histograms binned over different ranges cannot be compared, which is
+     * the only question an overlay is drawn to answer.
+     */
+    /*
+     * Name and values stay paired through the empty-group filter. Filtering a
+     * bare values array instead would leave `groups[i]` and `series[i]`
+     * describing different groups the moment any column is empty, so a legend
+     * entry would name one group beside another's colour.
+     */
+    const groups = series
+      .map((s) => ({ name: s.name, values: s.values.filter(Number.isFinite) }))
+      .filter((g) => g.values.length > 0);
+    if (groups.length === 0) return null;
 
-    const rawBins = histogramBins(values, node.histogramBins ?? null);
+    const edges = binEdges(
+      groups.flatMap((g) => g.values),
+      node.histogramBins ?? null,
+    );
+    if (!edges) return null;
+
+    const normalize = node.histogramNormalize ?? 'count';
+    const cumulative = node.histogramCumulative === true;
+    const grouped = groups.length > 1;
+
+    /*
+     * `histogramMarks` is called once per group and the results concatenated,
+     * so every bar is placed by the same arithmetic whether one group is drawn
+     * or six.
+     *
+     * `seriesIndex` is passed only in the grouped case, and that omission is
+     * load-bearing rather than tidy: the renderer's top-level bin loop draws
+     * exactly the bins carrying no index, so a single-group histogram keeps
+     * emitting the markup it always has — and `series` below stays empty, which
+     * is what stops `renderContinuousMarks`' unconditional per-series
+     * `group({}, …)` from adding an empty `<g>` to every existing figure.
+     */
+    const rawBins = groups.map(({ values }) => {
+      const counts = binCounts(values, edges);
+      const drawn = histogramValues(counts, edges, normalize, cumulative);
+      return counts.map((count, i) => ({
+        x0: edges.edges[i]!,
+        x1: edges.edges[i + 1]!,
+        count,
+        value: drawn[i]!,
+      }));
+    });
     if (rawBins.length === 0) return null;
+
+    // What the bars are actually scaled to — the y domain and its tick step
+    // both read this. Resolving either from the raw counts would put a density
+    // plot on a count axis, an axis stating something false about its own bars.
+    const drawnValues = rawBins.flat().map((b) => b.value);
 
     // The x domain comes from the bin edges, not the raw values: a domain padded
     // past the outermost edge would leave the end bars floating off the axis.
     const xScale = makeScale({
-      domain: { min: rawBins[0]!.x0, max: rawBins[rawBins.length - 1]!.x1 },
+      domain: { min: edges.min, max: edges.min + edges.step * edges.count },
       rangeMm: [0, plotWidth],
       tickStep: node.x.tickStep,
       kind: 'linear',
@@ -1557,12 +1753,18 @@ function continuousGeometry(
      * peaking at 3 gets labelled 0, 0.5, 1, 1.5 … — half an observation, which
      * is not a thing. Step by whole counts instead, chosen so the tick density
      * still suits the axis length.
+     *
+     * Conditional on the *normalisation*, not on `cumulative`: a running total
+     * of counts is still a whole number, while a density or a relative
+     * frequency is a fraction between 0 and 1 that a whole-number step would
+     * collapse to a single tick at 0 and one at 1.
      */
-    const maxCount = Math.max(...rawBins.map((b) => b.count), 1);
-    const countStep = Math.max(1, Math.ceil(maxCount / tickCountForLength(plotHeight)));
+    const wholeNumbers = normalize === 'count';
+    const maxValue = Math.max(...drawnValues, wholeNumbers ? 1 : 0);
+    const countStep = Math.max(1, Math.ceil(maxValue / tickCountForLength(plotHeight)));
 
     const yScale = makeScale({
-      domain: resolveDomain(rawBins.map((b) => b.count), {
+      domain: resolveDomain(drawnValues, {
         min: node.y.min,
         max: node.y.max,
         // Counts are magnitudes drawn as bars; a truncated baseline misleads.
@@ -1571,12 +1773,16 @@ function continuousGeometry(
         kind: node.y.scale,
       }),
       rangeMm: [plotHeight, 0],
-      tickStep: node.y.tickStep ?? countStep,
+      // `null` hands the choice back to the generic tick chooser, which is the
+      // right answer once the axis is a fraction rather than a tally.
+      tickStep: node.y.tickStep ?? (wholeNumbers ? countStep : null),
       kind: node.y.scale,
       ...(node.y.breaks ? { breaks: node.y.breaks } : {}),
       ...labelFormatOptions(node.y),
       ...linthreshOptions(node.y),
     });
+
+    const groupColors = paletteColors(node.palette, Math.max(1, groups.length));
 
     return {
       kind: 'continuous',
@@ -1585,8 +1791,108 @@ function continuousGeometry(
       plotHeight,
       xScale,
       yScale,
-      series: [],
-      bins: histogramMarks({ x: xScale, y: yScale, bins: rawBins, barWidthFraction: 1 }),
+      /*
+       * Identity only — a name and a colour, so `renderLegend` has something to
+       * key each group's bars on. There are no points, no line and no band: the
+       * bars *are* the marks, and they travel in `bins`. Left empty for a
+       * single group, which is what keeps every existing histogram's markup
+       * byte-identical.
+       */
+      series: grouped
+        ? groups.map((g, i) =>
+            histogramSeriesIdentity(
+              g.name,
+              groupColors[i % Math.max(1, groupColors.length)] ?? '#000000',
+              g.values.length,
+            ),
+          )
+        : [],
+      bins: rawBins.flatMap((bins, i) =>
+        histogramMarks({
+          x: xScale,
+          y: yScale,
+          bins,
+          barWidthFraction: 1,
+          ...(grouped ? { seriesIndex: i } : {}),
+        }),
+      ),
+    };
+  }
+
+  if (node.plotType === 'ecdf') {
+    /*
+     * An ECDF lives here rather than in a branch of its own beside
+     * `survivalGeometry`, and the difference is not stylistic. Survival runs
+     * its own two-pass margin growth only because `computePlotGeometry`
+     * diverts to it *before* `toSeries` is ever called — a subject row is not
+     * a replicate and carries an event flag `Series` has nowhere to hold. A
+     * sample column is exactly what `toSeries` already returns, so reading it
+     * here inherits `requiredMargin`, `renderAxes`, the legend and axis
+     * breaks completely unmodified rather than through a second copy.
+     */
+    const groups = series
+      .map((s) => ({ name: s.name, values: s.values.filter(Number.isFinite) }))
+      .filter((g) => g.values.length > 0);
+    if (groups.length === 0) return null;
+
+    const xScale = makeScale({
+      domain: resolveDomain(
+        groups.flatMap((g) => g.values),
+        {
+          min: node.x.min,
+          max: node.x.max,
+          // The measured quantity, not a magnitude drawn as a bar: anchoring
+          // at zero would push a tightly clustered sample into one corner.
+          includeZero: false,
+          padFraction: 0.08,
+          kind: node.x.scale,
+        },
+      ),
+      rangeMm: [0, plotWidth],
+      tickStep: node.x.tickStep,
+      kind: node.x.scale,
+      ...(node.x.breaks ? { breaks: node.x.breaks } : {}),
+      ...labelFormatOptions(node.x),
+      ...linthreshOptions(node.x),
+    });
+
+    /*
+     * Hardcoded `[0, 1]`, ignoring `node.y.min`/`max`/`scale` entirely — the
+     * same hard construction choice `survivalGeometry` makes for the same
+     * reason: a cumulative proportion cannot leave that interval, so a
+     * narrower axis would crop a curve that is complete by definition and a
+     * wider one would claim room for values that cannot exist. The Inspector
+     * hides those controls for this plot type to match.
+     */
+    const yScale = makeScale({
+      domain: { min: 0, max: 1 },
+      rangeMm: [plotHeight, 0],
+      tickStep: node.y.tickStep,
+      kind: 'linear',
+      ...labelFormatOptions(node.y),
+      ...linthreshOptions(node.y),
+    });
+
+    const groupColors = paletteColors(node.palette, Math.max(1, groups.length));
+
+    return {
+      kind: 'continuous',
+      margin,
+      plotWidth,
+      plotHeight,
+      xScale,
+      yScale,
+      series: groups.map((g, i) =>
+        ecdfSeriesMarks(
+          g.name,
+          groupColors[i % Math.max(1, groupColors.length)] ?? '#000000',
+          g.values,
+          xScale,
+          yScale,
+          plotWidth,
+        ),
+      ),
+      bins: [],
     };
   }
 
@@ -3264,16 +3570,17 @@ function renderLegend(
         : undefined;
     /*
      * The same "any series carries one" rule as the shape swatch above, for
-     * the same reason — but scoped to `line`, the only plot type with a
-     * connecting line an author can style through the Inspector at all.
-     * Composes with the marker rather than replacing it, so a series using
-     * both per-series shapes and per-series line styles shows both.
+     * the same reason — but scoped to the plot types whose line an author can
+     * style through the Inspector at all, which is the one place that set is
+     * spelled. Composes with the marker rather than replacing it, so a series
+     * using both per-series shapes and per-series line styles shows both.
      */
     const lineDash =
-      node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false)
+      LINE_STYLED_PLOT_TYPES.has(node.plotType) && (node.lineStyles?.some((s) => s != null) ?? false)
         ? dashArrayFor(lineStyleForSeries(node, series) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
         : undefined;
-    const drawsLine = node.plotType === 'line' && (node.lineStyles?.some((s) => s != null) ?? false);
+    const drawsLine =
+      LINE_STYLED_PLOT_TYPES.has(node.plotType) && (node.lineStyles?.some((s) => s != null) ?? false);
     const swatchMarks: SceneNode[] = [];
     if (drawsLine) {
       swatchMarks.push(
@@ -3394,6 +3701,10 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
         ...trend.band,
         ...renderContinuousMarks(node, theme, geometry, options.pointRasters),
         ...trend.line,
+        // Over the curves, for the reason the trend line is: the marker
+        // annotates the two staircases it spans, and a rule painted under them
+        // would be interrupted by the very lines it is measuring between.
+        ...resolveKsGap(node, doc, theme, geometry),
         // After every mark, including the raster: a label emitted inside a
         // series group would paint under a baked point cloud, which is the
         // case that matters most — a real gene list is routinely over
@@ -4082,6 +4393,154 @@ export function resolveTrendFit(
   return { band, line };
 }
 
+/** How far the cap at each end of a KS gap rule reaches either side of it. */
+const KS_GAP_CAP_HALF_WIDTH_MM = 1.2;
+/** Clearance between the rule and its `D = …` caption. */
+const KS_GAP_LABEL_GAP_MM = 1.0;
+
+/**
+ * A drawn ECDF's height in millimetres at a given x, read off the polyline the
+ * renderer actually emitted.
+ *
+ * Reading the drawn curve rather than recomputing `ecdfAt` from the values is
+ * the same discipline round 18 settled on for the volcano boundary: the marker
+ * has to sit ON the two curves a reader can see, and a second evaluation could
+ * land a step away from the one that was drawn wherever decimation has merged
+ * vertices. The polyline is monotone in x and holds-then-rises at each step, so
+ * the LAST vertex at or before `xMm` is the risen height — which is the
+ * right-continuous value an empirical CDF has at an observed x.
+ */
+function ecdfHeightAtMm(
+  linePath: readonly { x: number; y: number }[],
+  xMm: number,
+): number | null {
+  if (linePath.length === 0) return null;
+  let lo = 0;
+  let hi = linePath.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (linePath[mid]!.x <= xMm) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return (found < 0 ? linePath[0] : linePath[found])!.y;
+}
+
+/**
+ * The Kolmogorov–Smirnov statistic drawn where it was measured: a vertical rule
+ * spanning the two ECDFs at the x the test reports, capped at both ends, with
+ * D printed beside it.
+ *
+ * D is the *whole* answer a KS test gives, and until this it appeared only as a
+ * number in a table beside a curve that gave no hint where it came from. It is
+ * resolved here, once, for the same reason `resolveTrendFit` is: the drawn
+ * marker and the stored comparison must not be able to disagree about where the
+ * maximum falls.
+ *
+ * **Only for KS, and only on a plot drawing exactly two curves.** Cramér–von
+ * Mises and Anderson–Darling accumulate over every observation and
+ * Epps–Singleton works in the frequency domain, so none of them has a place on
+ * the axis to point at; and with k > 2 groups a KS run reports C(k,2) separate
+ * gaps between different pairs, with no honest way to choose one to draw.
+ * Withheld rather than approximated, the stance Fisher's above 2×2 already
+ * takes.
+ */
+export function resolveKsGap(
+  node: PlotNode,
+  doc: FigureDocument,
+  theme: Theme,
+  geometry: PlotGeometry,
+): SceneNode[] {
+  if (node.plotType !== 'ecdf' || geometry.kind !== 'continuous') return [];
+  // Absent is ON — see `PlotNode.ksGapMarker` for why this one field defaults
+  // the other way from every other optional flag here.
+  if (node.ksGapMarker === false) return [];
+  if (geometry.series.length !== 2) return [];
+
+  const result = doc.analyses.find((a) => (a.plotId ?? null) === node.id)?.result;
+  if (!result || result.test !== 'kolmogorov-smirnov') return [];
+  const comparison = result.comparisons[0];
+  if (!comparison || result.comparisons.length !== 1) return [];
+
+  const location = comparison.statisticLocation;
+  if (location == null || !Number.isFinite(location)) return [];
+
+  /*
+   * Matched by name, never by position. `geometry.series` is ordered by the
+   * table's columns and `comparisons` by `itertools.combinations` over the
+   * request's groups; the two agree today, and pairing them on that agreement
+   * would draw the sign upside down the first time either order changed.
+   */
+  const a = geometry.series.find((s) => s.name === comparison.groupA);
+  const b = geometry.series.find((s) => s.name === comparison.groupB);
+  if (!a?.linePath || !b?.linePath) return [];
+
+  const xMm = geometry.xScale.scale(location);
+  // Outside the panel there is no gap to see. Reachable whenever the author
+  // has narrowed the x axis, and clamping to the edge would put the marker at
+  // a value the axis explicitly does not show — the rule a broken axis and
+  // every threshold line in this file already follow.
+  if (!Number.isFinite(xMm) || xMm < 0 || xMm > geometry.plotWidth) return [];
+
+  const yA = ecdfHeightAtMm(a.linePath, xMm);
+  const yB = ecdfHeightAtMm(b.linePath, xMm);
+  if (yA == null || yB == null) return [];
+  if (Math.abs(yA - yB) < 0.05) return [];
+
+  const top = Math.min(yA, yB);
+  const bottom = Math.max(yA, yB);
+  const cap = KS_GAP_CAP_HALF_WIDTH_MM;
+  const stroke = {
+    stroke: theme.foreground,
+    'stroke-width': theme.stroke.dataMm,
+    fill: 'none',
+  };
+  const marks: SceneNode[] = [
+    el(
+      'path',
+      {
+        // One path, so a 'ks-gap' role count is 1 per marker rather than 3.
+        d:
+          `M${round(xMm)} ${round(top)} L${round(xMm)} ${round(bottom)} ` +
+          `M${round(xMm - cap)} ${round(top)} L${round(xMm + cap)} ${round(top)} ` +
+          `M${round(xMm - cap)} ${round(bottom)} L${round(xMm + cap)} ${round(bottom)}`,
+        ...stroke,
+      },
+      undefined,
+      { role: 'ks-gap' },
+    ),
+  ];
+
+  const labelPt = theme.type.statisticPt;
+  const label = `D = ${comparison.statistic.toFixed(3)}`;
+  const labelWidth = estimateTextWidthMm(label, labelPt);
+  // To the right of the rule unless that would overhang the panel, in which
+  // case to the left. The plot area does not clip, so an unchecked label on a
+  // maximum falling at the last observation would run across the neighbouring
+  // panel.
+  const rightFits = xMm + cap + KS_GAP_LABEL_GAP_MM + labelWidth <= geometry.plotWidth;
+  marks.push(
+    text(
+      label,
+      {
+        x: rightFits ? xMm + cap + KS_GAP_LABEL_GAP_MM : xMm - cap - KS_GAP_LABEL_GAP_MM,
+        y: (top + bottom) / 2 + ptToMm(labelPt) * 0.35,
+        ...textAttrs(
+          { align: rightFits ? 'start' : 'end', fontSizePt: labelPt, color: theme.foreground },
+          theme,
+        ),
+      },
+      { role: 'ks-gap-label' },
+    ),
+  );
+
+  return marks;
+}
+
 /**
  * Which points get a label, in the order `layoutPointLabels` should place
  * them — sorted by the DATA, never by the order the author clicked: the most
@@ -4526,7 +4985,15 @@ function renderContinuousMarks(
 ): SceneNode[] {
   const content: SceneNode[] = [];
 
+  /*
+   * The single-group histogram, unchanged. A grouped one tags every bin with
+   * its `seriesIndex` and is drawn inside the per-series loop below instead, so
+   * each group's bars take that group's own colour — this loop draws exactly
+   * the bins that carry no index, which is what keeps a one-group histogram's
+   * markup byte-identical to what it has always emitted.
+   */
   for (const bin of geometry.bins) {
+    if (bin.seriesIndex !== undefined) continue;
     content.push(
       el('rect', {
         x: bin.x,
@@ -4567,6 +5034,58 @@ function renderContinuousMarks(
     const markChildren: SceneNode[] = [];
     // Indexed by series order, the key the palette and `seriesAxis` already use.
     const shape = shapeForSeries(node, index);
+
+    /*
+     * This group's own bars, over the binning every group shares.
+     *
+     * Two styles, because neither works at every group count. `'overlay'` fills
+     * translucently at the same 0.55 a violin and a box already use, so two or
+     * three shapes read through one another; past that the stacked fills turn to
+     * mush and `'step'` drops the fill for a single outline per group, where six
+     * curves stay individually legible. The author picks; there is no group
+     * count at which one is objectively right.
+     *
+     * `bin.width` equals the full bin span here — a histogram is drawn at
+     * `barWidthFraction: 1` — so consecutive bars touch and the outline below
+     * closes into a genuine staircase rather than a comb.
+     */
+    const bars = geometry.bins.filter((b) => b.seriesIndex === index);
+    if (bars.length > 0) {
+      if (node.histogramStyle === 'step') {
+        const d: string[] = [];
+        bars.forEach((b, i) => {
+          const base = b.y + b.height;
+          if (i === 0) d.push(`M${round(b.x)} ${round(base)}`);
+          d.push(`L${round(b.x)} ${round(b.y)}`);
+          d.push(`L${round(b.x + b.width)} ${round(b.y)}`);
+          if (i === bars.length - 1) d.push(`L${round(b.x + b.width)} ${round(base)}`);
+        });
+        markChildren.push(
+          el('path', {
+            d: d.join(' '),
+            fill: 'none',
+            stroke: s.color,
+            'stroke-width': theme.stroke.dataMm,
+            'stroke-linejoin': 'miter',
+          }, undefined, { role: 'histogram-outline' }),
+        );
+      } else {
+        for (const b of bars) {
+          markChildren.push(
+            el('rect', {
+              x: b.x,
+              y: b.y,
+              width: b.width,
+              height: b.height,
+              fill: s.color,
+              'fill-opacity': 0.55,
+              stroke: s.color,
+              'stroke-width': theme.stroke.hairlineMinMm,
+            }, undefined, { role: 'bar' }),
+          );
+        }
+      }
+    }
 
     /*
      * A cascade's own fill down to its baseline, first, so the band/line/

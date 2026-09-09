@@ -49,6 +49,40 @@ const XY = `Dose,Response
 5,10.1
 6,12.4`;
 
+/**
+ * Two columns of observations, overlapping but centred apart — the `Y1,Y2,…`
+ * Column table. Declared as `distribution`, never inferred.
+ */
+const TWO_DISTRIBUTIONS = `Y1,Y2
+1.0,3.0
+1.4,3.6
+1.8,4.1
+2.2,4.4
+2.6,5.0
+3.0,5.6`;
+
+/** The same shape with deliberately unequal group sizes — the ragged case. */
+const RAGGED_DISTRIBUTIONS = `Y1,Y2
+1.0,3.0
+1.2,3.6
+1.4,
+1.6,
+1.8,
+2.0,
+2.2,
+2.4,`;
+
+/** One column of eight observations, for the cumulative case. */
+const FLAT_COLUMN = `Y1
+1
+2
+3
+4
+5
+6
+7
+8`;
+
 /** A single distribution, which is what a histogram needs. */
 const FLAT = `Dose,Response
 1,2.1
@@ -65,6 +99,13 @@ function makeDocument(
   plotType: PlotType,
   widthMm = 80,
   patch: Partial<PlotNode> = {},
+  /**
+   * Override the inferred layout. Needed for `distribution`, which is never
+   * auto-inferred — nothing at the cell level separates a table of observation
+   * columns from a shared-x table with several y series, so the author declares
+   * it and `inferFormat` deliberately has no branch for it.
+   */
+  format?: Dataset['format'],
 ): FigureDocument {
   const newId = createIdFactory();
   const base = createDocument({
@@ -79,7 +120,7 @@ function makeDocument(
     const dataset: Dataset = {
       id: newId(),
       name: 'Dose response',
-      format: inferFormat(parsed.columns),
+      format: format ?? inferFormat(parsed.columns),
       columns: parsed.columns,
       rows: parsed.rows,
       sourcePath: 'data/d.csv',
@@ -551,12 +592,390 @@ Drug,42.1,38.7,45.3`;
     expect(collectByRole(scene(makeDocument(grouped, 'scatter')), 'point')).toEqual([]);
   });
 
-  it('refuses to pool several groups into one histogram', () => {
-    // Two groups pooled produce a bimodal shape that belongs to neither.
-    const grouped = `Treatment,R1,R2,R3
-Vehicle,98.2,95.4,101.3
-Drug,42.1,38.7,45.3`;
-    expect(collectByRole(scene(makeDocument(grouped, 'histogram')), 'bar')).toEqual([]);
+  it('never pools several groups into one histogram — it shares their bin edges', () => {
+    /*
+     * The stronger form of the claim this replaced. Pooling really would invent
+     * a bimodal shape belonging to neither group, and that is still refused —
+     * but refusing to draw anything was only ever the cheapest way to refuse it.
+     * Counting each group into *one shared binning* keeps every group's own
+     * counts and makes them comparable, which is the whole point of drawing two
+     * histograms on one panel.
+     *
+     * The property is read off the drawn rects, not from the geometry's own
+     * numbers: with two groups over N bins there are 2N bars but only N
+     * distinct left edges, because each group's bar i starts exactly where the
+     * other's does. Independently binned groups would have 2N distinct edges.
+     */
+    const s = scene(
+      makeDocument(TWO_DISTRIBUTIONS, 'histogram', 80, { histogramBins: 6 }, 'distribution'),
+    );
+    const bars = collectByRole(s, 'bar');
+    expect(bars).toHaveLength(12);
+
+    const edges = new Set(bars.map((b) => Number(b.attrs?.['x']).toFixed(6)));
+    expect(edges.size).toBe(6);
+
+    const widths = new Set(bars.map((b) => Number(b.attrs?.['width']).toFixed(6)));
+    expect(widths.size).toBe(1);
+
+    // Two groups, two colours — not one group's bars counted twice.
+    expect(new Set(bars.map((b) => b.attrs?.['fill'])).size).toBe(2);
+  });
+
+  it('keeps a single-group histogram free of the per-series machinery', () => {
+    /*
+     * `renderContinuousMarks` pushes a `<g>` per entry in `geometry.series`
+     * unconditionally, so a single-group histogram that populated `series`
+     * would add an empty group to markup that has been stable since phase 3.
+     * The empty array is the guarantee, and its bins carry no `seriesIndex`.
+     */
+    const doc = makeDocument(FLAT, 'histogram');
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(plot as PlotNode, doc, NATURE_THEME);
+
+    expect(geometry?.kind).toBe('continuous');
+    const continuous = geometry as ContinuousPlotGeometry;
+    expect(continuous.series).toEqual([]);
+    for (const bin of continuous.bins) expect(bin.seriesIndex).toBeUndefined();
+  });
+
+  it('draws each group as one outline, and no bars, in step style', () => {
+    const s = scene(
+      makeDocument(
+        TWO_DISTRIBUTIONS,
+        'histogram',
+        80,
+        { histogramBins: 6, histogramStyle: 'step' },
+        'distribution',
+      ),
+    );
+    expect(collectByRole(s, 'bar')).toEqual([]);
+
+    const outlines = collectByRole(s, 'histogram-outline');
+    expect(outlines).toHaveLength(2);
+    for (const outline of outlines) expect(outline.attrs?.['fill']).toBe('none');
+    expect(new Set(outlines.map((o) => o.attrs?.['stroke'])).size).toBe(2);
+  });
+
+  it('scales bars to the drawn quantity, not the raw count', () => {
+    /*
+     * Two groups of deliberately unequal size. On a count axis the larger one
+     * towers over the smaller for no reason a reader can see; under
+     * `'frequency'` each group's bars sum to its own 1, so the tallest bar of
+     * the *smaller* group is no longer bounded by the larger group's counts.
+     *
+     * Asserted through the y domain rather than by eye: a count axis has to
+     * reach the largest count, and a relative-frequency axis must not.
+     */
+    const counted = makeDocument(RAGGED_DISTRIBUTIONS, 'histogram', 80, {}, 'distribution');
+    const shared = makeDocument(
+      RAGGED_DISTRIBUTIONS,
+      'histogram',
+      80,
+      { histogramNormalize: 'frequency' },
+      'distribution',
+    );
+
+    const domainMax = (doc: FigureDocument): number => {
+      const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+      const geometry = computePlotGeometry(plot as PlotNode, doc, NATURE_THEME);
+      return (geometry as ContinuousPlotGeometry).yScale.domain.max;
+    };
+
+    expect(domainMax(counted)).toBeGreaterThan(1);
+    expect(domainMax(shared)).toBeLessThanOrEqual(1.2);
+  });
+
+  it('accumulates a cumulative histogram to the full sample', () => {
+    const doc = makeDocument(
+      FLAT_COLUMN,
+      'histogram',
+      80,
+      { histogramBins: 4, histogramCumulative: true },
+      'distribution',
+    );
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(
+      plot as PlotNode,
+      doc,
+      NATURE_THEME,
+    ) as ContinuousPlotGeometry;
+
+    // Eight observations in one column: the last bar stands for all of them,
+    // and no bar is ever shorter than the one before it.
+    const values = geometry.bins.map((b) => b.value);
+    expect(values[values.length - 1]).toBe(8);
+    for (let i = 1; i < values.length; i++) expect(values[i]!).toBeGreaterThanOrEqual(values[i - 1]!);
+  });
+});
+
+describe('ECDF', () => {
+  const geometryOf = (doc: FigureDocument): ContinuousPlotGeometry => {
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    return computePlotGeometry(plot as PlotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+  };
+
+  it('fixes the y axis at [0, 1] whatever the author asks for', () => {
+    /*
+     * A cumulative proportion cannot leave that interval, so the domain is a
+     * construction choice rather than a default — the same stance survival's
+     * probability axis takes. A narrower axis would crop a curve that is
+     * complete by definition; a wider one would reserve room for values that
+     * cannot occur. The Inspector hides the numeric y controls to match, and
+     * this is the half that makes hiding them honest.
+     */
+    const doc = makeDocument(
+      TWO_DISTRIBUTIONS,
+      'ecdf',
+      80,
+      { y: { title: 'F(x)', min: 0.2, max: 0.6, scale: 'linear' } as AxisSpec },
+      'distribution',
+    );
+    const geometry = geometryOf(doc);
+    expect(geometry.yScale.domain).toEqual({ min: 0, max: 1 });
+  });
+
+  it('runs flat to both axis edges rather than stopping at the data', () => {
+    /*
+     * Not cosmetic. Where two samples only partly overlap, the largest
+     * vertical distance between their curves — the quantity a
+     * Kolmogorov–Smirnov test reports — very often falls in the stretch where
+     * one of them has no observations at all. Without the flat runs that gap
+     * is not on the page to be read.
+     *
+     * Asserted in millimetres against the plot area's own extent: the first
+     * vertex sits on the left edge at F = 0 and the last on the right edge at
+     * F = 1.
+     */
+    const geometry = geometryOf(makeDocument(TWO_DISTRIBUTIONS, 'ecdf', 80, {}, 'distribution'));
+    expect(geometry.series).toHaveLength(2);
+
+    for (const s of geometry.series) {
+      const path = s.linePath!;
+      expect(path[0]!.x).toBe(0);
+      expect(path[0]!.y).toBeCloseTo(geometry.yScale.scale(0), 9);
+      expect(path[path.length - 1]!.x).toBeCloseTo(geometry.plotWidth, 9);
+      expect(path[path.length - 1]!.y).toBeCloseTo(geometry.yScale.scale(1), 9);
+    }
+  });
+
+  it('draws one curve per column and no bars or markers at all', () => {
+    const s = scene(makeDocument(TWO_DISTRIBUTIONS, 'ecdf', 80, {}, 'distribution'));
+    expect(collectByRole(s, 'line')).toHaveLength(2);
+    expect(collectByRole(s, 'bar')).toEqual([]);
+    expect(collectByRole(s, 'point')).toEqual([]);
+  });
+
+  it('never steps down, and reaches 1 exactly once per group', () => {
+    const geometry = geometryOf(
+      makeDocument(RAGGED_DISTRIBUTIONS, 'ecdf', 80, {}, 'distribution'),
+    );
+    const top = geometry.yScale.scale(1);
+    for (const s of geometry.series) {
+      const path = s.linePath!;
+      // Down the page is increasing y in mm, so a rising curve never gains y.
+      for (let i = 1; i < path.length; i += 1) {
+        expect(path[i]!.y).toBeLessThanOrEqual(path[i - 1]!.y + 1e-9);
+      }
+      expect(Math.min(...path.map((p) => p.y))).toBeCloseTo(top, 9);
+    }
+  });
+
+  it('thins a large sample deterministically instead of emitting a vertex per observation', () => {
+    /*
+     * The volume problem `planPointClouds` cannot see: it counts
+     * `s.points.length`, which is 0 for a curve drawn entirely as one path,
+     * so a 10,000-row column would arrive as 20,002 vertices in a single `d`
+     * attribute.
+     *
+     * Two claims, and both matter. The cut is real — far below two vertices
+     * per observation — and it is a pure function of the geometry, so the
+     * canvas and the headless exporter decimate to the identical path. A
+     * decimation that varied would be exactly the class of defect the
+     * DOM-free/deterministic rule inside the renderer exists to prevent.
+     */
+    const rows = 10000;
+    const csv = ['Y1', ...Array.from({ length: rows }, (_, i) => String(i + 1))].join('\n');
+    const first = geometryOf(makeDocument(csv, 'ecdf', 80, {}, 'distribution'));
+    const path = first.series[0]!.linePath!;
+
+    expect(path.length).toBeLessThan(rows / 2);
+    expect(path.length).toBeGreaterThan(100);
+
+    const second = geometryOf(makeDocument(csv, 'ecdf', 80, {}, 'distribution'));
+    expect(second.series[0]!.linePath).toEqual(path);
+  });
+});
+
+describe('the Kolmogorov–Smirnov gap on an ECDF', () => {
+  /*
+   * TWO_DISTRIBUTIONS' two columns overlap at exactly one value, 3.0: Y1 runs
+   * 1.0 … 3.0 and Y2 runs 3.0 … 5.6, six observations each. So at x = 3.0
+   * every one of Y1's values is at or below it (F = 1) and one of Y2's is
+   * (F = 1/6), and the gap there is 5/6 — the largest anywhere, which is what
+   * makes 3.0 the location and 5/6 the statistic. Worked by hand, not taken
+   * from the code under test.
+   */
+  const KS_LOCATION = 3.0;
+  const KS_D = 5 / 6;
+
+  /** Attach a KS result to the document's only plot, as running the test would. */
+  const withKs = (
+    doc: FigureDocument,
+    patch: {
+      test?: string;
+      groupA?: string;
+      groupB?: string;
+      statisticLocation?: number | null;
+      extraComparison?: boolean;
+    } = {},
+  ): FigureDocument =>
+    editDocument(doc, (draft) => {
+      const plot = Object.values(draft.nodes).find((n) => n.type === 'plot')!;
+      const test = patch.test ?? 'kolmogorov-smirnov';
+      const one = {
+        groupA: patch.groupA ?? 'Y1',
+        groupB: patch.groupB ?? 'Y2',
+        statistic: KS_D,
+        p: 0.002,
+        pAdjusted: 0.002,
+        df: null,
+        ci: null,
+        effectSize: null,
+        effectSizeName: null,
+        n: [6, 6],
+        statisticLocation:
+          patch.statisticLocation === undefined ? KS_LOCATION : patch.statisticLocation,
+        statisticSign: 1,
+      };
+      draft.analyses = [
+        {
+          id: 'analysis-1',
+          name: 'Y1 vs Y2',
+          test: test as never,
+          spec: { datasetId: draft.datasets[0]!.id, groups: ['Y1', 'Y2'] },
+          plotId: plot.id,
+          options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+          inputHash: 'hash',
+          result: {
+            test: test as never,
+            omnibus: null,
+            comparisons: patch.extraComparison
+              ? [one, { ...one, groupA: 'Y1', groupB: 'Y3' }]
+              : [one],
+            methodsSentence: '',
+            warnings: [],
+            softwareVersions: {},
+          },
+          computedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+
+  const ecdfDoc = (csv = TWO_DISTRIBUTIONS, patch: Partial<PlotNode> = {}): FigureDocument =>
+    makeDocument(csv, 'ecdf', 80, patch, 'distribution');
+
+  const gapPath = (doc: FigureDocument): { x: number; y: number }[] => {
+    const marks = collectByRole(scene(doc), 'ks-gap');
+    if (marks.length === 0) return [];
+    expect(marks).toHaveLength(1);
+    return [...String(marks[0]!.attrs?.['d']).matchAll(/[ML]([-\d.]+) ([-\d.]+)/g)].map((m) => ({
+      x: Number(m[1]),
+      y: Number(m[2]),
+    }));
+  };
+
+  it('draws nothing until a KS result is stored against the plot', () => {
+    // The field defaults to ON, so this is what keeps an untested curve clean:
+    // there is no marker to hide, because no test has been run.
+    expect(collectByRole(scene(ecdfDoc()), 'ks-gap')).toHaveLength(0);
+    expect(collectByRole(scene(withKs(ecdfDoc())), 'ks-gap')).toHaveLength(1);
+  });
+
+  it('spans the two drawn curves at the x the test reports', () => {
+    /*
+     * The whole claim of the marker: it sits where the statistic was measured
+     * and it is as tall as the statistic. Both are checked against the plot's
+     * own scales rather than against literal millimetres, so the assertion
+     * survives a theme whose margins differ.
+     */
+    const doc = withKs(ecdfDoc());
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')! as PlotNode;
+    const geometry = computePlotGeometry(plot, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const points = gapPath(doc);
+    expect(points.length).toBeGreaterThan(0);
+
+    const expectedX = geometry.xScale.scale(KS_LOCATION);
+    for (const p of points) expect(Math.abs(p.x - expectedX)).toBeLessThanOrEqual(2);
+
+    // The rule's own extent, ignoring the two caps, is D of the axis — which
+    // is the height of the gap between the curves it is drawn between.
+    const ys = points.map((p) => p.y);
+    const spanMm = Math.max(...ys) - Math.min(...ys);
+    expect(spanMm).toBeCloseTo(KS_D * geometry.plotHeight, 1);
+  });
+
+  it('prints D beside the rule rather than leaving it to the table', () => {
+    const labels = collectByRole(scene(withKs(ecdfDoc())), 'ks-gap-label');
+    expect(labels).toHaveLength(1);
+    expect(labels[0]!.text).toBe('D = 0.833');
+  });
+
+  it('is withheld for every test whose statistic has no place on the axis', () => {
+    /*
+     * Cramér–von Mises and Anderson–Darling accumulate over every observation
+     * and Epps–Singleton works in the frequency domain, so none of them has a
+     * single x to point at — and the service sends no location for them. A
+     * marker drawn anyway would name a place the test never looked.
+     */
+    for (const test of ['cramer-von-mises', 'anderson-darling', 'epps-singleton']) {
+      expect(collectByRole(scene(withKs(ecdfDoc(), { test })), 'ks-gap')).toHaveLength(0);
+    }
+    expect(
+      collectByRole(scene(withKs(ecdfDoc(), { statisticLocation: null })), 'ks-gap'),
+    ).toHaveLength(0);
+  });
+
+  it('is withheld past two groups, where there is no single gap to draw', () => {
+    /*
+     * With k groups a KS run reports C(k,2) gaps between different pairs, and
+     * picking one to draw would present one pair's answer as the plot's.
+     * Withheld with the reason stated in the Inspector, the stance Fisher's
+     * above 2×2 already takes.
+     */
+    const three = `Y1,Y2,Y3
+1.0,3.0,6.0
+1.4,3.6,6.4
+1.8,4.1,6.8
+2.2,4.4,7.2
+2.6,5.0,7.6
+3.0,5.6,8.0`;
+    expect(collectByRole(scene(withKs(ecdfDoc(three))), 'ks-gap')).toHaveLength(0);
+  });
+
+  it('is withheld when the comparison names a series this plot does not draw', () => {
+    // Matched by name, never by position: a comparison against a column that
+    // is no longer plotted has no pair of curves to span, and pairing on
+    // ordering instead would draw the gap between the wrong two.
+    expect(
+      collectByRole(scene(withKs(ecdfDoc(), { groupB: 'Y9' })), 'ks-gap'),
+    ).toHaveLength(0);
+  });
+
+  it('honours an explicit off, which is the only reason the field is stored', () => {
+    expect(
+      collectByRole(scene(withKs(ecdfDoc(TWO_DISTRIBUTIONS, { ksGapMarker: false }))), 'ks-gap'),
+    ).toHaveLength(0);
+  });
+
+  it('is withheld where the axis has been narrowed past the location', () => {
+    // A scale extrapolates outside its domain rather than returning NaN, so
+    // without the bounds test the marker would be drawn beside the panel — the
+    // same rule every threshold line in this renderer already follows.
+    const doc = withKs(
+      ecdfDoc(TWO_DISTRIBUTIONS, { x: { title: 'Value', min: 1, max: 2.5 } as AxisSpec }),
+    );
+    expect(collectByRole(scene(doc), 'ks-gap')).toHaveLength(0);
   });
 });
 

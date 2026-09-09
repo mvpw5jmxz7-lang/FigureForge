@@ -128,3 +128,132 @@ class TestFitSerialization:
         )
         assert response.status_code == 200
         assert response.json()["fit"] is None
+
+
+class TestDistributionTestsOverTheWire:
+    """The route layer for round 50's four distribution tests.
+
+    `/analyze` needed no change to accept them — `test` is an unvalidated
+    `str` and `run_test` owns validation — so what is worth checking here is
+    the half that *is* new: `pBound` reaching the client, and the refusals
+    arriving as 422s rather than 500s. Neither is visible to a test that calls
+    `run_test` directly, which is the same gap this module was written for.
+    """
+
+    FAR_A = [1.0, 2, 3, 4, 5, 6, 7, 8]
+    FAR_B = [100.0, 101, 102, 103, 104, 105, 106, 107]
+
+    def test_a_clamped_p_value_arrives_as_a_bound(self):
+        response = client.post(
+            "/analyze",
+            json={
+                "test": "anderson-darling",
+                "groups": [
+                    {"name": "A", "values": self.FAR_A},
+                    {"name": "B", "values": self.FAR_B},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["omnibus"]["pBound"] == "below"
+        assert body["comparisons"][0]["pBound"] == "below"
+        # And the sentence the author pastes says so too, rather than quoting
+        # the clamp as though the test had named it.
+        assert "P < 0.001" in body["methodsSentence"]
+
+    def test_every_other_test_still_reports_no_bound(self):
+        """The field is present and null, not absent — a client reading it
+        unconditionally must not have to guess which tests carry it."""
+        response = client.post(
+            "/analyze",
+            json={
+                "test": "kolmogorov-smirnov",
+                "groups": [
+                    {"name": "A", "values": self.FAR_A},
+                    {"name": "B", "values": self.FAR_B},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["comparisons"][0]["pBound"] is None
+
+    def test_the_gap_location_reaches_the_client(self):
+        """Without this the ECDF marker has nothing to place itself against.
+
+        Two samples that do not overlap at all: every value of A is below
+        every value of B, so the maximum gap is D = 1 and it is attained at
+        A's own largest value, with A's CDF the higher one there.
+        """
+        response = client.post(
+            "/analyze",
+            json={
+                "test": "kolmogorov-smirnov",
+                "groups": [
+                    {"name": "A", "values": self.FAR_A},
+                    {"name": "B", "values": self.FAR_B},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        comparison = response.json()["comparisons"][0]
+        assert comparison["statistic"] == pytest.approx(1.0)
+        assert comparison["statisticLocation"] == pytest.approx(8.0)
+        assert comparison["statisticSign"] == 1
+
+    def test_a_test_with_no_location_sends_null_rather_than_omitting_it(self):
+        response = client.post(
+            "/analyze",
+            json={
+                "test": "cramer-von-mises",
+                "groups": [
+                    {"name": "A", "values": self.FAR_A},
+                    {"name": "B", "values": self.FAR_B},
+                ],
+            },
+        )
+        assert response.status_code == 200
+        comparison = response.json()["comparisons"][0]
+        assert comparison["statisticLocation"] is None
+        assert comparison["statisticSign"] is None
+
+    @pytest.mark.parametrize(
+        ("test", "groups", "fragment"),
+        [
+            (
+                "epps-singleton",
+                [{"name": "A", "values": [1.0, 2, 3, 4]}, {"name": "B", "values": [5.0, 6, 7, 8]}],
+                "at least 5 observations",
+            ),
+            (
+                "anderson-darling",
+                [{"name": "A", "values": [1.0]}, {"name": "B", "values": [1.0, 2, 3]}],
+                "at least two observations",
+            ),
+            (
+                "anderson-darling",
+                [{"name": "A", "values": [5.0] * 5}, {"name": "B", "values": [5.0] * 5}],
+                "no distribution to compare",
+            ),
+            (
+                "cramer-von-mises",
+                [{"name": "A", "values": [1.0, 2, 3]}, {"name": "B", "values": [4.0, 5, 6]}],
+                "two-sided",
+            ),
+        ],
+    )
+    def test_a_refused_input_is_a_422_with_a_readable_reason(self, test, groups, fragment):
+        """Not a 500, which is what an unguarded SciPy exception would give.
+
+        The Epps-Singleton case is the one that matters most: unguarded it
+        does not raise at all — it returns NaN, and `_sanitize_or` turns that
+        into p = 1.0, so the panel would report a confident null result on two
+        samples that do not overlap. Verified by removing the guard and
+        watching the route answer 200 with exactly that.
+        """
+        body = {"test": test, "groups": groups}
+        if fragment == "two-sided":
+            body["alternative"] = "less"
+        response = client.post("/analyze", json=body)
+        assert response.status_code == 422
+        assert fragment in response.json()["detail"]
