@@ -245,7 +245,7 @@ assistant, no autosave). It also gained a section for someone who has never
 used Docker on moving the project to another computer (git clone vs.
 zip-and-copy, and separately, sharing just a `.ffg` file) and first-time
 Windows install steps — the previous version covered only macOS and Linux.
-The prior version is kept as `GUIDE.old.md`. `README.md`'s Status section had
+The prior version was kept as `GUIDE.old.md`, deleted since. `README.md`'s Status section had
 the identical staleness (still said "Phases 1–6 complete... Phases 7–9 not
 yet built") and was corrected the same way, plus its package-layout listing
 gained `apps/desktop`. Deliberately **not** mentioned in `GUIDE.md`: the
@@ -255,6 +255,34 @@ non-developer would be misleading. Checked by hand rather than run: every
 internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
+
+**Verified after round 51 (six polishing steps: montage selection, import
+titles, a blank start, a save guard, hidden controls, orphaned files):** 1240
+TypeScript tests (1237 + 3 new: two in `quality.test.ts` pinning that an empty
+document renders and scores, plus a `toSvgString` guard), 248 Python tests
+unchanged (nothing here touches `services/api`), `tsc --build --force` and
+`eslint .` clean, 46-check acceptance run unaffected, and **52 + 32 + 28
+live-browser checks in each of light and dark** across the three surfaces.
+**No schema change, no new field, no model or renderer change** —
+`SCHEMA_VERSION` stays 1. **Measured, not assumed**: a plain click on a montage
+tile now selects the panel and drags all four tiles by an identical 60.6 px,
+where a double-click selects one tile and moves it alone by 39.0 px with the
+other three at 0.0; the app opens with **0 document nodes at readiness 100**
+with no error-severity finding, so the export confirmation does not greet a new
+user; the layout dropdown reads four `<optgroup>`s with Detect outside them,
+every name under 60 characters, and the seven-column proteomics example
+scrolling inside the 340 px panel rather than overflowing it; and a dirty page
+cancels its own unload event while a clean one reloads untouched. **Three
+harness traps of my own, all caught by measuring**: a hand-written base64 PNG
+was rejected by the browser's own decoder (the app behaving correctly), the
+"Detect" option belongs to the *delimiter* select too so the first run measured
+that one and reported delimiter names as ungrouped layout names, and the
+Inspector's `h4` headings are uppercased in CSS so a literal "Fitted line"
+match reported a block that was right there. **The montage and fit-select
+guards were confirmed to fail against the unfixed code** — reverting each rule
+alone fails exactly its own checks — because both claims are behaviour
+inversions, and a harness that passes either way would prove nothing. See
+"Round 51" below.
 
 **Verified after round 50 (column-wise distributions, cumulative curves, and
 the distribution tests):** 1237 TypeScript tests (1203 + 34: 2 in a new
@@ -7647,6 +7675,170 @@ earns no finding.
 
 ---
 
+### Round 51 — six polishing steps
+
+Six items reported after real use, unrelated to each other. Three of them
+delete or invert something an earlier round added deliberately, so the
+reasoning is rewritten alongside the code rather than left for a later session
+to "fix" back. **No schema change and no new field anywhere** —
+`SCHEMA_VERSION` stays 1, and nothing in `packages/doc-model`'s model, schema
+or `packages/render`'s scene changed at all.
+
+#### A click on a montage selects the panel (item 1)
+
+Round 20 made a pure montage panel the one container a plain click resolves
+*through* rather than to, so a fresh multi-image import could be rearranged
+tile by tile without double-clicking first. It bought that at the cost of the
+panel, reachable only through a gutter a millimetre wide or an Escape shortcut
+nobody finds — and was reported the other way round: the montage is hard to
+move or resize.
+
+- **One rule for every container**, which answers both reports rather than
+  trading one for the other: click selects the panel, double-click steps in to
+  a tile, Escape steps back out. The tile is now one double-click away, where
+  the panel was effectively unreachable.
+- **`isPureMontagePanel` had exactly two callers and both go** — the exception
+  in `selectionTarget`, and an Escape branch that selected a tile's montage
+  parent. The generic `enteredId` Escape replacing the latter now steps out
+  *to* the container rather than merely clearing the entry. **That promotion
+  was the half of the montage-specific branch actually doing the work** — the
+  panel's Inspector is where rows, columns, gutter and per-cell upload live —
+  and it is right for every container, so there is one rule rather than one
+  plus an exception. Deleting the branch without upgrading the generic one
+  would have been a net loss.
+- **`handleDoubleClick` and `handlePointerDown` needed no change**, verified by
+  reading rather than assumed: `CONTAINER_TYPES` already holds `'panel'`, so a
+  double-click on a tile enters the panel and then resolves to the tile, and
+  the drag arms from the same `selectionTarget` result — not entered drags the
+  panel, entered drags the tile.
+- **`montageChrome` stays; its comment does not.** It cannot intercept a tile
+  click (`renderPanel` pushes it *before* `renderChildren`, so tiles paint over
+  it), and it is still the only way to select an *empty* montage — the state
+  "Add empty montage…" drops an author into. Its rationale cited round 20's
+  rule and was rewritten. Round 20's *other* fix, the grid-derived minimum tile
+  size, is untouched.
+
+#### Import titles that say how the sheet must look (item 2)
+
+Fifteen layouts named by shape (`XY + replicates (Prism)`) without saying how a
+sheet must be organised to match. Reported as not descriptive enough, and it is
+not: `contingency`, `proteomics`, `matrix` and `replicate` are all "a text
+column then numbers", separated only by what the numbers mean.
+
+- **Three things per layout, each answering a different half.** The `label`
+  states the literal column pattern, which is what an author matches their own
+  sheet against. The `hint` says what the numbers will *mean* once read that
+  way. The `example` — three rows of a plausible sheet — is what actually
+  settles it, because a sentence has to *assert* what the four look-alike
+  layouts differ in where a table shows it.
+- **The three Prism layouts' examples include their merged group-title row**,
+  since that row is the declaration `mergedHeaderGroups` reads and an example
+  without it would not import the way its own hint says.
+- **The dropdown is grouped into four sections.** An `<optgroup>` cannot be
+  reopened, so the array's order *is* the grouping — which is why the count
+  table moved down to sit with the other declared-meaning layouts rather than
+  beside the xy ones it resembles in shape. A pure reorder is safe here for the
+  reason round 17's already was: the select renders in array order and every
+  other reader is a `.find` by id.
+- Nothing about parsing, `inferFormat` or the model changed.
+
+#### A blank page on launch (item 3)
+
+The seven-panel sample figure was built in round 35 to show what the renderer
+could draw and to give Smart layout unlike panel demands to solve. It did both;
+an author starting work wants the page they are going to publish.
+
+- **`blankDocument()` is `createDocument()` under a name**, and the name is the
+  point: launch, New Figure and Close File must all produce the same thing, and
+  three call sites each spelling out their own idea of "blank" is how they come
+  to disagree. `createDocument`'s defaults were already right, so `fitZoom`
+  still reads 183 mm.
+- **Deleted with it**: `sampleMicrographs.ts`, `sampleVolcanoTest.ts`, the
+  eight `SAMPLE_*` tables and `createSampleDocument`. `sample.ts` keeps
+  `ImportOptions`, `datasetFromText` and `axisTitlesFor`, which `SidePanel.tsx`
+  calls on every paste and which were always the load-bearing half of it.
+  `archive-memory.ts` weighs assets, not nodes, so a bare document serves it and
+  the measured RSS figures stand.
+- **Two surfaces this reaches that nothing had evaluated**, because the app
+  never opened empty: `checkFigure` runs on every render and its score is in
+  the footer, and `renderDocument`/`toSvgString` are the canvas and the export.
+  Both are fine — **a blank page scores 100 with no error-severity finding**, so
+  the export confirmation does not open on an untouched figure — and both are
+  now pinned rather than assumed, since a rule gaining an opinion about an empty
+  document would move that number silently.
+- **The empty page carries one line pointing at the Data tab.** HTML above the
+  SVG, never a scene node — a scene node would export, and would do it on
+  precisely the documents most likely to be exported early.
+
+#### A save guard in the browser, and Close File (item 4)
+
+Unsaved work was guarded on the desktop only, and there was no way to put a
+figure down without either saving it or reloading the page. Autosave was
+offered and declined in favour of these two.
+
+- **`beforeunload`, registered only while dirty**, so a clean page adds no
+  listener and stays eligible for the back-forward cache. **Desktop is excluded
+  deliberately**: its `before-quit` already offers Save / Don't Save / Cancel
+  and can run this app's save, which is strictly better than anything a
+  renderer can do, and a second guard would ask twice for one decision.
+- **Close File is one renderer-side dialog serving both platforms**, from a
+  status-bar button and a File-menu item. Routing the desktop through the
+  shell's `confirmDiscard` was the alternative and was rejected: that function
+  is wired only to `before-quit`, so a close-triggered save would land on the
+  same one-shot `PROJECT_SAVED` channel a concurrent quit is waiting on, and
+  the wording would fork between platforms. **No accelerator** — `CmdOrCtrl+W`
+  belongs to the close/quit role at the end of the same menu, and taking it
+  would leave the window with no keyboard way to close.
+- **The trap is `save()`'s return value.** On a browser without File System
+  Access it returns false *immediately*: it has only opened `SaveDialog`, and
+  the write happens a user interaction later in `saveViaDialog`. A close driven
+  off that boolean would silently cancel itself on every Firefox and Safari —
+  the browser where losing the work is least recoverable — so the intent
+  travels in a ref that `SaveDialog`'s own Save completes and its Cancel
+  clears. On the File System Access path the boolean *is* the outcome.
+- **`newFigure` became `resetToBlank`** and now also clears the editor modes
+  and pending dialogs it never did. A crop overlay is drawn over a node id and
+  an export confirmation lists findings; both name things the next document
+  does not have. That mattered less when New was reachable only from a menu.
+- **Still no autosave and no session restore.** A crash or a force-quit loses
+  unsaved work on either platform; the risk table says so.
+
+#### Hide what cannot apply, and say why where it mattered (item 5)
+
+Two controls still sat there refusing, against round 16's convention, and
+**both carried no explanation at all — not even a tooltip**.
+
+- **The Stats tab's "Run and annotate"** was disabled on three conditions with
+  the reason reaching the author only through a notice that had its own reasons
+  for being empty. Hidden now, with the reason in its place. The three
+  conditions compose into one `runBlockedReason` read by both the button and
+  the line replacing it — spelling them out at each site is how a control and
+  its own explanation come to disagree.
+- **The Inspector's two "Fitted line" selects** describe a line that is not
+  being drawn, so with the line off they are hidden rather than greyed —
+  matching the axis-break branch directly above them, which already replaced
+  the whole block.
+- **Run PCA, Run UMAP and the volcano test deliberately stay
+  visible-but-disabled**, which is the opposite call and a considered one:
+  nothing about that kind of table makes them inapplicable, it is merely too
+  small yet, and hiding the only route to a feature until the data grows would
+  make it undiscoverable. What was wrong is that the requirement lived in a
+  `title`, and a tooltip is not where an author looks to find out why a button
+  does nothing — it is a visible line under the row now.
+
+#### The orphaned inputs (item 6)
+
+`reference-and-test-files/` (12 MB, 23 files) was cited only by the sample
+figure and by this file, so item 3 is what made deleting it safe. The stale
+`TestFiles/` provenance comments left by an earlier deletion — in
+`sample.test.ts`, `doc-model.test.ts` and `continuous-axis.test.ts` — were
+rewritten rather than removed: they are the only record of where those inlined
+literals came from, and each file now says plainly that the workbooks are no
+longer in the repo. `GUIDE.old.md`'s own stale reference here was corrected
+too, and the risk table's "there is still no `beforeunload` guard" row is no
+longer true and no longer says so. **The app's test suites are untouched.**
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -7729,7 +7921,7 @@ Phases 5–9, with the actual entry points:
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
 | **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line, and round 50's `histogramStyle`, `histogramCumulative`, `histogramNormalize` and `ksGapMarker` on `PlotNode`, plus `pBound`, `statisticLocation` and `statisticSign` on `Comparison`/`Omnibus` — the second and third result-level fields after round 48's `fit`) is **optional**, so old files still load. Round 50's `ksGapMarker` is the second field, after round 48's `trendLine`, whose absent value reads as **on**: the marker it controls can only appear once the author has explicitly run Kolmogorov-Smirnov on that exact plot, so no saved figure receives one uninvited. Round 48's `trendLine` was the first optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), round 16 by one more again (`proteomics`), round 47 by one more again (`fold-fold`), and round 50 by one more again (`distribution`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way five times — `volcano`, `heatmap`, `survival`, `fold-fold` and `ecdf` — not seven, since `pca` and `umap` both reuse `scatter`, for the same reason: a `volcano`, `heatmap`, `survival`, `fold-fold` or `ecdf` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way, and round 50 widened it by four more (`'kolmogorov-smirnov'`, `'anderson-darling'`, `'cramer-von-mises'`, `'epps-singleton'`) in one change. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
-| **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
+| **No autosave or session restore** | *Guarded on both platforms; still no autosave.* The desktop shell's `before-quit` prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2). Round 51 added the browser's half — a `beforeunload` guard registered only while dirty — plus a **Close File** command on both platforms, one renderer-side dialog with the same three choices, so a figure can be put down without either saving it or reloading the page. What a browser cannot do is write the wording or save on the user's behalf, which is why the shell keeps its own prompt. **There is still no autosave and no session restore**: a crash or a force-quit loses unsaved work on either platform. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |
 | **The archive is built whole in memory** | *Fixed, and not only on the desktop.* `writeArchiveStream`/`readArchiveStream` move the archive a chunk at a time, so it is never materialised: measured on a 200 MB payload, the save peak fell 525.8 → 337.3 MB (+200.5 MB of overhead became +1.7 MB) and the save-then-open cycle 725.9 → 589.1 MB. The browser benefits too — `createWritable()` was always a stream and was simply being handed one buffer. What remains is the working set the app must hold either way: the images themselves. The **download fallback** for Firefox/Safari still builds one buffer, because it hands a `Blob` to an anchor and there is no stream to give it instead. |
 | **Cropped images ship at full size** | *Fixed at export time.* `renderImage` still crops by clipping — that is what keeps every retained pixel at capture resolution, and `parity.test.tsx` pins it. `flattenCropsForExport` instead builds a throwaway document whose cropped nodes point at synthetic PNG assets holding only their crop, so `packages/render` stays synchronous and DOM-free. Measured: a 1200×900 micrograph cropped to 30%×30% took the export payload from 4234 KB to 438 KB. It withholds itself where it would not be exact — vector assets and trivial crops. The letterboxed case was on that list until round 6, for a real reason: the drawn window was not the crop the document named, so baking the nominal rect changed the picture. `renderImage` now places the kept region itself, the two forms draw identically, and a montage tile's crop is baked like any other — measured, a 200×100 source cropped to a quadrant embeds as 100×50. |

@@ -40,6 +40,13 @@ import { MAX_POINT_LABELS, MAX_POINT_LABEL_CEILING } from './point-labels.js';
 import { collectByRole, round } from './scene.js';
 import { toSvgString } from './svg-string.js';
 
+/*
+ * The workbooks and .prism files named in the fixtures below were supplied by
+ * the user and are inlined here as the literal bytes an Excel copy puts on the
+ * clipboard. They are no longer in the repo — round 51 removed the reference
+ * directory once nothing read it — so the names are provenance, not paths.
+ */
+
 /** Two numeric columns → `simple-xy`, the format that carries paired x values. */
 const XY = `Dose,Response
 1,2.1
@@ -980,7 +987,7 @@ describe('the Kolmogorov–Smirnov gap on an ECDF', () => {
 });
 
 /**
- * `TestFiles/test graph.xlsx`, tab-delimited as an Excel copy puts it on the
+ * The user-supplied `test graph.xlsx`, tab-delimited as an Excel copy puts it on the
  * clipboard: three runs, each measured at its *own* x positions. Its own chart
  * is three lineMarker series, which is what this must reproduce.
  */

@@ -2,8 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { toSeries } from '@figureforge/doc-model';
 import { axisTitlesFor, datasetFromText } from './sample.js';
 
+/*
+ * The workbooks and .prism files named below were supplied by the user and are
+ * inlined here as the literal bytes an Excel copy puts on the clipboard. They
+ * are no longer in the repo — round 51 removed the reference directory once
+ * nothing read it — so the names are provenance, not a path to open.
+ */
+
 /**
- * The columns of `TestFiles/test graph.xlsx`, tab-delimited — the bytes an
+ * The columns of the user-supplied `test graph.xlsx`, tab-delimited — the bytes an
  * Excel copy actually puts on the clipboard. Three runs, each measured at its
  * own x positions.
  */
@@ -18,7 +25,7 @@ const XY_PAIRS_PASTE = [
 ].join('\n');
 
 /**
- * `TestFiles/test2 data table.xlsx` — a shared x with three replicate y columns
+ * The user-supplied `test2 data table.xlsx` — a shared x with three replicate y columns
  * per condition, its group titles written as merged cells.
  */
 const XY_REPLICATES_PASTE = [
@@ -32,7 +39,7 @@ const XY_REPLICATES_PASTE = [
 ].join('\n');
 
 /**
- * `TestFiles/grouped data example.prism` — genotypes down the rows, treatments
+ * The user-supplied `grouped data example.prism` — genotypes down the rows, treatments
  * across the columns, three replicates in each cell.
  */
 const GROUPED_PASTE = [
@@ -50,7 +57,7 @@ describe('import reading', () => {
   });
 
   it('reads a merged-header replicate table without being told anything', () => {
-    // `TestFiles/test2 data table.xlsx`: the merged group titles declare the
+    // the user-supplied `test2 data table.xlsx`: the merged group titles declare the
     // blocks, so no override is needed.
     const ds = datasetFromText(XY_REPLICATES_PASTE, 'Timecourse', 'd2');
     expect(ds.format).toBe('xy-replicates');

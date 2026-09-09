@@ -141,6 +141,13 @@ import type { Analysis } from './analysis.js';
 import type { FigureDocument } from './document.js';
 import type { NodeId, TextRun } from './nodes.js';
 
+/*
+ * The workbooks and .prism files named in the fixtures below were supplied by
+ * the user and are inlined here as the literal bytes an Excel copy puts on the
+ * clipboard. They are no longer in the repo — round 51 removed the reference
+ * directory once nothing read it — so the names are provenance, not paths.
+ */
+
 // ---------------------------------------------------------------------------
 // Units
 // ---------------------------------------------------------------------------
@@ -531,7 +538,7 @@ describe('delimited parsing', () => {
 
   it('reads an Excel paste of three independent xy runs', () => {
     /*
-     * `TestFiles/test graph.xlsx`, verbatim, tab-delimited as a paste from
+     * The user-supplied `test graph.xlsx`, verbatim, tab-delimited as a paste from
      * Excel arrives. Its own chart is three lineMarker series, each against its
      * own x column, and the whole point of the layout is that no row of one run
      * corresponds to the same row of another.
@@ -552,7 +559,7 @@ describe('delimited parsing', () => {
 });
 
 /**
- * The columns of `TestFiles/test graph.xlsx`, tab-delimited — the bytes an
+ * The columns of the user-supplied `test graph.xlsx`, tab-delimited — the bytes an
  * Excel copy actually puts on the clipboard.
  */
 const XY_PAIRS_PASTE = [
@@ -566,8 +573,8 @@ const XY_PAIRS_PASTE = [
 ].join('\n');
 
 /**
- * The columns of `TestFiles/test2 data table.xlsx` — the same table
- * `TestFiles/test graphs.prism` holds as `y_replicates` with
+ * The columns of the user-supplied `test2 data table.xlsx` — the same table
+ * The user-supplied `test graphs.prism` holds as `y_replicates` with
  * `replicatesCount: 3`. Its group titles are *merged cells*, so a copy carries
  * one header row with the names spread across their blocks.
  */
@@ -582,7 +589,7 @@ const XY_REPLICATES_PASTE = [
 ].join('\n');
 
 /**
- * `TestFiles/grouped data example.prism` — three genotypes down the rows, three
+ * The user-supplied `grouped data example.prism` — three genotypes down the rows, three
  * treatments across the columns, three replicates in each cell. Its group titles
  * are merged cells too, and the row-title column has no title of its own, so the
  * header row opens with a *blank* before the first block name.
@@ -806,7 +813,7 @@ describe('series extraction', () => {
 
   it('reads a single merged header row as group blocks', () => {
     /*
-     * `TestFiles/test2 data table.xlsx`, tab-delimited as an Excel copy puts it
+     * The user-supplied `test2 data table.xlsx`, tab-delimited as an Excel copy puts it
      * on the clipboard: `A1 = Hours`, `B1:D1` merged to "Control", `E1:G1` to
      * "Treated". Read without the blocks it infers as `prism` — six lines, four
      * of them named after placeholder column letters.
