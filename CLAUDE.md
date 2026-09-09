@@ -8127,6 +8127,35 @@ Each of these cost time once and will again:
   move together.
 - **SELinux needs `:z` on every bind mount** (this is Fedora), and `node_modules`
   must be a named volume, not part of the bind mount.
+- **Copying a project folder that has been run carries its nested `node_modules`
+  across.** The root `node_modules` is a named volume, but the nested ones —
+  `apps/web/node_modules` (vite, a full esbuild install), any
+  `packages/*/node_modules` — are on the bind mount, i.e. on the host disk
+  inside the folder. A Fedora-x86 checkout zip-and-copied to an Apple-Silicon
+  Mac brought an `@esbuild/linux-x64` binary and a `.bin/vite` symlink that the
+  transfer had dereferenced into a plain file; the web container then died with
+  `ERR_MODULE_NOT_FOUND` for `vite/dist/node/cli.js` (the flattened `.bin/vite`
+  resolved its `import('../dist/node/cli.js')` against `.bin/` instead of
+  `vite/bin/`). `make clean` alone does **not** fix it — it clears only the
+  volume, and vite is not in the volume. `make clean` **and** `rm -rf` every
+  nested `node_modules` (`find . -name node_modules -type d -prune -exec rm -rf
+  {} +`), then `make up`. `git clone` sidesteps it — `node_modules/` is
+  gitignored.
+- **The repo had no `.gitattributes`, so a Windows checkout was a CRLF landmine
+  waiting to happen.** `docker/*-entrypoint.sh` are LF-only and `COPY`d into the
+  image; Git for Windows' default CRLF conversion would turn the shebang into
+  `bash\r` and the web container would die at startup with `env: 'bash\r'`.
+  Fixed with a `.gitattributes` carrying `* text=auto eol=lf` — the whole tree
+  is container-consumed, nothing is read by native Windows tooling, and there
+  are no tracked binaries for the rule to harm (the `binary` lines in it are
+  pre-emptive guards only). Three tracked `.ts`/`.tsx` files still hold a stray
+  lone `\r`; left alone (not script files, and `--renormalize` was not run) so
+  the change stays a zero-diff addition.
+- **On macOS this runs under podman + `make`, exactly as on Linux** (`brew
+  install podman make`; `podman machine init && podman machine start`; then the
+  ordinary targets) — the `Makefile`'s `:z` mounts are harmless there, so do not
+  "fix" them for a Mac. `GUIDE.md` additionally documents Docker Desktop as the
+  non-developer macOS option.
 - **Vite needs `usePolling`** — inotify events do not cross the container boundary
   reliably.
 - **Piping a build through `tail` masks its exit code.** An image build "succeeded"

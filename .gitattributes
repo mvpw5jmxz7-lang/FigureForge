@@ -1,0 +1,24 @@
+# FigureForge is built and run entirely inside Linux containers — the shell
+# scripts, Dockerfiles and Makefile are read by the container, never by native
+# Windows tooling. Git for Windows converts text files to CRLF on checkout by
+# default, which turns a script's `#!/usr/bin/env bash` shebang into `bash\r`
+# and stops the web container from starting. Force LF on every platform.
+*               text=auto eol=lf
+
+# Guard rails for asset types that could be added later — keep git from ever
+# treating one as text and rewriting its bytes.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.pdf           binary
+*.eps           binary
+*.tif           binary
+*.tiff          binary
+*.woff          binary
+*.woff2         binary
+*.ffg           binary
+*.figureforge   binary
+*.xlsx          binary
+*.prism         binary

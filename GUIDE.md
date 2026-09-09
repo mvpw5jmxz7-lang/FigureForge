@@ -159,12 +159,40 @@ That's the only thing to install. You do **not** need to separately install
 Python, Node, or anything else — Docker Desktop provides everything
 FigureForge needs, self-contained.
 
-> **A note on how this was written:** the macOS and Windows steps in this
-> guide are correct and match how Docker Desktop and this project's setup
-> files work, but they were written without a Mac or a Windows PC available to
-> test on directly — everything on the Linux side of this guide has been run
-> and checked this session; macOS and Windows have not. If a step doesn't
-> match what you see, that's useful feedback too.
+#### If you prefer podman (command-line, no GUI)
+
+Docker Desktop is the simplest option and the one to pick if you just want to
+try FigureForge. If you'd rather not run a background GUI app — or you already
+use **podman** — that works too, and FigureForge is then driven with the same
+`make` commands shown in the Linux sections throughout this guide.
+
+1. If you don't already have **Homebrew** (a package installer for macOS), get
+   it from **[brew.sh](https://brew.sh)**.
+2. Install podman and make:
+   ```bash
+   brew install podman make
+   ```
+   (`make` often comes with Apple's developer tools already; if `brew` reports
+   it's already installed, that's fine.)
+3. Start podman's Linux engine — a one-time setup; afterwards it starts on
+   demand:
+   ```bash
+   podman machine init
+   podman machine start
+   ```
+4. From then on, use `make up`, `make down`, `make logs` and so on — every
+   command in this guide that shows a **Linux** version.
+
+This works the same on an Apple Silicon (M-series) Mac as on an Intel one — the
+pieces FigureForge downloads come in both versions and it picks the right one
+automatically.
+
+> **A note on how this was written:** the podman path above is how this project
+> is set up to run on macOS, and it uses the same commands as the Linux
+> instructions, which have been run and checked. The Docker Desktop path on
+> macOS, and all of the Windows steps, match how Docker Desktop and this
+> project's setup files work but have **not** been tested on those systems
+> directly. If a step doesn't match what you see, that's useful feedback too.
 
 ### On Windows
 
@@ -189,6 +217,8 @@ needs it to work).
    FigureForge.
 
 You do **not** need to separately install Python, Node, or anything else.
+(The podman alternative described under macOS is not a practical option on
+Windows — use Docker Desktop.)
 
 ### On Linux
 
@@ -261,52 +291,69 @@ answers, so they're covered separately.
 
 ### Moving the whole app to a new computer
 
-The short version: **only the project folder needs to travel.** Docker itself
-has to be freshly installed on the new computer (that's section 3, above, for
-whichever operating system that computer runs), and the very first time you
-start FigureForge there, it will spend a few minutes rebuilding everything —
-exactly like the first time you ever ran it. That rebuild is normal and only
-happens once per computer.
+The short version: **only the project folder needs to travel** — but if you've
+already run FigureForge on this computer, one part of the folder must be left
+behind (see the warning below). Docker (or podman) has to be freshly installed
+on the new computer — that's [section 3](#3-installing-what-you-need), for
+whichever operating system it runs — and the very first time you start
+FigureForge there it will spend a few minutes rebuilding everything, exactly
+like the first time you ever ran it. That rebuild is normal and only happens
+once per computer.
 
-You do **not** need to bring anything besides the project folder itself.
-Everything that makes a working copy of this project large on a computer
-where it's been actively used for development — downloaded packages, build
-output — lives inside Docker's own storage, not inside the folder on disk. A
-plain copy of the folder is already everything that's needed.
+> **Leave the `node_modules` folders behind.** Before you've ever run
+> FigureForge, the project folder is small. Once you've started it, it creates
+> one or more folders named `node_modules` *inside* the project folder (for
+> example `apps/web/node_modules`). These hold downloaded programs compiled for
+> **this** computer's processor and operating system — they will not run on a
+> different one, and copying them across is the single most common reason
+> FigureForge won't start on the new machine. It bites hardest when the two
+> computers have different processors, such as an Intel PC to an Apple Silicon
+> Mac.
 
 **Option 1 — you have access to where the project is hosted (a link ending in
-`.git`).** This is the easiest and fastest route. On the new computer, just
-follow [section 4](#4-getting-the-project-onto-your-computer) and run
-`git clone` there directly — nothing needs to be copied by hand at all.
+`.git`).** This is the easiest and safest route, and it avoids the
+`node_modules` problem entirely — that folder is never part of what `git`
+stores. On the new computer, just follow
+[section 4](#4-getting-the-project-onto-your-computer) and run `git clone`
+there directly. Nothing is copied by hand at all.
 
 **Option 2 — you don't have that, you just have the folder on this
 computer.** Copy the folder itself across:
 
 1. On the computer you're copying *from*, first stop FigureForge if it's
-   running (see [section 9](#9-stopping-it-or-starting-fresh)) — it isn't
-   strictly required, but it avoids copying a folder mid-write.
-2. Right-click the project folder and compress/zip it (macOS: "Compress"; the
-   Windows/Linux equivalent is usually "Compress to ZIP file" or "Send to →
-   Compressed folder"). This produces one file, which is much easier to move
-   than a folder full of thousands of small files.
-3. Move that one zip file to the new computer, by whichever means is
-   convenient: a USB flash drive, a shared network drive, or a cloud storage
-   service you already use (Dropbox, Google Drive, OneDrive, WeTransfer, and
-   so on all work fine — it's an ordinary file, nothing special about it).
-4. On the new computer, unzip it (double-click it, or right-click →
-   "Extract"), which gives you back the project folder.
-5. Install Docker on the new computer if you haven't already — see
+   running (see [section 9](#9-stopping-it-or-starting-fresh)) — not strictly
+   required, but it avoids copying a folder mid-write.
+2. **Delete every `node_modules` folder inside the project** (per the warning
+   above). This also makes the copy dramatically smaller and faster.
+   - **macOS / Linux:** open a terminal in the project folder and run
+     `find . -name node_modules -type d -prune -exec rm -rf {} +`
+   - **Windows:** in File Explorer, search the project folder for
+     `node_modules` and delete every folder it finds.
+
+   Deleting these is always safe — FigureForge rebuilds them on the next start.
+3. Right-click the project folder and compress/zip it (macOS: "Compress";
+   Windows/Linux: "Compress to ZIP file" or "Send to → Compressed folder").
+   This produces one file, much easier to move than a folder full of small
+   files.
+4. Move that one zip file to the new computer by whatever's convenient: a USB
+   flash drive, a shared network drive, or a cloud service you already use
+   (Dropbox, Google Drive, OneDrive, WeTransfer — it's an ordinary file).
+5. On the new computer, unzip it (double-click, or right-click → "Extract"),
+   which gives you back the project folder. If you skipped step 2 and the zip
+   still contains `node_modules` folders, delete them now — before the first
+   start — using the same commands as step 2.
+6. Install Docker or podman on the new computer if you haven't already — see
    [section 3](#3-installing-what-you-need) for that computer's operating
    system.
-6. Open a terminal in the unzipped folder (see [section
+7. Open a terminal in the unzipped folder (see [section
    4](#4-getting-the-project-onto-your-computer)'s callout on opening a
    terminal in the right place) and start it up as usual — [section
    6](#6-starting-it-up).
 
-That's the whole process. If the first start on the new computer takes a
-while and prints a lot of scrolling text, that's expected — see
-[section 10](#10-troubleshooting) if it doesn't finish within several
-minutes.
+That's the whole process. If the first start on the new computer takes a while
+and prints a lot of scrolling text, that's expected — but if the `web` piece
+stops with an error mentioning `node_modules` or "Cannot find module", see
+[section 10](#10-troubleshooting).
 
 ### Sharing just a figure, not the whole app
 
@@ -329,6 +376,10 @@ that were run.
 ## 6. Starting it up
 
 ### On macOS and Windows
+
+If you set up **podman** on macOS instead of Docker Desktop, skip this section
+and follow the Linux instructions just below — `make up` and the other `make`
+commands work identically on macOS.
 
 ```bash
 docker compose up --build
@@ -456,6 +507,9 @@ Run these from a terminal, sitting in the project folder (see
 | See what's currently running | `docker compose ps` | `make ps` | Lists the two pieces (`web` and `api`) and whether they're healthy | — |
 | See what's happening inside | `docker compose logs -f` | `make logs` | Streams the live activity log — useful if something seems stuck and you want to see what it's actually doing | Press `Ctrl + C` to stop watching (this does not stop the app) |
 
+On macOS with **podman** rather than Docker Desktop, use the commands from the
+**Linux** column.
+
 Two pieces run together: **web** (what you see in the browser) and **api**
 (does the statistics and file conversion in the background). If the app looks
 like it's running but statistics or exports don't work, check that both
@@ -514,6 +568,47 @@ Expected — it's downloading and assembling everything. This only happens
 once (or after a restart-from-scratch, or after moving the project to a new
 computer — see [section 5](#5-moving-figureforge-to-another-computer));
 normal starts afterwards are quick.
+
+**The `web` piece stops with an error just after "installing npm dependencies"
+— or right after you've moved the project from another computer.**
+The message mentions `Cannot find module`, `ERR_MODULE_NOT_FOUND`, or "cannot
+execute binary file". Leftover `node_modules` folders came across from the
+other computer (see [section
+5](#5-moving-figureforge-to-another-computer)). Fix it in three steps:
+
+1. Stop everything **and** clear the cached download — this is the step people
+   miss:
+   - Docker: `docker compose down -v`
+   - podman / Linux: `make clean`
+
+   A plain `docker compose down` / `make down` is not enough — without the `-v`
+   (or `make clean`) the broken cache stays and the same error comes straight
+   back.
+2. Delete every `node_modules` folder inside the project, exactly as in
+   [section 5](#5-moving-figureforge-to-another-computer), Option 2, step 2
+   (`find . -name node_modules -type d -prune -exec rm -rf {} +` on
+   macOS/Linux; search-and-delete in File Explorer on Windows).
+3. Start again (`docker compose up --build` / `make up`). It reinstalls
+   everything from scratch — a few minutes, like a first run.
+
+**(macOS) A command you pasted fails with `No rule to make target` or `unknown
+primary or operator`.**
+The Mac's default terminal (zsh) doesn't treat `#` as the start of a comment,
+so if you pasted a command with an explanatory `# …` note after it, that note
+was run as part of the command. Re-run it with everything from the `#` onwards
+removed, or paste one line at a time. (Linux and Windows terminals handle `#`
+normally — this one is macOS-only.)
+
+**(Windows) The `web` piece won't start and the error mentions `bash\r`,
+`'bash\r': No such file or directory`, or `exec ... : no such file or
+directory`.**
+The project's internal scripts were saved with Windows-style line endings when
+the project was downloaded. Current versions of the project prevent this, so
+the reliable fix is a fresh copy: run `git clone` again into a **new** folder
+(see [section 4](#4-getting-the-project-onto-your-computer)) and start from
+there. If you're comfortable with git and want to keep the folder you have, run
+`git pull` then `git rm --cached -r . && git reset --hard` in it (this discards
+any unsaved changes, so save your work first).
 
 **(Windows) The installer says WSL2 isn't available, or Docker Desktop won't
 start.**
@@ -575,7 +670,9 @@ This tool is still being refined, and your testing is genuinely part of that
 - **Zip file / archive (for transferring the app)** — a single compressed
   file containing a whole folder, made so it's easier to move around than
   thousands of individual files. See [section 5](#moving-the-whole-app-to-a-new-computer)
-  for how to make and unpack one for FigureForge itself. (Not to be confused
+  for how to make and unpack one for FigureForge itself — including the one
+  kind of folder (`node_modules`) to delete before zipping, because it holds
+  programs built for the computer you're copying *from*. (Not to be confused
   with a `.ffg` project file, below — a `.ffg` file already is a single file
   and needs no zipping.)
 - **`.ffg` file** — FigureForge's own save-file format (the project used to
