@@ -365,14 +365,16 @@ function renderPanel(node: PanelNode, doc: FigureDocument, options: RenderOption
  * Editor-only furniture for a montage panel: a hit target over its whole
  * frame, and a dashed outline in every cell no tile has reached yet.
  *
- * Both answer reports against round 31. The hit target is what makes a
- * montage *selectable at all*: `selectionTarget` in `Canvas.tsx` sends a
- * plain click on a tile straight to that tile (deliberately — see round 20),
- * but a panel drawing nothing of its own has no pixels outside its tiles for
- * a click to land on, so an empty montage was entirely unclickable and a
- * filled one could only ever select tiles. A transparent rect gives the
- * gutters, the padding and the empty cells something to hit; the click then
- * resolves to the panel exactly the way it always would have.
+ * Both answer reports against round 31. The hit target is what makes an
+ * *empty* montage selectable at all: a panel drawing nothing of its own has
+ * no pixels anywhere, so a montage with no tiles in it yet — the state "Add
+ * empty montage…" drops an author into — could not be clicked. A transparent
+ * rect gives its gutters, its padding and its empty cells something to hit;
+ * the click then resolves to the panel exactly the way it always would have.
+ * (It once did more than that: while round 20's rule sent a click on a tile
+ * straight to the tile, this was also the only way to reach a *filled*
+ * montage. Round 51 reverted that, so a plain click on any tile now selects
+ * the panel and this is back to covering the empty and partly-filled cases.)
  *
  * The placeholders are the same rectangles `fillPanelChildren` will hand the
  * tiles, read from `montageCellRects` rather than derived a second time, so

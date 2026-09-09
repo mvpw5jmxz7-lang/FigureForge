@@ -11,7 +11,6 @@ import {
   LABELLED_POINT_PLOT_TYPES,
   absoluteFrame,
   ancestorsOf,
-  childrenOf,
   duplicateNode,
   fitAspectAligned,
   isDerivedNode,
@@ -173,27 +172,6 @@ function panelGridMinimumMm(node: FigureDocument['nodes'][string]): { width: num
 const CONTAINER_TYPES = new Set(['panel', 'group', 'image']);
 
 /**
- * A panel whose only purpose is holding tiled content — a montage.
- *
- * A single-plot panel, a panel carrying a caption or annotation alongside its
- * plot, and every other container still resolve to the panel first (see
- * `selectionTarget`'s own history below) — this is deliberately narrow.
- */
-function isPureMontagePanel(doc: FigureDocument, panelId: NodeId): boolean {
-  const panel = doc.nodes[panelId];
-  if (!panel || panel.type !== 'panel' || !panel.contentGrid) return false;
-  const children = childrenOf(doc.nodes, panelId);
-  // One tile counts. The original rule required two, from a time when a
-  // `contentGrid` could only arrive with a multi-image import — but a montage
-  // filled a cell at a time passes through having exactly one, and a tile that
-  // is directly clickable at two tiles and not at one is the kind of
-  // inconsistency an author reads as a bug. Safe to widen now that the panel
-  // itself has a hit target of its own (`montageChrome`), so reaching the
-  // panel no longer depends on this returning false.
-  return children.length >= 1 && children.every((c) => c.type === 'plot' || c.type === 'image');
-}
-
-/**
  * The node a click on `id` should actually select.
  *
  * Every scene node stops pointer propagation before reporting itself, so the
@@ -207,15 +185,16 @@ function isPureMontagePanel(doc: FigureDocument, panelId: NodeId): boolean {
  * `enteredId` is the container the user has stepped into; clicks within it
  * select one level deeper.
  *
- * One exception: a pure montage panel (`isPureMontagePanel`) has nothing to
- * select *but* its tiles — resolving to the panel first buys nothing the way
- * it does for a single-plot panel (which still needs a plain click to reach
- * for moving/deleting/grouping) and only costs an extra double-click before
- * every tile move or resize. Confirmed live: a fresh click on any tile of a
- * multi-image import selected and dragged the whole panel instead of that
- * tile, symmetrically across all four positions — reported as "the image
- * doesn't move." Skip straight to the tile here, exactly as if the panel
- * were already entered.
+ * There is no montage exception any more. Round 20 added one — a panel whose
+ * children are all tiles resolved straight *through* to the tile, so a fresh
+ * multi-image import could be rearranged without double-clicking first. It
+ * bought that at the cost of the panel itself, which could then only be
+ * reached through a gutter a millimetre wide or a keyboard shortcut nobody
+ * finds, and was reported the other way round: the montage is hard to move or
+ * resize. One rule for every container is the answer to both — click selects
+ * the panel, double-click steps in to a tile, Escape steps back out — since
+ * the tile is one double-click away where the panel was effectively
+ * unreachable.
  */
 function selectionTarget(doc: FigureDocument, id: NodeId, enteredId: NodeId | null): NodeId {
   // ancestorsOf is nearest-first; outermost-first is what a click walks down.
@@ -229,11 +208,7 @@ function selectionTarget(doc: FigureDocument, id: NodeId, enteredId: NodeId | nu
     // caller and this click behaves like any other.
   }
 
-  const outer = chain[0]!;
-  if (outer.type === 'panel' && isPureMontagePanel(doc, outer.id)) {
-    return chain[1]?.id ?? id;
-  }
-  return outer.id;
+  return chain[0]!.id;
 }
 
 /** A text node being edited in place. */
@@ -714,36 +689,30 @@ export function Canvas({
        */
       if (target?.closest('.side-panel')) return;
 
-      // Step back out of a container. Checked before the selection guard, since
-      // leaving one is meaningful even with nothing selected.
-      if (event.key === 'Escape' && enteredId !== null) {
-        setEnteredId(null);
-        return;
-      }
-
       /*
-       * Escape from a montage tile selects the montage itself.
+       * Step back out of a container. Checked before the selection guard,
+       * since leaving one is meaningful even with nothing selected.
        *
-       * A pure montage panel is the one container a plain click resolves
-       * *through* rather than to (`selectionTarget`), so without this the only
-       * way to reach the panel is to find a gap between its tiles. That gap is
-       * real — the transparent hit area the renderer draws over the panel's own
-       * gutters and empty cells — but on a tightly packed montage it is a
-       * millimetre wide, so the keyboard route is what makes the panel
-       * reliably reachable. Selecting the parent, not merely deselecting, is
-       * the useful half: the panel's Inspector is where rows, columns, gutter
-       * and per-cell upload live.
+       * It steps out *to* the container, not merely out of it: the thing the
+       * author has just finished editing inside is the thing they now want to
+       * move, resize, delete or inspect. That matters most for a montage,
+       * whose panel owns the rows/columns/gutter/per-cell-upload controls —
+       * it is the half of the montage-specific Escape branch this replaces
+       * that was actually doing the work — but it is right for every
+       * container, so there is one rule rather than one plus an exception.
        */
-      if (event.key === 'Escape' && selectedIds.length > 0) {
-        const parents = new Set<NodeId>();
-        for (const id of selectedIds) {
-          const parentId = doc.nodes[id]?.parentId ?? null;
-          if (parentId !== null && isPureMontagePanel(doc, parentId)) parents.add(parentId);
-        }
-        if (parents.size === 1) {
-          onSelectionChange([...parents]);
-          return;
-        }
+      if (event.key === 'Escape' && enteredId !== null) {
+        const entered = enteredId;
+        setEnteredId(null);
+        // Only promote a selection that really was inside; a click elsewhere
+        // may have moved on while the entry was still recorded.
+        const inside =
+          selectedIds.length > 0 &&
+          selectedIds.every(
+            (id) => id === entered || ancestorsOf(doc.nodes, id).some((n) => n.id === entered),
+          );
+        if (inside) onSelectionChange([entered]);
+        return;
       }
 
       /*
