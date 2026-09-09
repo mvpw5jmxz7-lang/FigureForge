@@ -654,6 +654,19 @@ describe('series extraction', () => {
     expect(toSeries(table).map((s) => s.name)).toEqual(['Y1']);
   });
 
+  it('reads every column of a distribution table even with a stale row-names flag', () => {
+    // `hasRowNames` can survive from an earlier xy-shaped declaration of the
+    // same paste. A distribution table has no label column by construction —
+    // every one of these three is a group — so the flag must be ignored here,
+    // not just left at its default.
+    const table: Dataset = {
+      ...dataset('Y1,Y2,Y3\n10,4,7\n11,5,8'),
+      format: 'distribution',
+      hasRowNames: true,
+    };
+    expect(toSeries(table).map((s) => s.name)).toEqual(['Y1', 'Y2', 'Y3']);
+  });
+
   it('never infers distribution from a table of numeric columns', () => {
     /*
      * Nothing at the cell level separates "three columns of observations"

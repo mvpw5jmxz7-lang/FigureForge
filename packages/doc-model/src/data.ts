@@ -894,6 +894,14 @@ export function toSeries(ds: Dataset): Series[] {
     // in it, not a row that has to be padded to match its neighbours. A text
     // column declared into this layout by mistake filters down to no numbers
     // and drops out here, rather than drawing an empty group.
+    //
+    // `ds.hasRowNames` is deliberately never read here. A distribution table
+    // has no label column by construction — every column is a group of
+    // values — and round 16 already hides the "first column: row names"
+    // toggle for every layout but the xy ones. The field can still be `true`
+    // on a dataset re-declared into this format from an xy paste that had it
+    // set, and that stale flag must not reach here: reading it would drop the
+    // first Y column as though it were a label rather than a group.
     case 'distribution': {
       return ds.columns
         .map((column, index) => ({

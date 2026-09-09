@@ -256,6 +256,29 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 50 (column-wise distributions, cumulative curves, and
+the distribution tests):** 1237 TypeScript tests (1203 + 34: 2 in a new
+`ecdf.test.ts` against hand-worked ECDF steps, and 32 across
+`doc-model.test.ts`, `continuous-axis.test.ts` and `parity.test.tsx` covering
+the new format, the shared-bin-edges histogram, the ECDF geometry and the KS
+gap marker), 248 Python tests (204 + 44: the four new tests' dispatch
+branches, each SciPy-quirk guard, and the p-bound formatting), `tsc --build
+--force`, `eslint .` and `ruff check` clean, 46-check acceptance run
+unaffected, and **24 live-browser checks in each of light and dark**.
+**Measured, not assumed**: a ragged `Y1,Y2,Y3` paste (8, 6 and 2 finite values)
+was never auto-detected as the new layout; declared and imported, its default
+histogram drew **33 bars over 11 distinct x positions, all one width** — read
+off the rects' own `x`/`width` attributes, scoped to the new plot's own `<g>`
+after an earlier pass over the whole page's bars first reported two widths by
+counting every other panel's bars too; switching the same plot to ECDF drew a
+real curve; and, read back on the *categorical* reading of the same table,
+Kolmogorov-Smirnov drew a bracket and Anderson-Darling ran to completion on a
+group of n = 2 without a 500, printing `"Groups: Y1 (n=8), Y2 (n=6), Y3
+(n=2)"`. No schema version bump: `DataFormat` gains `'distribution'`,
+`PlotType` gains `'ecdf'`, `StatTest` gains the four test names, and every new
+`PlotNode`/`Comparison`/`Omnibus` field is optional — all additive. See
+"Round 50" below.
+
 **Verified after round 49 (every log-rank result reported itself stale):** 1203
 TypeScript tests (1200 + 3), 204 Python tests unchanged (nothing here touches
 `services/api`), `tsc --build --force` and `eslint .` clean, 46-check acceptance
@@ -7389,6 +7412,241 @@ simply goes away, so there is nothing to migrate.
 
 ---
 
+### Round 50 — column-wise distributions, cumulative curves, and the distribution tests
+
+Requested: a new import layout for a series of groups (`Y1, Y2, Y3, …`) where
+each column is its own stack of values — a Prism *Column* table — usable for
+histograms and distributions per column, with tests such as
+Kolmogorov-Smirnov, and cumulative histograms as an option. Four follow-up
+decisions were settled with the user before any code was written: all four
+distribution tests (KS, Anderson-Darling k-sample, Cramér-von Mises,
+Epps-Singleton), not just KS; both cumulative forms — a histogram toggle
+*and* a separate ECDF plot type; multi-group histograms offered as both
+overlay and step outline, on shared bins; and the tests offered everywhere a
+reading of the table supports them — brackets on the categorical readings,
+a carve-out on histogram/ECDF — with the KS maximum-gap drawn on the ECDF.
+
+- **`DataFormat` gains `'distribution'`, never auto-inferred** — the same
+  stance `contingency`/`differential`/`matrix`/`proteomics` already take.
+  Nothing at the cell level separates "one column of observations per group"
+  from "a shared x and several y series" (`prism`), and detection guessing
+  wrong here is worse than usual: the misread consumes the first column as an
+  axis and drops it from the figure entirely, rather than merely mislabelling
+  something. Placed directly under `replicate` in the layout dropdown, since
+  the two are readings of one rectangle turned 90° from each other — a
+  replicate runs across a row, a distribution runs down a column — and naming
+  both in the hint is what lets an author tell which one their own table is.
+  Columns are allowed to be **ragged**: a shorter group is a column with
+  fewer numbers in it, not a row that has to be padded to match, needing no
+  special handling beyond what `parseDelimited` and `columnKindFor` already
+  do for any table with holes. `toSeries`'s `'distribution'` arm reads every
+  column independently and deliberately never consults `ds.hasRowNames` — a
+  distribution table has no label column by construction, but the flag can
+  survive stale from an earlier xy-shaped declaration of the same paste, and
+  reading it here would drop the first Y column as though it were a label.
+- **`PlotType` gains `'ecdf'`, a separate type rather than a checkbox on
+  histogram.** It has no bin count — the whole reason a histogram needs one —
+  and it is literally the curve a Kolmogorov-Smirnov test is defined on: D is
+  the largest vertical distance between two of these, so an author looking at
+  the plot is looking at the quantity the p-value came from. `ecdfSteps`
+  (`packages/plots/src/ecdf.ts`) is pure maths with no rendering in it,
+  matching the `kaplanMeier` precedent exactly — ties collapse into one step
+  rather than several zero-width risers, and it returns an empty array for a
+  sample with nothing finite rather than a synthetic anchor, since unlike a
+  survival curve's `(0, 1)` start an ECDF's flat run has no natural x of its
+  own to begin at.
+  - **It lives inside `continuousGeometry`, not as a copy of
+    `survivalGeometry`.** Survival runs its own two-pass margin loop only
+    because `computePlotGeometry` diverts to it *before* `toSeries` is ever
+    called — a subject row carries an event flag `Series` has nowhere to
+    hold. A sample column is exactly what `toSeries` already returns for
+    `'distribution'`, so the ECDF branch sits where histogram's does and
+    inherits `requiredMargin`, `renderAxes`, the legend and axis breaks
+    completely unmodified.
+  - **The y domain is hardcoded `[0, 1]`**, ignoring `node.y.min/max/scale`
+    entirely — the same hard construction choice survival's curve already
+    makes, for the identical reason: a cumulative proportion cannot leave
+    that interval, so a narrower axis would crop a curve that is complete by
+    definition. The Inspector's numeric y-controls, `showPointsRelevant`,
+    `clipToRangeRelevant` and `secondAxisRelevant` all exclude it, matching
+    survival's own treatment.
+  - **The curve runs flat to both axis edges** — held at 0 left of the
+    smallest observation, at 1 right of the largest. Not cosmetic: where two
+    groups' ranges only partly overlap, the largest gap between their
+    curves — the KS statistic — very often falls in the stretch where one
+    group has no data at all, and without the flat runs that gap is simply
+    not on the page.
+  - **A deterministic vertex decimator** (`decimatePolyline`, 0.02 mm
+    epsilon) drops a vertex within that distance of the last one kept on
+    both axes, always keeping the first and last. A 10,000-row column is
+    10,000 vertices in one `<path>`, and `planPointClouds` cannot catch it —
+    it counts `s.points.length`, which is 0 for a line-only series like this
+    one. Fixed-epsilon rather than a target vertex count so canvas and
+    export decimate identically, the determinism every layout decision in
+    this renderer is held to.
+- **Multi-group histograms share one set of bin edges and are never pooled.**
+  The old restriction — a histogram needs exactly one series — is gone, and
+  so is the reasoning that used to justify it: pooling several groups into
+  one set of bars invents a shape belonging to no group, which is still
+  true, but the fix is to bin them *together* rather than to refuse more
+  than one. `binEdges` computes one set of edges across every group's values
+  combined; each group is then counted (`binCounts`) and transformed
+  (`histogramValues`) against those shared edges, so two groups' bars land
+  at identical `x0`/`x1` and can be compared honestly.
+  - **A single-group histogram carries no `seriesIndex`** and populates no
+    `geometry.series` at all — `renderContinuousMarks` pushes an unconditional
+    `group({}, markChildren)` for every series, so giving a lone group an
+    identity-only entry would add an empty `<g>` and break parity
+    byte-identity with every histogram drawn before this round.
+  - **`histogramStyle: 'overlay' | 'step'`** offers translucent filled bars
+    or an unfilled staircase outline per group. Step drives a new
+    `SceneRole 'histogram-outline'`, kept distinct from both `'bar'` (a
+    role-count assertion for real bars must not silently include outlines)
+    and `'line'` (nothing here connects one observation to the next — it is
+    the boundary of a distribution, not a series). It is included in
+    `checkColorAccessibility`'s `MARK_ROLES` for the same reason `'bar'`
+    is — it is one group's data in that group's own colour, so switching
+    style from bars to outlines must not silently exempt a histogram from
+    the colour-vision check.
+  - **`histogramCumulative`/`histogramNormalize` (`'count' | 'frequency' |
+    'density'`)** compose in `histogramValues`, called once per group
+    against the shared edges — the y domain and its tick step both read the
+    *drawn* value, never the raw count, so a density histogram never ends
+    up on an axis stating a whole-number tally. The generic "count axis
+    steps by whole numbers" rule from phase 3 is now conditional on
+    `normalize === 'count'` specifically, not on whether the histogram is
+    cumulative — a cumulative *count* is still a whole number, and a
+    cumulative *frequency* accumulates to exactly 1.
+  - **`typesFor`'s histogram gate was widened**, and this was a real gap
+    found while implementing rather than a planned change: it read
+    `if (t.id === 'histogram') return single`, so a distribution table's
+    several series would have hidden the one plot type whose default is
+    `histogram` — the dropdown would have offered every type except the one
+    that was just declared as the reason to import.
+- **The four distribution tests, each guarded against a specific way SciPy
+  fails quietly rather than loudly:**
+  - **Kolmogorov-Smirnov** is two-sample, reported the `wilcoxon` way — a
+    `Comparison` with no df, no CI and no effect size, since D *is* the
+    effect and inventing a Hedges' g beside it would describe a difference
+    in means the test never looked at. It carries `statisticLocation`
+    (where along x the maximum gap sits) and `statisticSign` (which sample
+    was higher there) straight from SciPy's own `statistic_location`/
+    `statistic_sign` rather than re-derived client-side, which would be a
+    second answer to a question already settled and could disagree wherever
+    a tie makes the maximum non-unique.
+  - **Anderson-Darling k-sample** is the one genuinely k-sample test of the
+    four, taking the omnibus-plus-pairwise shape `anova-one-way` and
+    `kruskal-wallis` already use rather than being reduced to pairs.
+    `anderson_ksamp` **clamps its p-value to [0.001, 0.25] and emits a
+    `UserWarning`** doing it — passed through as a point value, `P = 0.25`
+    states a precision the test explicitly declines to claim, and `P =
+    0.001` reads as significant at three decimal places by coincidence of
+    the floor. The warning is captured (`warnings.catch_warnings`, since it
+    is the only channel SciPy offers this on — `p == 0.25` is also a
+    legitimate unclamped answer, indistinguishable from the number alone)
+    and surfaces as `pBound: 'below' | 'above'` on both `Comparison` and
+    `Omnibus`, formatted as `P < 0.001` / `P > 0.25` rather than a bare
+    equality. It also raises a bare `IndexError` at n = 1 per group (guarded
+    into a 422 naming the author's data) and `ValueError` on an all-constant
+    pooled sample (pre-empted with the same message, for the same reason).
+  - **Epps-Singleton** compares empirical characteristic functions rather
+    than ranks, which is what makes it sensitive to spread differences that
+    leave two ECDFs close together. It **returns NaN below n = 5 per
+    group**, which `main.py`'s `_sanitize_or(c.p, 1.0)` would otherwise turn
+    into a fabricated **p = 1.0** — a confidently null result computed from
+    an estimate too thin to be one. Refused outright below that n.
+  - **Neither Cramér-von Mises nor Epps-Singleton accepts an `alternative`
+    parameter, and none of the four is offered one-sided regardless** — a
+    directional request is refused for all four, even Kolmogorov-Smirnov,
+    which does accept one in SciPy. Accepting it for one test of four would
+    mean the same dropdown setting silently applied on one plot and
+    silently ignored on the next, and the concrete harm is not abstract:
+    `methods_sentence` rewrites a test's name whenever `alternative` is
+    directional, so a silently-ignored setting would still hand the author
+    a sentence reading "one-tailed (lower) two-sample Cramér-von Mises
+    test" — a claim about an analysis that never ran.
+  - **The Shapiro/Levene assumption checks are not skipped for these four**,
+    unlike the count tests and log-rank, and that was checked rather than
+    assumed backwards: `check_assumptions` only runs those two when
+    `parametric` is true, and none of the four distribution tests is in
+    that set, so the skip condition never actually reaches them. What they
+    do get from the shared path is the small-sample advisory, which is if
+    anything more apt here — a two-sample KS at n = 2 is very nearly
+    powerless, and saying so is the whole point of an advisory warning.
+- **The methods sentence names the statistic, not just the p-value.**
+  `STATISTIC_SYMBOLS` (D, T, W, A²k) is read in `_comparisons_clause`, and
+  its own comment records why this matters beyond tidiness: these four are
+  the only tests here with no effect size and no CI, so without the symbol
+  the magnitude appears nowhere in the sentence at all —
+  `"Y1 vs Y2: P = 0.03"` and nothing else — found by reading a real
+  generated sentence, not by reading the code that builds it. A correction
+  moving the p-value off the bracket the test reported means the bound is
+  applied only to the uncorrected value; claiming `P_adj < 0.001` from a
+  bound on the raw p would overstate what the correction computed.
+- **The KS maximum gap is drawn on the ECDF**, from the stored analysis's
+  own `statisticLocation` — `resolveKsGap` in `render-document.ts`, the same
+  "resolve once, read by both the drawn marker and anything else that
+  wants it" discipline `resolveTrendFit` (round 48) already established,
+  so the drawn marker and the tabulated D cannot disagree.
+  - **Matched by series *name*, never by position.** `geometry.series` is
+    ordered by the table's columns; `comparisons` by `itertools.combinations`
+    over the request's groups. The two agree today, and pairing them on
+    that agreement rather than on `groupA`/`groupB` would draw the gap's
+    sign upside down the first time either ordering changed.
+  - **Withheld above two series, and for every test but KS.** Cramér-von
+    Mises and Anderson-Darling integrate over the whole range and
+    Epps-Singleton works in the frequency domain, so none of the other
+    three has a single x to point at; and with k > 2 groups a KS run
+    reports C(k,2) separate gaps with no honest way to draw one of them as
+    "the" gap. Withheld rather than approximated, Fisher's-above-2×2's
+    stance again.
+  - **`PlotNode.ksGapMarker?: boolean`, absent reads as ON** — the same
+    justification round 48's `trendLine` default carries: it can only
+    appear once the author has explicitly run KS on this exact plot, so no
+    saved figure receives a marker it never asked for.
+  - New `SceneRole`s `'ks-gap'` (the rule and its two caps, one `<path>` so
+    a role count is 1 per marker) and `'ks-gap-label'` (the `D = …`
+    caption, split out the way `'bracket-label'` is split from `'bracket'`
+    so `checkTextSize` has something to key a theme size onto).
+- **The Stats tab's gates move together, or the tab contradicts itself.**
+  `distributionOnContinuous` (a distribution plot type, running a
+  distribution test) is composed once and read by three places that must
+  agree: `blockedByContinuousAxis` (the carve-out, alongside correlation and
+  log-rank), the bracket-suppression gate (miss this and every comparison
+  counts as `unplaceable`, which makes the run notice falsely claim the
+  group names do not match the plot's data — exactly the class of bug this
+  file's "composed once" rule exists to prevent), and `offeredTests` itself.
+  On a **categorical** reading of the same table (a violin or a box), the
+  same four tests bracket like any other test — no gating change there at
+  all, since that path was already correct.
+
+Driven in a real browser, light **and** dark, **24 checks each**: a ragged
+`Y1,Y2,Y3` paste (8, 6 and 2 finite values) was never auto-detected as the
+new layout; declared and imported, the default histogram drew **33 bars
+over 11 distinct x positions, all one width** — measured off the rects' own
+`x`/`width`, scoped to the new plot's own `<g>` after an unscoped first pass
+over the whole page's bars reported two widths by counting an unrelated
+panel too; switching the same plot to ECDF drew a real curve; and, on the
+*categorical* reading of the same table, Kolmogorov-Smirnov drew a bracket
+while Anderson-Darling ran to completion on a group of n = 2
+(`"Groups: Y1 (n=8), Y2 (n=6), Y3 (n=2)"`) without a 500. No console errors
+in either theme.
+
+**Not in scope, deliberately:** one-sample KS (goodness-of-fit against a
+named distribution) — `run_test` hard-requires two groups for a different
+reason than any guard added here, so it needs a different request shape
+entirely; side-by-side (dodged) histogram bars; a KDE/density-curve overlay;
+per-group small multiples; and re-running a distribution test automatically
+when its data changes, which `checkStaleAnalyses` already discloses
+unchanged. `checkDistributionSampleSize` (the violin/box small-n warning)
+was deliberately **not** widened to histogram/ECDF: a histogram of n = 4
+draws four bars at their true counts and an ECDF of n = 4 draws four true
+steps — small-n here is a legibility problem, not the false-confidence one
+a kernel density or a set of quartiles creates from too little data, so it
+earns no finding.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -7440,12 +7698,15 @@ Phases 5–9, with the actual entry points:
 
 ### Declared-but-missing things — check before trusting the types
 
-- **All 13 `PlotType` variants now render distinctly.** The dropdown is gated
+- **All 14 `PlotType` variants now render distinctly.** The dropdown is gated
   on what the *dataset* supports rather than on what is implemented (`typesFor`
   in `Inspector.tsx`): scatter and line need paired `Series.x`, which `toSeries`
-  supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram needs a single
-  series, since pooling groups invents a bimodal shape belonging to neither;
-  volcano needs a single series carrying `Series.pointLabels` **and a dataset
+  supplies only for `simple-xy`/`prism`/`sigmaplot`/`xy-replicates`; a histogram
+  or an ECDF needs at least one series carrying values, and — since round 50 —
+  pools several series' values only to choose shared bin edges, never into one
+  drawn shape, so a distribution table's several groups no longer hide the one
+  plot type whose default is `histogram`; volcano needs a single series
+  carrying `Series.pointLabels` **and a dataset
   that is not `fold-fold`** — that format satisfies the label test exactly as
   `differential` does, and a volcano drawn on it would take −log10 of a
   negative fold change; fold-fold is gated on its own format for the mirror
@@ -7466,7 +7727,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line) is **optional**, so old files still load. Round 48's `trendLine` is the one optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), and round 16 by one more again (`proteomics`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way three times (not five — `pca` and `umap` both reuse `scatter`), for the same reason — a `volcano`, `heatmap` or `survival` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line, and round 50's `histogramStyle`, `histogramCumulative`, `histogramNormalize` and `ksGapMarker` on `PlotNode`, plus `pBound`, `statisticLocation` and `statisticSign` on `Comparison`/`Omnibus` — the second and third result-level fields after round 48's `fit`) is **optional**, so old files still load. Round 50's `ksGapMarker` is the second field, after round 48's `trendLine`, whose absent value reads as **on**: the marker it controls can only appear once the author has explicitly run Kolmogorov-Smirnov on that exact plot, so no saved figure receives one uninvited. Round 48's `trendLine` was the first optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), round 16 by one more again (`proteomics`), round 47 by one more again (`fold-fold`), and round 50 by one more again (`distribution`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way five times — `volcano`, `heatmap`, `survival`, `fold-fold` and `ecdf` — not seven, since `pca` and `umap` both reuse `scatter`, for the same reason: a `volcano`, `heatmap`, `survival`, `fold-fold` or `ecdf` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way, and round 50 widened it by four more (`'kolmogorov-smirnov'`, `'anderson-darling'`, `'cramer-von-mises'`, `'epps-singleton'`) in one change. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on the desktop only.* The shell's `before-quit` now prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2), so a desktop quit no longer silently discards work. **The browser is unchanged**: closing the tab still loses everything unsaved, and there is still no `beforeunload` guard. Saving is explicit and now names its own file, which was the reported ask; a restore-on-reload store was scoped out of stage B rather than half-built. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

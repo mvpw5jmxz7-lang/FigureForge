@@ -790,6 +790,13 @@ const checkPlotSize: Rule = ({ document, theme }) => {
 const MIN_VIOLIN_N = 10;
 const MIN_BOX_N = 5;
 
+// Deliberately not widened to `histogram`/`ecdf` (round 50). Both draw a
+// distribution too, but neither manufactures a shape the data cannot
+// support the way a violin's kernel density or a box's quartiles do: a
+// histogram of n = 4 draws four bars at their own true counts, and an ECDF
+// of n = 4 draws four true steps. Small-n here is a legibility problem —
+// few bars, a blocky staircase — not a false-confidence one, so it earns no
+// finding.
 const checkDistributionSampleSize: Rule = ({ document }) => {
   const findings: Finding[] = [];
 

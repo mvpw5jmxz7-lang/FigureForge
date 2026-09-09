@@ -48,12 +48,15 @@ between "this is broken" and "this hasn't been built yet."
 - **Import data.** Paste a table from Excel, or drop in a `.csv`/`.tsv`/`.txt`
   file. It recognises a wide range of common layouts — a treatment column with
   replicate columns, a simple X/Y table, grouped/nested data, contingency
-  (count) tables, a differential-expression table, a samples-by-features
-  matrix, survival (time-to-event) data — and shows you a preview before
-  anything is added to the figure.
+  (count) tables, a differential-expression table, a fold-change-vs-fold-change
+  table, a samples-by-features matrix, survival (time-to-event) data, a series
+  of groups where each column is its own stack of observations (`Y1, Y2,
+  Y3, …`, for histograms and distribution comparisons) — and shows you a
+  preview before anything is added to the figure.
 - **Every chart type on the menu is real**, not a placeholder: bar, dot,
-  bar+dot, beeswarm, box, violin, scatter, line and histogram plots; plus the
-  more specialised omics/biostatistics types — **volcano plots**,
+  bar+dot, beeswarm, box, violin, scatter, line, histogram and cumulative
+  distribution (ECDF) plots; plus the more specialised omics/biostatistics
+  types — **volcano plots**,
   **fold-change vs fold-change plots** (the same protein's change in two
   different comparisons, plotted against each other, with a cutoff on each
   axis), **heatmaps**,
@@ -62,15 +65,22 @@ between "this is broken" and "this hasn't been built yet."
   "Run UMAP" button). Which types are offered depends on the shape of your
   data — for example, a volcano plot needs a differential-expression-shaped
   table — so the dropdown only ever offers types your data can actually
-  support, rather than drawing something misleading from the wrong shape.
+  support, rather than drawing something misleading from the wrong shape. A
+  histogram over several groups shares one set of bins across them, drawn as
+  overlaid translucent bars or side-by-side outlines, with an option to
+  accumulate it into a cumulative histogram.
 - **Error bars and replicate display**: standard deviation, standard error, or
   a 95% confidence interval, with the individual data points shown alongside.
 - **Real statistics**, all reachable from the on-screen Stats tab: t-tests,
   one-way and repeated-measures ANOVA, Mann-Whitney, Kruskal-Wallis, Wilcoxon,
   chi-square, Fisher's exact, correlation (Pearson/Spearman), linear
-  regression, and a log-rank test for survival curves — with correction for
+  regression, a log-rank test for survival curves, and four tests for comparing
+  whole distributions — Kolmogorov-Smirnov, Anderson-Darling, Cramér-von Mises
+  and Epps-Singleton — with correction for
   multiple comparisons, an effect size, and a ready-to-paste sentence for your
-  methods section. On a scatter or a fold-change-vs-fold-change plot, running
+  methods section. Running Kolmogorov-Smirnov on a cumulative distribution
+  (ECDF) plot also draws the two-sample gap the test measures directly on the
+  curve. On a scatter or a fold-change-vs-fold-change plot, running
   Pearson or linear regression also **draws the fitted line on the panel**, and
   the Inspector can add a 95% confidence band (where the true line lies) or a
   prediction band (where a new observation would fall). Spearman deliberately

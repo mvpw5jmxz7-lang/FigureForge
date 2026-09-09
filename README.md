@@ -195,18 +195,21 @@ PDF confirmed to carry selectable text at exact journal dimensions. Phase 8
 (the Electron desktop shell) is three stages in, of four.
 
 **Implemented:** document model with undo/redo and project files; auto-layout
-with smart guides, snapping, rotation and 20+ templates; all twelve plot types
-(bar/dot/bar+dot/beeswarm/box/violin/scatter/line/histogram, plus volcano,
-heatmap and survival curves, with PCA/UMAP reusing scatter via a "run
-analysis" action on a data matrix) with error bars, log/symlog and broken
-axes, secondary axes, marker options and a DOM-free rasterization path for
-point clouds past ~2,000 points; statistics with corrections, effect sizes and
-t-distribution intervals — including a hand-verified log-rank test — verified
-against published reference values; image panels with crop, calibrated scale
-bars and annotations; all five export formats, now streamed rather than built
-whole in memory; a quality checker that repairs what it honestly can and
-explains what it cannot; canvas selection, copy/paste, rotation and draw-order
-control; data import with format detection and live preview across a dozen
+with smart guides, snapping, rotation and 20+ templates; all fourteen plot
+types (bar/dot/bar+dot/beeswarm/box/violin/scatter/line/histogram, plus
+volcano, heatmap, survival curves, fold-change-vs-fold-change and a cumulative
+distribution/ECDF plot, with PCA/UMAP reusing scatter via a "run analysis"
+action on a data matrix) with error bars, log/symlog and broken axes,
+secondary axes, marker options and a DOM-free rasterization path for point
+clouds past ~2,000 points; statistics with corrections, effect sizes and
+t-distribution intervals — including a hand-verified log-rank test and four
+distribution tests (Kolmogorov-Smirnov, Anderson-Darling, Cramér-von Mises,
+Epps-Singleton) — verified against published reference values; image panels
+with crop, calibrated scale bars and annotations; all five export formats,
+now streamed rather than built whole in memory; a quality checker that
+repairs what it honestly can and explains what it cannot; canvas selection,
+copy/paste, rotation and draw-order control; data import with format
+detection and live preview across fourteen
 table layouts.
 
 **Phase 8 (Electron shell), stages 1–3 done:** the app runs inside a real
