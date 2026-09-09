@@ -667,37 +667,44 @@ function TrendLineControls({
         </p>
       ) : (
         <>
-          <div className="field-row">
-            <label className="field">
-              Interval
-              <select
-                value={interval}
-                disabled={!shown}
-                onChange={(e) =>
-                  setPlot('Change fit interval', {
-                    trendInterval: e.target.value as 'none' | 'confidence' | 'prediction',
-                  })
-                }
-              >
-                <option value="none">None</option>
-                <option value="confidence">{level} confidence band</option>
-                <option value="prediction">{level} prediction band</option>
-              </select>
-            </label>
-            <label className="field">
-              Line spans
-              <select
-                value={node.trendExtent ?? 'data'}
-                disabled={!shown}
-                onChange={(e) =>
-                  setPlot('Change fit extent', { trendExtent: e.target.value as 'data' | 'axis' })
-                }
-              >
-                <option value="data">The data</option>
-                <option value="axis">The whole axis</option>
-              </select>
-            </label>
-          </div>
+          {/*
+            Both of these describe a line that is not being drawn, so with the
+            line switched off they are hidden rather than disabled — matching
+            the axis-break branch directly above, which already replaces the
+            whole block rather than greying it out. The checkbox above is the
+            control that brings them back, and it is right there.
+          */}
+          {shown && (
+            <div className="field-row">
+              <label className="field">
+                Interval
+                <select
+                  value={interval}
+                  onChange={(e) =>
+                    setPlot('Change fit interval', {
+                      trendInterval: e.target.value as 'none' | 'confidence' | 'prediction',
+                    })
+                  }
+                >
+                  <option value="none">None</option>
+                  <option value="confidence">{level} confidence band</option>
+                  <option value="prediction">{level} prediction band</option>
+                </select>
+              </label>
+              <label className="field">
+                Line spans
+                <select
+                  value={node.trendExtent ?? 'data'}
+                  onChange={(e) =>
+                    setPlot('Change fit extent', { trendExtent: e.target.value as 'data' | 'axis' })
+                  }
+                >
+                  <option value="data">The data</option>
+                  <option value="axis">The whole axis</option>
+                </select>
+              </label>
+            </div>
+          )}
           <p className="hint">
             {`y = ${fit.slope.toFixed(3)}x ${fit.intercept < 0 ? '−' : '+'} ` +
               `${Math.abs(fit.intercept).toFixed(3)} · n = ${fit.n}`}

@@ -1751,6 +1751,35 @@ function DataTab({
                   </>
                 )}
               </div>
+              {/*
+                Why a run button beside this table refuses.
+
+                These three stay visible-but-disabled rather than hidden, which
+                is the opposite of what this panel does elsewhere — and the
+                distinction is real: nothing about *this kind of table* makes
+                them inapplicable, the table is merely too small yet, and hiding
+                the only route to a feature until the data grows would make it
+                undiscoverable. What was wrong is that the requirement lived in
+                a `title`, and a tooltip is not where an author looks to find
+                out why a button does nothing.
+              */}
+              {(dataset.format === 'matrix' || dataset.format === 'proteomics') &&
+                (() => {
+                  const needs: string[] = [];
+                  if (dataset.format === 'matrix') {
+                    if (!pcaEligible) needs.push('PCA needs at least 3 rows and 2 columns');
+                    if (!umapEligible) needs.push('UMAP needs at least 4 rows');
+                  } else if (!samEligible) {
+                    needs.push(
+                      'the volcano test needs at least 4 rows and 3 or more replicate columns (2 + 2 for a two-group test)',
+                    );
+                  }
+                  return needs.length > 0 ? (
+                    <p className="hint">
+                      This table is too small to analyse: {needs.join('; ')}.
+                    </p>
+                  ) : null;
+                })()}
               {samFormId === dataset.id && samMatrix && (
                 <div className="sam-volcano-form">
                   <p className="hint">
@@ -2272,6 +2301,27 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
   const blockedByHorizontalOrientation = !continuousPlot && activePlot?.orientation === 'horizontal';
   const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
 
+  /*
+   * Why Run cannot fire, or null when it can.
+   *
+   * Composed once and read twice — by the button, which is hidden when this is
+   * set, and by the line that appears in its place. Spelling the three
+   * conditions out at each site is how a control and its own explanation come
+   * to disagree, and the button previously carried no `title` at all: it sat
+   * there refusing, with the reason reaching the author only through a
+   * separate notice that had its own reasons for being empty.
+   */
+  const runBlockedReason: string | null = blockedByContinuousAxis
+    ? 'This plot has a numeric x axis, so there are no category bands for a comparison to span.'
+    : blockedByHorizontalOrientation
+      ? 'This plot is drawn horizontally, so there is nowhere flat above a bar to place a bracket. Switch it to vertical in the Inspector to run a test here.'
+      : !minGroupsMet
+        ? xyCorrelation
+          ? 'A correlation needs a series carrying paired x and y values.'
+          : 'A comparison needs at least two groups; this plot has ' +
+            (series.length === 1 ? 'one.' : 'none.')
+        : null;
+
   // Counts and measurements take disjoint tests; see COUNT_TESTS.
   const counts = dataset !== undefined && isContingency(dataset);
 
@@ -2785,15 +2835,21 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         </div>
       )}
 
-      {offeredTests.length > 0 && (
-        <button
-          className="primary"
-          onClick={() => void run()}
-          disabled={!minGroupsMet || blockedByContinuousAxis || blockedByHorizontalOrientation}
-        >
-          Run and annotate
-        </button>
-      )}
+      {/*
+        Hidden rather than shown-and-disabled, the convention round 16 set for
+        this panel: a button that refuses is a longer way of saying nothing can
+        run. The reason takes its place, so the author is told once, where the
+        control was, instead of being left to hover a tooltip that was never
+        there.
+      */}
+      {offeredTests.length > 0 &&
+        (runBlockedReason === null ? (
+          <button className="primary" onClick={() => void run()}>
+            Run and annotate
+          </button>
+        ) : (
+          <p className="hint">{runBlockedReason}</p>
+        ))}
 
       {notice && <p className="hint notice">{notice}</p>}
 
