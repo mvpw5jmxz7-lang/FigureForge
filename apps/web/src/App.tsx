@@ -27,7 +27,12 @@ import { useAssets, type AssetStore } from './assets.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
 import { openAuthorisedPath } from './desktopFiles.js';
-import { browserProjectFileSystem, type ProjectFileSystem, type SaveTarget } from './projectFiles.js';
+import {
+  browserProjectFileSystem,
+  type ProjectFileSystem,
+  type SaveTarget,
+  type WorkingDirectory,
+} from './projectFiles.js';
 import { blankDocument } from './blankDocument.js';
 import { isDesktop, type DesktopMenuCommand } from './shell.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
@@ -204,6 +209,18 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
    * would be needed regardless, so there is nothing to gain by trying.
    */
   const [saveTarget, setSaveTarget] = useState<SaveTarget | null>(null);
+
+  /**
+   * The folder Open and Save dialogs start in, or null for the platform's own
+   * default.
+   *
+   * Held here only to render it. The thing that actually steers the dialogs is
+   * inside the `ProjectFileSystem` — a browser directory handle, or a path in
+   * the Electron main process — which is why this carries a name and a
+   * location and no handle: a live capability has no business in the React
+   * tree, and the app never needs one.
+   */
+  const [workingDir, setWorkingDir] = useState<WorkingDirectory | null>(null);
   /**
    * Whether there are edits the user has not written to disk.
    *
@@ -501,10 +518,17 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         // A path when the platform has one, the name when it does not — the
         // browser genuinely cannot say where the file went, and claiming
         // otherwise would be worse than the vaguer sentence.
+        //
+        // The last arm is what the browser said before a working folder was
+        // possible, and it stops being true once one is set: the dialog no
+        // longer drifts to wherever you last saved, it returns to the folder
+        // you fixed. Naming that folder is both more useful and more honest.
         showSaveConfirmation(
           target.location
             ? `Saved to ${target.location}`
-            : `Saved "${target.name}" — the browser remembers this folder for next time.`,
+            : workingDir
+              ? `Saved "${target.name}" in ${workingDir.name}.`
+              : `Saved "${target.name}" — the browser remembers this folder for next time.`,
         );
         return true;
       } catch (caught) {
@@ -655,6 +679,37 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     else resetToBlank();
   }, [dirty, resetToBlank]);
 
+  /*
+   * The working directory, loaded once.
+   *
+   * Async because the browser reads it back from IndexedDB, so it cannot be a
+   * render-time question — hence state plus an effect rather than a getter.
+   * `live` guards the unmount, which matters because this resolves after a
+   * round trip to storage.
+   */
+  useEffect(() => {
+    if (!fileSystem.supportsWorkingDirectory()) return;
+    let live = true;
+    void fileSystem.workingDirectory().then((directory) => {
+      if (live) setWorkingDir(directory);
+    });
+    return () => {
+      live = false;
+    };
+  }, [fileSystem]);
+
+  const chooseWorkingDirectory = useCallback(async () => {
+    const picked = await fileSystem.pickWorkingDirectory();
+    // Null is a cancelled dialog, never "clear it" — taking it as a value
+    // would wipe the setting every time someone changed their mind.
+    if (picked) setWorkingDir(picked);
+  }, [fileSystem]);
+
+  const clearWorkingDirectory = useCallback(async () => {
+    await fileSystem.clearWorkingDirectory();
+    setWorkingDir(null);
+  }, [fileSystem]);
+
   /**
    * Open a project file dropped on the window.
    *
@@ -768,6 +823,9 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         case 'close-file':
           requestClose();
           break;
+        case 'set-working-directory':
+          void chooseWorkingDirectory();
+          break;
         case 'export':
           requestExport(command.format);
           break;
@@ -804,6 +862,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     save,
     saveAs,
     requestClose,
+    chooseWorkingDirectory,
     requestExport,
     api,
     fitToWindow,
@@ -940,6 +999,49 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
               >
                 {saveTarget ? saveTarget.name : '— unsaved'}
               </span>
+              {/*
+                Only inside this branch, and only behind its own feature test.
+                The fallback branch below is precisely where a working folder
+                cannot exist — Firefox and Safari have no directory picker at
+                all — so one guard hides it everywhere it would mean nothing,
+                the convention rounds 16 and 44 already set.
+
+                Nothing here reads as a save destination on purpose: not "Save
+                to…", not "Output folder". The folder is where the dialogs
+                open, and Save still overwrites the file you have open.
+              */}
+              {fileSystem.supportsWorkingDirectory() &&
+                (workingDir ? (
+                  <>
+                    <button
+                      className="muted working-directory"
+                      disabled={busy !== null}
+                      onClick={() => void chooseWorkingDirectory()}
+                      title={`Open and Save dialogs start in ${
+                        workingDir.location ?? workingDir.name
+                      } — click to choose another`}
+                    >
+                      Folder: {workingDir.name}
+                    </button>
+                    <button
+                      className="icon"
+                      disabled={busy !== null}
+                      onClick={() => void clearWorkingDirectory()}
+                      aria-label="Clear the working folder"
+                      title="Let the dialogs open wherever they last were"
+                    >
+                      ×
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    disabled={busy !== null}
+                    onClick={() => void chooseWorkingDirectory()}
+                    title="Choose the folder Open and Save dialogs start in"
+                  >
+                    Set folder…
+                  </button>
+                ))}
               {saveConfirmation && <span className="save-confirmation">{saveConfirmation}</span>}
             </>
           ) : (
