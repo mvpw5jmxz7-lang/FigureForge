@@ -594,6 +594,16 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 
 .statusbar .group { display: flex; align-items: center; gap: 7px; }
 
+/* Only the file group may shrink, and only because it carries prose.
+   A flex item defaults to `min-width: auto` and refuses to go below its
+   content, so a long muted string inside (`.browser-limits`) would otherwise
+   push the buttons beside it off a narrow window instead of ellipsizing.
+   Deliberately NOT applied to every `.group`: the export group is buttons and
+   a dpi select with nothing to give, and letting it shrink simply moved the
+   overflow onto it — measured, at 1024 px it was squeezed to 341 px against
+   455 px of content. */
+.statusbar .group:first-child { min-width: 0; }
+
 .file-button {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -617,6 +627,17 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 .save-confirmation {
   font-size: 12px;
   color: var(--accent, #3b82f6);
+}
+
+/* What this browser cannot do, on the branch where it cannot.
+   Allowed to shrink and ellipsize rather than push the buttons beside it off
+   a narrow window: it explains the footer, so it must never displace it. */
+.browser-limits {
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- Data grid -----------------------------------------------------------

@@ -1060,6 +1060,27 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
                   }}
                 />
               </label>
+              {/*
+                Why this branch looks different, said out loud.
+
+                The standing convention is to hide what cannot apply (rounds 16
+                and 51), and that is right when a control does not fit the
+                author's *data* — the Inspector has the plot in front of it and
+                the absence explains itself. It is wrong here. A reader who has
+                been told FigureForge has a working folder, and is looking at a
+                footer that has no such button, cannot tell "your browser
+                cannot do this" from "it is broken" — and will hunt for it.
+                Reported exactly that way.
+
+                So this one line states the environment rather than hiding it.
+                It covers the whole branch, not just the missing folder: with
+                no File System Access API, Save cannot overwrite a file in
+                place either, and every save is a fresh download.
+              */}
+              <span className="muted browser-limits">
+                This browser downloads each save. Overwriting in place and a
+                working folder need Chrome or Edge.
+              </span>
               {saveConfirmation && <span className="save-confirmation">{saveConfirmation}</span>}
             </>
           )}
