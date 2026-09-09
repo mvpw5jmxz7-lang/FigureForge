@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(make down *)",
-      "Bash(grep -E \"^\\(PASS|FAIL\\) set:|passed$|^FAILED\")"
+      "Bash(grep *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
     ]
   }
 }
