@@ -240,6 +240,18 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   /** Format waiting on the author's confirmation; null means nothing pending. */
   const [pendingExport, setPendingExport] = useState<ExportFormat | null>(null);
 
+  /** Whether the Close File confirmation is up. */
+  const [closeConfirm, setCloseConfirm] = useState(false);
+  /**
+   * A close waiting on a save that has not finished.
+   *
+   * A ref rather than state because nothing renders it and because
+   * `saveViaDialog` — which runs a whole dialog round trip later — has to read
+   * the value that was current when Save was pressed, not the one from the
+   * render that happens to be in scope.
+   */
+  const closeAfterSave = useRef(false);
+
   const theme = resolveTheme(api.document.themeId, api.document.themeOverrides);
   const pointClouds = usePointCloudRasters(api.document, theme);
 
@@ -598,12 +610,18 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
    *
    * There was no "new" command before the menu needed one: the starting
    * document was built once, as `useDocument`'s initialiser. This clears
-   * exactly what `openFromFile` clears — the four things that outlive a
-   * document reset and would otherwise leak into the next figure — and both
-   * it and the initialiser call `blankDocument()`, so New and launch agree
-   * about what a fresh figure is.
+   * exactly what `openFromFile` clears — the things that outlive a document
+   * reset and would otherwise leak into the next figure — and both it and the
+   * initialiser call `blankDocument()`, so New and launch agree about what a
+   * fresh figure is.
+   *
+   * The editor modes and pending dialogs below are cleared for the same
+   * reason, which `newFigure` never did: a crop overlay is drawn over a node
+   * id, and an export confirmation lists findings, so both name things the
+   * next document does not have. It mattered less when New was reachable only
+   * from a menu; Close File is a button beside the canvas.
    */
-  const newFigure = useCallback(() => {
+  const resetToBlank = useCallback(() => {
     assets.store.clear();
     dataOriginals.current = new Map();
     api.store.reset(blankDocument());
@@ -611,7 +629,31 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     setSaveTarget(null);
     setDirty(false);
     setError(null);
+    setCropNodeId(null);
+    setMeasureNodeId(null);
+    setMeasuredPx(null);
+    setPendingExport(null);
+    setSaveName(null);
+    closeAfterSave.current = false;
+    if (saveConfirmationTimeout.current !== null) clearTimeout(saveConfirmationTimeout.current);
+    setSaveConfirmation(null);
   }, [api.store, assets.store]);
+
+  const newFigure = resetToBlank;
+
+  /**
+   * Put the figure down: blank the page, offering to save first if it matters.
+   *
+   * One renderer-side dialog serves both platforms rather than routing the
+   * desktop through the shell's `confirmDiscard`. That function is wired only
+   * to `before-quit` and Close File never quits, so reusing it would fork the
+   * wording between web and desktop and would put a close-triggered save on
+   * the same one-shot `PROJECT_SAVED` channel a concurrent quit is waiting on.
+   */
+  const requestClose = useCallback(() => {
+    if (dirty) setCloseConfirm(true);
+    else resetToBlank();
+  }, [dirty, resetToBlank]);
 
   /**
    * Open a project file dropped on the window.
@@ -723,6 +765,9 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         case 'save-as':
           void saveAs();
           break;
+        case 'close-file':
+          requestClose();
+          break;
         case 'export':
           requestExport(command.format);
           break;
@@ -752,7 +797,17 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
       }
     };
     return window.figureforge?.onMenuCommand?.(dispatch);
-  }, [newFigure, openViaPicker, applyLoaded, save, saveAs, requestExport, api, fitToWindow]);
+  }, [
+    newFigure,
+    openViaPicker,
+    applyLoaded,
+    save,
+    saveAs,
+    requestClose,
+    requestExport,
+    api,
+    fitToWindow,
+  ]);
 
   // Ctrl/Cmd+S and Ctrl/Cmd+Shift+S. Bound in App's own effect, not Canvas's —
   // that one returns early for anything focused inside `.side-panel`, which
@@ -769,6 +824,29 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [save, saveAs]);
+
+  /**
+   * Don't let a browser tab take unsaved work with it.
+   *
+   * Desktop is excluded deliberately rather than incidentally: the shell's own
+   * `before-quit` already offers Save / Don't Save / Cancel and can run this
+   * app's save before letting the process exit, which is strictly better than
+   * anything a renderer can do. A second guard there would ask twice for one
+   * decision.
+   *
+   * Registered only while dirty, so a clean page adds no listener at all and
+   * stays eligible for the back-forward cache. `preventDefault()` is the
+   * modern spelling; the browser shows its own wording either way, which is
+   * why there is no message to write here.
+   */
+  useEffect(() => {
+    if (!dirty || isDesktop()) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [dirty]);
 
   return (
     <div className="app">
@@ -883,6 +961,14 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
               {saveConfirmation && <span className="save-confirmation">{saveConfirmation}</span>}
             </>
           )}
+          {/* Outside the ternary so both branches get it exactly once. */}
+          <button
+            disabled={busy !== null}
+            onClick={requestClose}
+            title="Put this figure down and start a blank page"
+          >
+            Close file
+          </button>
         </div>
 
         <div className="group">
@@ -926,8 +1012,53 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
           <SaveDialog
             name={saveName}
             onNameChange={setSaveName}
-            onSave={() => saveViaDialog(saveName)}
-            onCancel={() => setSaveName(null)}
+            onSave={() => {
+              saveViaDialog(saveName);
+              /*
+               * Where a close-after-save actually completes on this path.
+               *
+               * `save()` returns false the instant it finds no File System
+               * Access API — it has only opened this dialog, and the write
+               * happens here, a user interaction later. A close driven off
+               * that boolean would silently cancel itself on every Firefox
+               * and Safari, so the intent travels in the ref instead.
+               */
+              if (closeAfterSave.current) resetToBlank();
+            }}
+            onCancel={() => {
+              setSaveName(null);
+              // Cancelling the save cancels the close it was serving; the
+              // author asked to keep the file, not to discard it unsaved.
+              closeAfterSave.current = false;
+            }}
+          />
+        )}
+        {closeConfirm && (
+          <CloseConfirmDialog
+            title={api.document.title}
+            onSave={() => {
+              setCloseConfirm(false);
+              closeAfterSave.current = true;
+              void save().then((ok) => {
+                // On the File System Access path this boolean *is* the
+                // outcome — `writeToTarget` returns true only when the bytes
+                // reached the file the author named, and a denied write that
+                // fell back to a download returns false. Elsewhere `save()`
+                // has merely opened `SaveDialog`, which completes the close
+                // itself; leave the flag alone for it.
+                if (ok) {
+                  closeAfterSave.current = false;
+                  resetToBlank();
+                } else if (fileSystem.supported()) {
+                  closeAfterSave.current = false;
+                }
+              });
+            }}
+            onDiscard={() => {
+              setCloseConfirm(false);
+              resetToBlank();
+            }}
+            onCancel={() => setCloseConfirm(false)}
           />
         )}
         {pendingExport !== null && (
@@ -983,6 +1114,44 @@ function ExportConfirmDialog({
           Review in Quality
         </button>
         <button onClick={onExport}>Export anyway</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The last chance to keep work the author is about to blank.
+ *
+ * Worded exactly as the desktop shell's own quit guard is (`confirmDiscard` in
+ * `apps/desktop/src/main.ts`), because they answer the same question and an
+ * author who has met one should recognise the other.
+ *
+ * `window.confirm` cannot do this: two buttons, and neither of them is Save —
+ * so the choice would collapse to discard-or-cancel, which is the one thing
+ * this dialog exists to avoid being the only option. Save leads, as the safe
+ * exit; Cancel is the escape.
+ */
+function CloseConfirmDialog({
+  title,
+  onSave,
+  onDiscard,
+  onCancel,
+}: {
+  title: string;
+  onSave: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="save-dialog right" role="dialog" aria-label="Close file">
+      <strong>Save changes to &ldquo;{title}&rdquo; before closing?</strong>
+      <span className="hint">Your changes will be lost if you don&rsquo;t save them.</span>
+      <div className="group">
+        <button className="primary" onClick={onSave}>
+          Save
+        </button>
+        <button onClick={onDiscard}>Don&rsquo;t save</button>
+        <button onClick={onCancel}>Cancel</button>
       </div>
     </div>
   );

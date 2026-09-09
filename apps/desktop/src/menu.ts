@@ -108,6 +108,10 @@ function fileMenu(context: MenuContext): MenuTemplateItem {
         accelerator: 'CmdOrCtrl+Shift+S',
         command: { type: 'save-as' },
       },
+      // No accelerator: CmdOrCtrl+W belongs to the close/quit role at the end
+      // of this same menu, and taking it would leave the window with no
+      // keyboard way to close.
+      { label: 'Close File', command: { type: 'close-file' } },
       separator,
       {
         label: 'Export',

@@ -372,10 +372,16 @@ async function startUp(): Promise<void> {
 /**
  * Ask before throwing away unsaved work.
  *
- * The web build cannot do this well — it has no `beforeunload` guard, which
- * the risk table has recorded as an open problem since phase 1 — because a
- * browser only permits a generic, unstyled prompt and cannot save on the
- * user's behalf afterwards. A shell can do both, so it does.
+ * The web build has had a `beforeunload` guard since round 51, but it can only
+ * ever be a generic, unstyled prompt that cannot save on the user's behalf
+ * afterwards — the browser writes the wording and offers two outcomes. A shell
+ * can name the figure and run the save, so it does.
+ *
+ * This is the *quit* guard specifically. Closing a figure without quitting is
+ * the renderer's own `requestClose`, which draws the same three choices in the
+ * app itself and is what the File ▸ Close File item reaches; it deliberately
+ * does not come through here, or a close-triggered save would land on the same
+ * one-shot `PROJECT_SAVED` channel `saveBeforeQuit` waits on.
  *
  * Returns true when the caller may proceed with quitting.
  */

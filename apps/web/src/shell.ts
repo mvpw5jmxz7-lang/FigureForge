@@ -60,6 +60,7 @@ export type DesktopMenuCommand =
   | { type: 'open-path'; path: string }
   | { type: 'save' }
   | { type: 'save-as' }
+  | { type: 'close-file' }
   | { type: 'export'; format: 'svg' | 'pdf' | 'eps' | 'png' | 'tiff' }
   | { type: 'undo' }
   | { type: 'redo' }
