@@ -101,106 +101,319 @@ export type Tab = 'data' | 'inspector' | 'stats' | 'layout' | 'quality' | 'layer
  */
 const ASSET_SIZE_WARNING_BYTES = 300 * 1024 * 1024;
 
+interface FormatExample {
+  /**
+   * A merged group-title row, for the three layouts whose blocking is
+   * *declared* by one rather than inferred. Leaving it out of their examples
+   * would show a table that does not actually import the way the hint says.
+   */
+  groupRow?: readonly string[];
+  header: readonly string[];
+  rows: readonly (readonly string[])[];
+}
+
+/**
+ * The dropdown's sections. Contiguous by construction — an `<optgroup>` cannot
+ * be reopened, so the array's order *is* the grouping, which is why the count
+ * table sits with the other declared-meaning layouts rather than beside the
+ * xy ones it happens to resemble in shape.
+ */
+type FormatGroup = 'groups' | 'xy' | 'two-factor' | 'declared';
+
+const FORMAT_GROUP_LABELS: Record<FormatGroup, string> = {
+  groups: 'Groups and their measurements',
+  xy: 'X against Y',
+  'two-factor': 'Two factors (Prism)',
+  declared: 'Tables with a declared meaning',
+};
+
 /**
  * The layouts an author can choose between, with what each one *means* for the
  * series that come out of it — the difference between `prism` and `sigmaplot`
  * is one shared x versus one x per series, and nothing in the old UI said so.
+ *
+ * Each carries three things because a name alone was reported as not enough,
+ * and each answers a different half of the question. The `label` states the
+ * literal column pattern, which is what an author matches their own sheet
+ * against. The `hint` says what the numbers will *mean* once read that way.
+ * The `example` is what actually settles it: `contingency`, `proteomics`,
+ * `matrix` and `replicate` are all "a text column then numbers", separated
+ * only by what the numbers are, and three rows of a plausible sheet show that
+ * where a sentence has to assert it.
  */
-const DATA_FORMATS: { id: DataFormat; label: string; hint: string }[] = [
+const DATA_FORMATS: {
+  id: DataFormat;
+  group: FormatGroup;
+  label: string;
+  hint: string;
+  example: FormatExample;
+}[] = [
   {
     id: 'replicate',
-    label: 'Treatment + replicates',
-    hint: 'One row per group; the replicate columns collapse into that group’s values.',
+    group: 'groups',
+    label: 'One row per group — Label, Rep1, Rep2, …',
+    hint: 'One row per group; the replicate columns collapse into that group\u2019s values.',
+    example: {
+      header: ['Treatment', 'Rep1', 'Rep2', 'Rep3'],
+      rows: [
+        ['Vehicle', '98.2', '95.4', '101.3'],
+        ['Drug A', '62.1', '58.8', '65.0'],
+        ['Drug B', '41.7', '44.2', '39.9'],
+      ],
+    },
   },
   {
     /*
      * Directly under `replicate`, because the two are readings of one
      * rectangle: replicates run across a row, a distribution runs down a
      * column. Naming both in the hint is what lets an author tell which one
-     * their own table is, which no amount of shape detection can settle.
+     * their own table is, which no amount of shape detection can settle — and
+     * the two examples side by side are the same table transposed, which is
+     * the clearest way to say it.
      */
     id: 'distribution',
-    label: 'Y1, Y2, Y3 … — one distribution per column',
-    hint: 'One column per group, each holding that group’s own observations; columns may be different lengths. Draws as a violin, box, histogram or cumulative curve, and unlocks the distribution tests (Kolmogorov–Smirnov and friends). Use “Treatment + replicates” above instead if your groups run across the rows.',
+    group: 'groups',
+    label: 'One column per group — Y1, Y2, Y3, …',
+    hint: 'One column per group, each holding that group\u2019s own observations; columns may be different lengths. Draws as a violin, box, histogram or cumulative curve, and unlocks the distribution tests (Kolmogorov\u2013Smirnov and friends). Use the row-per-group layout above instead if your groups run across the rows.',
+    example: {
+      header: ['Vehicle', 'Drug A', 'Drug B'],
+      rows: [
+        ['98.2', '62.1', '41.7'],
+        ['95.4', '58.8', '44.2'],
+        // Deliberately short: a ragged column is legal here and nowhere else.
+        ['101.3', '65.0', ''],
+      ],
+    },
   },
   {
     id: 'grouped',
-    label: 'Group, Value (long)',
+    group: 'groups',
+    label: 'One row per observation — Group, Value',
     hint: 'Two columns: a label and a measurement, one observation per row.',
+    example: {
+      header: ['Treatment', 'Viability'],
+      rows: [
+        ['Vehicle', '98.2'],
+        ['Vehicle', '95.4'],
+        ['Drug A', '62.1'],
+      ],
+    },
   },
   {
     id: 'simple-xy',
-    label: 'X, Y',
+    group: 'xy',
+    label: 'One series — X, Y',
     hint: 'One series of paired x and y values.',
+    example: {
+      header: ['Dose', 'Response'],
+      rows: [
+        ['1', '2.1'],
+        ['2', '3.9'],
+        ['4', '8.4'],
+      ],
+    },
   },
   {
     id: 'prism',
-    label: 'X, Y1, Y2, … (shared x)',
+    group: 'xy',
+    label: 'Shared x — X, Y1, Y2, … matched row by row',
     hint: 'Column 1 is the x for every series, matched row by row — right only if the series were sampled together.',
+    example: {
+      header: ['Hours', 'Vehicle', 'Drug A', 'Drug B'],
+      rows: [
+        ['0', '100', '100', '100'],
+        ['6', '98', '71', '64'],
+        ['24', '96', '42', '31'],
+      ],
+    },
   },
   {
     id: 'sigmaplot',
+    group: 'xy',
     /*
      * Not "(paired)". That reads as *matched* pairs, which is the opposite of
      * what this layout means and exactly the confusion it was reported for: the
      * pairing here is a column with the column beside it, and no row of one
      * series is claimed to correspond to the same row of another.
      */
-    label: 'X1, Y1, X2, Y2, … (own x per series)',
+    label: 'Own x per series — X1, Y1, X2, Y2, …',
     hint: 'Each series carries its own x column, so runs sampled at different points stay independent. Nothing is matched row by row — use the shared-x layout above for that.',
-  },
-  {
-    id: 'contingency',
-    label: 'Contingency table (counts)',
-    hint: 'One row per group, one column per category. Counts, not measurements: only chi-square and Fisher apply. Each count is its own bar.',
+    example: {
+      header: ['Radius', 'Run 1', 'Radius', 'Run 2'],
+      rows: [
+        ['5.9', '0.02', '6.1', '0.01'],
+        ['6.0', '0.11', '6.2', '0.09'],
+        ['6.1', '0.44', '6.3', '0.38'],
+      ],
+    },
   },
   {
     id: 'grouped-replicates',
-    label: 'Grouped — rows × groups (Prism)',
+    group: 'two-factor',
+    label: 'Two factors — RowLabel, then N columns per group',
     hint: 'Column 1 labels the rows; the rest block into one group of replicates each. Two factors: a mark per row and group, coloured by group.',
+    example: {
+      groupRow: ['', 'Control', '', '', 'Drug A', '', ''],
+      header: ['Genotype', 'r1', 'r2', 'r3', 'r1', 'r2', 'r3'],
+      rows: [
+        ['WT', '4.1', '3.9', '4.4', '8.2', '7.9', '8.8'],
+        ['KO', '4.0', '4.2', '3.8', '5.1', '5.4', '4.9'],
+      ],
+    },
   },
   {
     id: 'xy-replicates',
-    label: 'XY + replicates (Prism)',
+    group: 'two-factor',
+    label: 'Shared x + replicates — X, then N y per group',
     hint: 'Column 1 is a shared x; the rest block into one group of replicate y columns each. Drawn as a line per group through the mean, with its spread.',
+    example: {
+      groupRow: ['', 'Control', '', '', 'Treated', '', ''],
+      header: ['Hours', 'r1', 'r2', 'r3', 'r1', 'r2', 'r3'],
+      rows: [
+        ['0', '100', '99', '101', '100', '98', '102'],
+        ['6', '97', '95', '98', '71', '68', '74'],
+      ],
+    },
   },
   {
     id: 'nested',
-    label: 'Nested — subjects within groups (Prism)',
+    group: 'two-factor',
+    label: 'Nested — one column per subject, blocked into groups',
     hint: 'Every column is a subject, blocked into groups. Points cluster by subject and colour by group. Plotted but not tested — a nested design needs a hierarchical model.',
+    example: {
+      groupRow: ['Control', '', '', 'Treated', '', ''],
+      header: ['Rat 1', 'Rat 2', 'Rat 3', 'Rat 4', 'Rat 5', 'Rat 6'],
+      rows: [
+        ['4.1', '3.9', '4.4', '8.2', '7.9', '8.8'],
+        ['4.0', '4.2', '3.8', '5.1', '5.4', '4.9'],
+      ],
+    },
+  },
+  {
+    id: 'contingency',
+    group: 'declared',
+    label: 'Counts — one row per group, one column per category',
+    hint: 'One row per group, one column per category. Counts, not measurements: only chi-square and Fisher apply. Each count is its own bar.',
+    example: {
+      header: ['Group', 'Responded', 'Did not'],
+      rows: [
+        ['Treated', '34', '6'],
+        ['Control', '12', '28'],
+      ],
+    },
   },
   {
     id: 'differential',
-    label: 'Feature, log2 fold change, p-value',
-    hint: 'Three columns in this order: a feature name, an effect size and a significance value — plus an optional 4th column, an FDR/q-value per point (use the ‹ › buttons above to reorder columns first). A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran. If your significance column already is −log10(p) rather than a raw p-value, say so in the plot’s Inspector after import.',
+    group: 'declared',
+    label: 'Volcano — Feature, log2 fold change, p-value',
+    hint: 'Three columns in this order: a feature name, an effect size and a significance value — plus an optional 4th column, an FDR/q-value per point (use the \u2039 \u203a buttons above to reorder columns first). A raw differential-expression export has more columns in a different order — trim and reorder first. Draws as a volcano plot; not tested here, since the p-values are already the output of a test this app never ran. If your significance column already is \u2212log10(p) rather than a raw p-value, say so in the plot\u2019s Inspector after import.',
+    example: {
+      header: ['Gene', 'log2FoldChange', 'pValue', 'qValue'],
+      rows: [
+        ['TP53', '2.41', '0.0003', '0.004'],
+        ['MYC', '-1.87', '0.0021', '0.018'],
+        ['ACTB', '0.04', '0.8100', '0.910'],
+      ],
+    },
   },
   {
     // Beside the differential layout, and for the same reason the proteomics
     // one is: all three are read off the same kind of export, and the only
     // thing separating them is what the columns mean.
     id: 'fold-fold',
-    label: 'Feature, log2 fold change, log2 fold change',
-    hint: 'Three columns in this order: a feature name, then the SAME feature’s log2 fold change in two different comparisons — 97Q/25Q against 97Q/APEX, treated-vs-control in two cell lines, and so on. Draws as a fold-vs-fold scatter with a cutoff on each axis, so you can see which proteins move together and which move only in one comparison. Its shape is identical to the layout above, and nothing in the numbers can tell an effect size from a p-value — so choose it explicitly. Correlation and linear regression *are* offered here, unlike a volcano: both axes are effect sizes this app never computed a significance value for.',
+    group: 'declared',
+    label: 'Fold vs fold — Feature, log2 FC, log2 FC',
+    hint: 'Three columns in this order: a feature name, then the SAME feature\u2019s log2 fold change in two different comparisons — 97Q/25Q against 97Q/APEX, treated-vs-control in two cell lines, and so on. Draws as a fold-vs-fold scatter with a cutoff on each axis, so you can see which proteins move together and which move only in one comparison. Its shape is identical to the volcano layout above, and nothing in the numbers can tell an effect size from a p-value — so choose it explicitly. Correlation and linear regression *are* offered here, unlike a volcano: both axes are effect sizes this app never computed a significance value for.',
+    example: {
+      header: ['Protein', '97Q/25Q', '97Q/APEX'],
+      rows: [
+        ['HTT', '3.42', '2.98'],
+        ['HSPA8', '1.87', '-0.22'],
+        ['ACTB', '0.05', '0.11'],
+      ],
+    },
   },
   {
     // Directly under the differential layout: the two are neighbours in
     // meaning — this is the table a volcano test is run *on*, that is the
     // table it produces.
     id: 'proteomics',
-    label: 'Proteomics — replicate intensities (LFQ)',
-    hint: 'Column 1 names the protein; every other column is one sample’s intensity (LFQ, iBAQ, a normalised ratio). Its rows are features, not treatment groups, so the comparison runs down the columns: this is the only layout the Perseus-style volcano test is offered on, and the ordinary group-comparison tests are withheld. Imported as a table only, with no panel — it is the input to a test, not a figure. Choose it explicitly; nothing in the numbers themselves separates it from any other replicate table.',
+    group: 'declared',
+    label: 'Proteomics — Protein, then one column per sample',
+    hint: 'Column 1 names the protein; every other column is one sample\u2019s intensity (LFQ, iBAQ, a normalised ratio). Its rows are features, not treatment groups, so the comparison runs down the columns: this is the only layout the Perseus-style volcano test is offered on, and the ordinary group-comparison tests are withheld. Imported as a table only, with no panel — it is the input to a test, not a figure. Choose it explicitly; nothing in the numbers themselves separates it from any other replicate table.',
+    example: {
+      header: ['Protein', 'Ctrl_1', 'Ctrl_2', 'Ctrl_3', 'Treat_1', 'Treat_2', 'Treat_3'],
+      rows: [
+        ['HTT', '21.4', '21.1', '21.6', '24.8', '24.5', '25.0'],
+        ['HSPA8', '27.9', '28.1', '27.7', '28.0', '27.8', '28.2'],
+      ],
+    },
   },
   {
     id: 'matrix',
-    label: 'Matrix (rows × columns)',
+    group: 'declared',
+    label: 'Matrix — RowLabel, then one column per condition',
     hint: 'Column 1 labels the rows, the header row labels the columns, one continuous value per cell — a gene-expression table, a correlation matrix, a distance matrix. Draws as a heatmap; not tested here, since there is no group comparison to run on a dense grid.',
+    example: {
+      header: ['Pathway', 'Ctrl 0 h', 'Cmpd 6 h', 'Cmpd 24 h'],
+      rows: [
+        ['Glycolysis', '0.12', '1.84', '2.41'],
+        ['Oxid. phos.', '-0.08', '-1.22', '-1.90'],
+        ['Autophagy', '0.31', '0.95', '1.62'],
+      ],
+    },
   },
   {
     id: 'survival',
-    label: 'Time, event, group (survival)',
-    hint: 'One row per subject: a time to event or censoring, a 1/0 event flag (1 = the event happened, 0 = censored), and an optional treatment/arm column. Draws as a Kaplan–Meier curve; the only test offered here is the log-rank test.',
+    group: 'declared',
+    label: 'Survival — Time, Event (1/0), Group',
+    hint: 'One row per subject: a time to event or censoring, a 1/0 event flag (1 = the event happened, 0 = censored), and an optional treatment/arm column. Draws as a Kaplan\u2013Meier curve; the only test offered here is the log-rank test.',
+    example: {
+      header: ['Time', 'Event', 'Arm'],
+      rows: [
+        ['9', '1', 'Maintained'],
+        ['13', '0', 'Maintained'],
+        ['5', '1', 'Nonmaintained'],
+      ],
+    },
   },
 ];
+
+/**
+ * Three rows of a sheet the chosen layout would read correctly.
+ *
+ * Rendered from the same array the dropdown draws its names from, so an
+ * example cannot describe a layout the list does not offer.
+ */
+function FormatExampleTable({ example }: { example: FormatExample }) {
+  return (
+    <table className="format-example">
+      <thead>
+        {example.groupRow && (
+          <tr className="group-row">
+            {example.groupRow.map((cell, i) => (
+              <th key={i}>{cell}</th>
+            ))}
+          </tr>
+        )}
+        <tr>
+          {example.header.map((cell, i) => (
+            <th key={i}>{cell}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {example.rows.map((row, r) => (
+          <tr key={r}>
+            {row.map((cell, c) => (
+              <td key={c}>{cell}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 /**
  * Layouts where a column block is a set of *replicates of one series*, rather
@@ -1218,10 +1431,18 @@ function DataTab({
                 onChange={(e) => setFormat(e.target.value as DataFormat | '')}
               >
                 <option value="">Detect</option>
-                {DATA_FORMATS.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label}
-                  </option>
+                {/* Grouped because fifteen flat options is half the reason a
+                    name alone was not enough: the three Prism shapes read as
+                    unrelated when they are scattered through the list. Detect
+                    stays outside any group, since it is not a layout. */}
+                {(Object.keys(FORMAT_GROUP_LABELS) as FormatGroup[]).map((g) => (
+                  <optgroup key={g} label={FORMAT_GROUP_LABELS[g]}>
+                    {DATA_FORMATS.filter((f) => f.group === g).map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </label>
@@ -1297,6 +1518,18 @@ function DataTab({
             {DATA_FORMATS.find((f) => f.id === preview.format)?.hint}
             {preview.hasRowNames && ' Column 1 names the rows; the data starts in column 2.'}
           </p>
+          {(() => {
+            // What a sheet this layout reads correctly actually looks like.
+            // Above the preview of the author's own table, so the two can be
+            // compared without scrolling between them.
+            const example = DATA_FORMATS.find((f) => f.id === preview.format)?.example;
+            return example ? (
+              <details className="format-example-wrap">
+                <summary>What this layout expects</summary>
+                <FormatExampleTable example={example} />
+              </details>
+            ) : null;
+          })()}
           <table>
             <thead>
               <tr>

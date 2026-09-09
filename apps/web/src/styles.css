@@ -326,6 +326,39 @@ h4 { margin: 0 0 6px; font-size: 13px; }
 
 .preview, .sam-volcano-form { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px; }
 .preview-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+
+/* A worked example of the chosen layout. Collapsed by default: it answers a
+   question an author asks once per layout, not on every paste. */
+.format-example-wrap { margin: 0 0 8px; }
+.format-example-wrap > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.format-example {
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 11px;
+  /* A seven-column proteomics example is wider than the panel; scrolling the
+     table is right where wrapping its cells would misrepresent the shape. */
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.format-example th,
+.format-example td {
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  text-align: left;
+}
+.format-example th { font-weight: 600; }
+/* The merged group-title row: sparse by nature, and that sparseness is the
+   declaration the parser reads, so it is shown rather than tidied away. */
+.format-example .group-row th {
+  color: var(--muted);
+  font-weight: 500;
+  background: var(--bg);
+}
 .preview table, .results-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; }
 .preview th, .preview td, .results-table th, .results-table td {
   text-align: left;
