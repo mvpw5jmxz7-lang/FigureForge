@@ -46,6 +46,7 @@ import {
   renameDataset,
   reorderNode,
   replaceAnalysisForPlot,
+  replaceSeriesAnalysesForPlot,
   repositionBrackets,
   reserveLayoutSpace,
   toMatrix,
@@ -2242,8 +2243,25 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    * to decide what to offer before a test is chosen, and deciding that from a
    * predicate that already depends on the choice is circular.
    */
-  const correlationPossible = series.length === 1 && series[0]?.x !== undefined && !differential;
+  /*
+   * Every series that carries paired x — the ones a correlation/regression can
+   * run on. A plot with more than one is offered a picker: the test fits each
+   * series the author ticks, and each fit is stored as its own analysis keyed
+   * by `spec.seriesName`, so unticking one and re-running drops its result and
+   * its drawn line.
+   */
+  const correlationSeries = series.filter((s) => s.x !== undefined && s.x.length > 0);
+  const correlationPossible = correlationSeries.length >= 1 && !differential;
   const xyCorrelation = CORRELATION_TESTS.has(test) && correlationPossible;
+  const [pickEcho, setPickEcho] = useState('');
+  const [seriesPick, setSeriesPick] = useState<Set<string>>(new Set());
+  if (pickEcho !== activePlotId) {
+    setPickEcho(activePlotId);
+    setSeriesPick(new Set(correlationSeries.map((s) => s.name)));
+  }
+  const pickedForRun = correlationSeries.filter(
+    (s) => correlationSeries.length <= 1 || seriesPick.has(s.name),
+  );
   /*
    * A survival curve's x is continuous time too, exactly the shape
    * `blockedByContinuousAxis` exists to refuse group comparisons on — so
@@ -2299,7 +2317,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    * plot type.
    */
   const blockedByHorizontalOrientation = !continuousPlot && activePlot?.orientation === 'horizontal';
-  const minGroupsMet = xyCorrelation ? series.length >= 1 : series.length >= 2;
+  const minGroupsMet = xyCorrelation ? pickedForRun.length >= 1 : series.length >= 2;
 
   /*
    * Why Run cannot fire, or null when it can.
@@ -2317,7 +2335,7 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
       ? 'This plot is drawn horizontally, so there is nowhere flat above a bar to place a bracket. Switch it to vertical in the Inspector to run a test here.'
       : !minGroupsMet
         ? xyCorrelation
-          ? 'A correlation needs a series carrying paired x and y values.'
+          ? 'Tick at least one series to fit.'
           : 'A comparison needs at least two groups; this plot has ' +
             (series.length === 1 ? 'one.' : 'none.')
         : null;
@@ -2473,26 +2491,83 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
     const options = { ...defaultAnalysisOptions(), correction };
 
     try {
+      /*
+       * Correlation/regression: one fit per ticked series, each its own
+       * analysis keyed by `spec.seriesName`. `replaceSeriesAnalysesForPlot`
+       * then makes the stored set exactly the ticked set — an unticked series'
+       * result and its drawn line go on the next run. Kept separate from the
+       * group-comparison path below, which stays one analysis per plot and
+       * places brackets.
+       */
+      if (xyCorrelation) {
+        const xName = dataset.columns[0]?.name ?? 'x';
+        const built = await Promise.all(
+          pickedForRun.map(async (s): Promise<Analysis> => {
+            const r = await analyze({
+              test,
+              groups: [{ name: s.name, values: s.values }],
+              x: { name: xName, values: s.x! },
+              alternative: options.alternative,
+              correction,
+              alpha: options.alpha,
+              welch: options.welch,
+            });
+            return {
+              id: newId(),
+              name:
+                pickedForRun.length > 1
+                  ? `${test} · ${s.name}`
+                  : `${test} on ${dataset.name}`,
+              test,
+              spec: { datasetId: dataset.id, groups: [s.name], seriesName: s.name },
+              plotId: activePlot.id,
+              options,
+              inputHash: analysisInputHash({ test, correction }, [s.values], s.x),
+              result: r,
+              computedAt: new Date().toISOString(),
+            };
+          }),
+        );
+
+        api.transaction('Run correlation', () => {
+          commit('Store fitted lines', (draft) => {
+            replaceSeriesAnalysesForPlot(draft, activePlot.id, built);
+          });
+        });
+
+        const owner = panelOwning(doc.nodes, activePlot.id);
+        const panelName = owner ? panelTitle(owner) : activePlot.name;
+        const label = TESTS.find((t) => t.id === test)?.label ?? test;
+        const drew = TREND_LINE_PLOT_TYPES.has(activePlot.plotType);
+        const withFit = built.filter((a) => a.result?.fit).length;
+        setNotice(
+          `${label} on ${panelName}: ${built.length} series ` +
+            `${built.length === 1 ? 'was' : 'were'} fitted. ` +
+            (withFit === 0
+              ? 'Spearman fits no straight line — the coefficients are in the table below.'
+              : drew
+                ? `The fitted ${withFit === 1 ? 'line is' : 'lines are'} drawn in ${
+                    built.length > 1 ? 'each series’ own colour' : 'the panel'
+                  }; the Inspector adds a confidence or prediction band.`
+                : `A ${activePlot.plotType} plot draws no fitted line — switch it to a scatter or line plot to see ${withFit === 1 ? 'it' : 'them'}.`),
+        );
+        return;
+      }
+
       // A subject row is not a replicate to pool, so log-rank reads through
       // `toSurvivalGroups`, not `toSeries` — `series` here carries only the
       // times (`toSeries`'s minimal `'survival'` case), with nowhere to
       // carry the event flag every log-rank term needs.
       const survivalGroups = survivalLogRank ? toSurvivalGroups(dataset) : [];
 
-      const groupsPayload = xyCorrelation
-        ? [{ name: series[0]!.name, values: series[0]!.values }]
-        : series.map((s) => ({ name: s.name, values: s.values }));
-      const xPayload = xyCorrelation
-        ? { name: dataset.columns[0]?.name ?? 'x', values: series[0]!.x! }
-        : undefined;
+      // Correlation/regression returned above; this is the group/omnibus path.
       const eventsPayload = survivalLogRank
         ? survivalGroups.map((g) => ({ name: g.name, values: g.events.map((e) => (e ? 1 : 0)) }))
         : undefined;
 
       const result = await analyze({
         test,
-        groups: groupsPayload,
-        x: xPayload,
+        groups: series.map((s) => ({ name: s.name, values: s.values })),
         events: eventsPayload,
         alternative: options.alternative,
         correction,
@@ -2585,37 +2660,12 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
 
       // Every one of these used to be silent, so "the test ran and nothing
       // appeared" was indistinguishable from a broken feature.
+      // Correlation/regression has its own run path and notice above (it fits
+      // each picked series separately); everything from here is the single
+      // group/omnibus analysis that places brackets.
       const owner = panelOwning(doc.nodes, activePlot.id);
       const panelName = owner ? panelTitle(owner) : activePlot.name;
-      if (xyCorrelation) {
-        /*
-         * The fitted line is the discoverability channel for the Inspector's
-         * own "Fitted line" block, which stays hidden until an analysis exists
-         * to draw from — so this sentence is where an author learns the control
-         * is now there.
-         *
-         * Three outcomes, and each is stated rather than left silent, the same
-         * reason every "why did no bracket appear" case above is spelled out.
-         * The middle one is easy to reach by accident: an x/y table imports as
-         * a LINE plot by default (`defaultPlotTypeFor`), which draws no fit, so
-         * an author who never changed the plot type would otherwise see the
-         * test succeed and nothing at all happen on the page.
-         */
-        const fitted = result.fit != null;
-        const drew = fitted && TREND_LINE_PLOT_TYPES.has(activePlot.plotType);
-        const aboutTheLine = drew
-          ? ' The fitted line is now drawn on the panel — the Inspector adds a confidence or ' +
-            'prediction band.'
-          : fitted
-            ? ` A fitted line was computed but this panel is a ${activePlot.plotType} plot, which ` +
-              'does not draw one; switch it to a scatter in the Inspector to see it.'
-            : '';
-        setNotice(
-          `Correlation on ${panelName}: the result is in the table below. A numeric x axis has no ` +
-            'categories to span, so no bracket is drawn.' +
-            aboutTheLine,
-        );
-      } else if (survivalLogRank) {
+      if (survivalLogRank) {
         setNotice(
           `Log-rank test on ${panelName}: the result is in the table below. A Kaplan–Meier ` +
             "curve's x axis is continuous time, not discrete categories, so no bracket is drawn.",
@@ -2664,11 +2714,12 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
    * test applies here" notice, the volcano-test block, the run notice — has
    * followed `activePlot` all along; this was the one hold-out.
    *
-   * `replaceAnalysisForPlot` allows one analysis per plot, so this is at most
-   * one card. Nothing usable is lost by hiding the rest: `run()` always targets
-   * the selected plot, so another panel's card could never be re-run from where
-   * it was shown. Staleness stays figure-wide in the Quality tab, which reports
-   * every stale analysis at error severity and gates export on it.
+   * A plot carries one group-comparison analysis (`replaceAnalysisForPlot`),
+   * plus — for a multi-series line plot — one per fitted series, so this is
+   * one card or a small handful, all for the selected plot. Nothing usable is
+   * lost by hiding other panels' cards: `run()` always targets the selected
+   * plot. Staleness stays figure-wide in the Quality tab, which reports every
+   * stale analysis at error severity and gates export on it.
    */
   const analyses = activePlot
     ? doc.analyses.filter((a) => (a.plotId ?? null) === activePlot.id)
@@ -2721,6 +2772,33 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
               ))}
             </select>
           </label>
+
+          {xyCorrelation && correlationSeries.length > 1 && (
+            <div className="field block">
+              <span>Fit these series</span>
+              {correlationSeries.map((s) => (
+                <label key={s.name} className="check">
+                  <input
+                    type="checkbox"
+                    checked={seriesPick.has(s.name)}
+                    onChange={(e) =>
+                      setSeriesPick((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(s.name);
+                        else next.delete(s.name);
+                        return next;
+                      })
+                    }
+                  />
+                  {s.name}
+                </label>
+              ))}
+              <p className="hint">
+                Each ticked series gets its own fit, drawn in that series&rsquo; colour. Unticking
+                one and running again removes its result and its line.
+              </p>
+            </div>
+          )}
         </>
       )}
 
@@ -2761,8 +2839,10 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
               This plot has a numeric x axis, so there are no groups to compare and nowhere to
               anchor a significance bracket.{' '}
               {correlationPossible
-                ? 'Only correlation and regression are offered, which read the paired x values instead.'
-                : 'Correlation and regression would read paired x values, and this dataset has one series carrying none — so no test is offered here. Select a categorical plot to compare groups.'}
+                ? `Only correlation and regression are offered, which read the paired x values instead${
+                    correlationSeries.length > 1 ? ' — one fit per series you tick above' : ''
+                  }.`
+                : 'Correlation and regression would read paired x values, and no series here carries any — so no test is offered. Select a categorical plot to compare groups.'}
             </>
           )}
         </p>
@@ -2857,7 +2937,13 @@ function StatsTab({ api, theme, selectedIds, onError, setBusy }: SidePanelProps)
         // The document stores the input hash precisely so drift is detectable;
         // rehash the current values and say so when they no longer match.
         const analysisDataset = findDataset(doc, analysis.spec.datasetId);
-        const analysisSeries = analysisDataset ? toSeries(analysisDataset) : [];
+        const allSeries = analysisDataset ? toSeries(analysisDataset) : [];
+        // A per-series correlation hashed only its own series; rehash the same
+        // slice, or an unrelated column's edit would falsely mark it stale.
+        const analysisSeries =
+          analysis.spec.seriesName !== undefined
+            ? allSeries.filter((s) => s.name === analysis.spec.seriesName)
+            : allSeries;
         const currentHash = analysisDataset
           ? analysisInputHash(
               { test: analysis.test, correction: analysis.options.correction },

@@ -616,13 +616,13 @@ function TrendLineControls({
 }) {
   if (!TREND_LINE_PLOT_TYPES.has(node.plotType)) return null;
 
-  // At most one analysis per plot — `replaceAnalysisForPlot` guarantees it —
-  // so this is a lookup, not a choice between several.
-  const analysis = doc.analyses.find((a) => (a.plotId ?? null) === node.id);
-  if (!analysis?.result) return null;
+  // A scatter carries one analysis; a multi-series line plot carries one per
+  // series the author picked in the Stats tab (`spec.seriesName`).
+  const own = doc.analyses.filter((a) => (a.plotId ?? null) === node.id && a.result);
+  if (own.length === 0) return null;
 
-  const fit = analysis.result.fit ?? null;
-  if (!fit) {
+  const fitted = own.filter((a) => a.result?.fit);
+  if (fitted.length === 0) {
     /*
      * Spearman is the one case worth explaining: it is offered on these plot
      * types, an author will run it expecting a line, and the absence is a
@@ -630,7 +630,7 @@ function TrendLineControls({
      * would have to be a leftover from a plot-type change, where a silent
      * nothing is the right answer.
      */
-    if (analysis.test !== 'spearman') return null;
+    if (!own.some((a) => a.test === 'spearman')) return null;
     return (
       <>
         <h4>Fitted line</h4>
@@ -645,19 +645,21 @@ function TrendLineControls({
 
   const broken = (node.x.breaks?.length ?? 0) > 0 || (node.y.breaks?.length ?? 0) > 0;
   const interval = node.trendInterval ?? 'none';
+  const fit = fitted[0]!.result!.fit!;
   const level = `${(fit.confidenceLevel * 100).toFixed(0)}%`;
   const shown = (node.trendLine ?? 'show') === 'show';
 
+  const multi = fitted.length > 1;
   return (
     <>
-      <h4>Fitted line</h4>
+      <h4>{multi ? 'Fitted lines' : 'Fitted line'}</h4>
       <label className="check">
         <input
           type="checkbox"
           checked={shown}
           onChange={(e) => setPlot('Toggle fitted line', { trendLine: e.target.checked ? 'show' : 'hide' })}
         />
-        Show the fitted line
+        {multi ? 'Show the fitted lines' : 'Show the fitted line'}
       </label>
       {broken ? (
         <p className="hint">
@@ -706,12 +708,21 @@ function TrendLineControls({
             </div>
           )}
           <p className="hint">
-            {`y = ${fit.slope.toFixed(3)}x ${fit.intercept < 0 ? '−' : '+'} ` +
-              `${Math.abs(fit.intercept).toFixed(3)} · n = ${fit.n}`}
+            {multi
+              ? fitted
+                  .map((a) => {
+                    const f = a.result!.fit!;
+                    return `${a.spec.seriesName ?? a.spec.groups[0] ?? '?'}: y = ${f.slope.toFixed(
+                      3,
+                    )}x ${f.intercept < 0 ? '−' : '+'} ${Math.abs(f.intercept).toFixed(3)}`;
+                  })
+                  .join(' · ')
+              : `y = ${fit.slope.toFixed(3)}x ${fit.intercept < 0 ? '−' : '+'} ` +
+                `${Math.abs(fit.intercept).toFixed(3)} · n = ${fit.n}`}
             {interval === 'confidence' &&
-              ` · the band covers where the fitted line itself lies, at ${level} confidence.`}
+              ` · the band${multi ? 's cover' : ' covers'} where the fitted line itself lies, at ${level} confidence.`}
             {interval === 'prediction' &&
-              ` · the band covers where a single new observation would fall, at ${level}. It is ` +
+              ` · the band${multi ? 's cover' : ' covers'} where a single new observation would fall, at ${level}. It is ` +
                 'always the wider of the two.'}
             {interval === 'none' && '. Re-run the test in the Analysis tab if the data changes.'}
           </p>
@@ -1534,8 +1545,16 @@ function PlotFields({
       <p className="hint">
         Automatic shows a key only where there is something it alone can say — a second factor,
         or several lines. On a plain bar chart the category labels already name every mark, so a
-        key repeating them is furniture.
+        key repeating them is furniture. Drag the key on the canvas to move it — into an empty
+        corner of the plot, for instance — and use the button below to snap it back.
       </p>
+      {node.legendOffsetMm && (node.legend ?? 'auto') !== 'none' && (
+        <button
+          onClick={() => setPlot('Reset legend position', { legendOffsetMm: undefined })}
+        >
+          Reset key position
+        </button>
+      )}
 
       {node.plotType === 'line' && series.length > 1 && (node.legend ?? 'auto') !== 'none' && (
         <>
@@ -2108,39 +2127,122 @@ function PlotFields({
             </label>
           </div>
 
-          <div className="field-row">
-            <label className="field">
-              Marker fill
-              <input
-                type="color"
-                // Blank means "follow the series", which is the existing rule and
-                // what every figure made before this control looked like.
-                value={node.pointFill ?? '#000000'}
-                onChange={(e) => setPlot('Change marker fill', { pointFill: e.target.value })}
-              />
-            </label>
-            <label className="field">
-              Marker border
-              <input
-                type="color"
-                value={node.pointStroke?.color ?? '#000000'}
-                onChange={(e) =>
-                  setPlot('Change marker border', {
-                    pointStroke: { color: e.target.value, widthMm: node.pointStroke?.widthMm ?? 0.15 },
-                  })
-                }
-              />
-            </label>
-          </div>
-          {(node.pointFill !== undefined || node.pointStroke !== undefined) && (
-            <button
-              onClick={() =>
-                setPlot('Reset marker colours', { pointFill: undefined, pointStroke: undefined })
-              }
-            >
-              Follow the series colour
-            </button>
-          )}
+          {(() => {
+            /*
+             * Fill and outline are independent. Fill: follow the series (the
+             * default), a custom colour, white, or none (hollow). Outline:
+             * follow the series (which means "no border", the original look),
+             * a custom colour, or none. White and none are both invisible on
+             * the paper-white canvas, so a marker carrying either borrows a
+             * series-colour edge unless the outline is set to none on purpose.
+             * Selecting a channel's "Follow series" is that channel's own
+             * reset, so there is no combined button.
+             */
+            const stroke = node.pointStroke;
+            const strokeObj = typeof stroke === 'object' ? stroke : undefined;
+            const fillMode =
+              node.pointFill === undefined
+                ? 'series'
+                : node.pointFill === 'none'
+                  ? 'none'
+                  : node.pointFill === '#ffffff'
+                    ? 'white'
+                    : 'custom';
+            const strokeMode =
+              stroke === undefined ? 'series' : stroke === 'none' ? 'none' : 'custom';
+            const setFillMode = (m: string) =>
+              setPlot(
+                `Marker fill: ${m}`,
+                {
+                  pointFill:
+                    m === 'series'
+                      ? undefined
+                      : m === 'none'
+                        ? 'none'
+                        : m === 'white'
+                          ? '#ffffff'
+                          : node.pointFill && node.pointFill !== 'none' && node.pointFill !== '#ffffff'
+                            ? node.pointFill
+                            : '#000000',
+                },
+              );
+            const setStrokeMode = (m: string) =>
+              setPlot(
+                `Marker outline: ${m}`,
+                {
+                  pointStroke:
+                    m === 'series'
+                      ? undefined
+                      : m === 'none'
+                        ? 'none'
+                        : { color: strokeObj?.color ?? '#000000', widthMm: strokeObj?.widthMm ?? 0.15 },
+                },
+              );
+            return (
+              <>
+                <div className="field-row">
+                  <label className="field">
+                    Marker fill
+                    <select value={fillMode} onChange={(e) => setFillMode(e.target.value)}>
+                      <option value="series">Follow series</option>
+                      <option value="custom">Custom colour</option>
+                      <option value="white">White</option>
+                      <option value="none">None (hollow)</option>
+                    </select>
+                  </label>
+                  {fillMode === 'custom' && (
+                    <label className="field">
+                      Fill colour
+                      <input
+                        type="color"
+                        value={
+                          node.pointFill && node.pointFill !== 'none' && node.pointFill !== '#ffffff'
+                            ? node.pointFill
+                            : '#000000'
+                        }
+                        onChange={(e) => setPlot('Change marker fill', { pointFill: e.target.value })}
+                      />
+                    </label>
+                  )}
+                </div>
+                <div className="field-row">
+                  <label className="field">
+                    Marker outline
+                    <select value={strokeMode} onChange={(e) => setStrokeMode(e.target.value)}>
+                      <option value="series">Follow series (no border)</option>
+                      <option value="custom">Custom colour</option>
+                      <option value="none">None</option>
+                    </select>
+                  </label>
+                  {strokeMode === 'custom' && (
+                    <label className="field">
+                      Outline colour
+                      <input
+                        type="color"
+                        value={strokeObj?.color ?? '#000000'}
+                        onChange={(e) =>
+                          setPlot('Change marker outline', {
+                            pointStroke: {
+                              color: e.target.value,
+                              widthMm: strokeObj?.widthMm ?? 0.15,
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                  )}
+                </div>
+                {(fillMode === 'none' || fillMode === 'white') && strokeMode === 'none' && (
+                  <p className="hint">
+                    This marker has no visible edge — it will not show on a white background.
+                  </p>
+                )}
+                {fillMode === 'none' && strokeMode !== 'none' && (
+                  <p className="hint">The marker is drawn as an outline only.</p>
+                )}
+              </>
+            );
+          })()}
         </>
       )}
 

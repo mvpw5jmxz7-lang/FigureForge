@@ -175,13 +175,14 @@ const plotSchema = z.object({
     )
     .optional(),
   pointFill: z.string().optional(),
-  pointStroke: strokeSchema.optional(),
+  pointStroke: z.union([strokeSchema, z.literal('none')]).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   lineStyle: z.enum(['solid', 'dashed', 'dotted', 'dash-dot']).optional(),
   lineStyles: z.array(z.enum(['solid', 'dashed', 'dotted', 'dash-dot']).nullable()).optional(),
   y2: axisSchema.optional(),
   seriesAxis: z.array(z.enum(['y', 'y2'])).optional(),
   legend: z.enum(['auto', 'right', 'bottom', 'none']).optional(),
+  legendOffsetMm: z.object({ x: z.number(), y: z.number() }).optional(),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   orientation: z.enum(['vertical', 'horizontal']).optional(),
   errorDisplay: z.enum(['bars', 'band']).optional(),
@@ -523,7 +524,11 @@ const analysisSchema = z.object({
   id: z.string(),
   name: z.string(),
   test: z.string(),
-  spec: z.object({ datasetId: z.string(), groups: z.array(z.string()) }),
+  spec: z.object({
+    datasetId: z.string(),
+    groups: z.array(z.string()),
+    seriesName: z.string().optional(),
+  }),
   /** Optional: post-dates SCHEMA_VERSION 1. See the bracket schema's note. */
   plotId: z.string().nullable().optional(),
   options: z.object({

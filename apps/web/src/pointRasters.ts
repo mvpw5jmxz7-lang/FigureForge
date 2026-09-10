@@ -126,8 +126,13 @@ function drawPoint(
     default:
       ctx.arc(x, y, r, 0, Math.PI * 2);
   }
-  ctx.fillStyle = color ?? series.color;
-  ctx.fill();
+  // `'none'` is a hollow marker — `ctx.fillStyle = 'none'` is invalid and would
+  // silently keep the previous colour. `planPointClouds` supplies `series.stroke`
+  // for the visible edge in that case.
+  if ((color ?? series.color) !== 'none') {
+    ctx.fillStyle = color ?? series.color;
+    ctx.fill();
+  }
   if (series.stroke) {
     ctx.strokeStyle = series.stroke.color;
     ctx.lineWidth = series.stroke.widthMm;

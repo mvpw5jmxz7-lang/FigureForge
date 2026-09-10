@@ -37,7 +37,7 @@ import {
   type ContinuousPlotGeometry,
 } from './render-document.js';
 import { MAX_POINT_LABELS, MAX_POINT_LABEL_CEILING } from './point-labels.js';
-import { collectByRole, round } from './scene.js';
+import { collectByRole, round, walkScene } from './scene.js';
 import { toSvgString } from './svg-string.js';
 
 /*
@@ -1103,39 +1103,53 @@ describe('independent xy pairs', () => {
     expect(crosses).toHaveLength(18);
   });
 
-  it('draws the legend key as the symbol it stands for', () => {
-    // Four identical blocks beside three different symbols withholds exactly
-    // the mapping a reader needs.
+  it('draws the legend key as the symbol it stands for, over a line sample', () => {
+    // A line plot's key draws a line sample per entry; a per-series shape adds
+    // the marker it stands for on top. Four identical blocks beside three
+    // different symbols would withhold exactly the mapping a reader needs.
     const doc = makeDocument(XY_PAIRS, 'line', 80, {
       pointShapes: ['circle', 'square', 'triangle'],
     });
     const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
-    expect(swatches.map((n) => n.tag)).toEqual(['circle', 'rect', 'path']);
+    // line + marker per entry: circle / square(rect) / triangle(path).
+    expect(swatches.map((n) => n.tag)).toEqual([
+      'path', 'circle', 'path', 'rect', 'path', 'path',
+    ]);
   });
 
   it('draws a marker key for a series that named no shape of its own', () => {
     /*
      * The common case, and the one a real browser caught: an author sets shapes
-     * on the series they want to distinguish and leaves the first alone. A key
-     * of one block beside two symbols is worse than no key — so once *any*
-     * series carries a shape, every entry draws the marker it stands for.
+     * on the series they want to distinguish and leaves the first alone. Once
+     * *any* series carries a shape, every entry draws the marker it stands for
+     * — here series 0 falls back to the default circle.
      */
     const doc = makeDocument(XY_PAIRS, 'line', 80, {
       pointShapes: [null, 'square', 'triangle'],
     });
-    const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
-    expect(swatches.map((n) => n.tag)).toEqual(['circle', 'rect', 'path']);
+    const markers = collectByRole(scene(doc), 'legend').filter(
+      (n) => n.tag !== 'text' && n.tag !== 'path',
+    );
+    // The 'triangle' marker is a <path>, so it is filtered above; assert the
+    // other two directly and the count.
+    expect(markers.map((n) => n.tag)).toEqual(['circle', 'rect']);
+    expect(
+      collectByRole(scene(doc), 'legend').filter((n) => n.tag === 'path'),
+    ).toHaveLength(4); // 3 line samples + the triangle marker
   });
 
-  it('leaves the legend key a plain block when no series names a shape', () => {
-    // The property every optional field holds: a figure drawn before it existed
-    // renders exactly as it did.
+  it('draws a line sample per entry for a plain line plot', () => {
+    // A figure drawn before per-series shapes existed still renders identically
+    // with an all-null pointShapes array; and the swatch is a line, not a block.
     const plain = toSvgString(scene(makeDocument(XY_PAIRS, 'line')));
     const empty = toSvgString(
       scene(makeDocument(XY_PAIRS, 'line', 80, { pointShapes: [null, null, null] })),
     );
     expect(empty).toBe(plain);
-    expect(plain).toContain('<rect');
+    const swatches = collectByRole(scene(makeDocument(XY_PAIRS, 'line')), 'legend').filter(
+      (n) => n.tag !== 'text',
+    );
+    expect(swatches.map((n) => n.tag)).toEqual(['path', 'path', 'path']);
   });
 
   it('names the three runs in a legend', () => {
@@ -1262,12 +1276,13 @@ describe('line styles', () => {
     expect(swatches[2]!.attrs?.['stroke-dasharray']).toBeUndefined();
   });
 
-  it('leaves the legend a plain block when only the plot-wide style is set', () => {
-    // Mirrors `pointShape`'s own asymmetry: a plot-wide-only setting changes
-    // nothing about which series is which, so the key stays a plain block.
+  it('shows the plot-wide dash on every line sample in the key', () => {
+    // A line plot's key always draws a line sample; a plot-wide dashed style is
+    // what every plotted line looks like, so every sample carries it.
     const doc = makeDocument(XY_PAIRS, 'line', 80, { lineStyle: 'dashed' });
     const swatches = collectByRole(scene(doc), 'legend').filter((n) => n.tag !== 'text');
-    expect(swatches.every((n) => n.tag === 'rect')).toBe(true);
+    expect(swatches.map((n) => n.tag)).toEqual(['path', 'path', 'path']);
+    expect(swatches.every((n) => n.attrs?.['stroke-dasharray'] !== undefined)).toBe(true);
   });
 
   it('composes a dashed line and a marker in one legend entry when both are set', () => {
@@ -1290,6 +1305,64 @@ describe('line styles', () => {
     expect(swatches.filter((n) => n.tag === 'rect')).toHaveLength(1);
     // series 1 and 2 fall back to the default circle marker.
     expect(swatches.filter((n) => n.tag === 'circle')).toHaveLength(2);
+  });
+});
+
+describe('the legend line sample and its position', () => {
+  const XY3 = [
+    'X1\tY1\tX2\tY2\tX3\tY3',
+    '1\t2\t1\t3\t1\t4',
+    '2\t4\t2\t5\t2\t6',
+    '3\t6\t3\t7\t3\t8',
+  ].join('\n');
+
+  /** The `translate()` on the legend wrapper — the `<g>` carrying the plot id. */
+  function legendTranslate(doc: FigureDocument): { x: number; y: number } {
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    let found: { x: number; y: number } | null = null;
+    walkScene(scene(doc), (n) => {
+      if (n.tag === 'g' && n.nodeId === plot.id) {
+        const m = /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(String(n.attrs?.['transform'] ?? ''));
+        if (m) found = { x: Number(m[1]), y: Number(m[2]) };
+      }
+    });
+    if (!found) throw new Error('no legend wrapper');
+    return found;
+  }
+
+  it('draws the line sample ~6 mm long, not 1.4', () => {
+    const swatch = collectByRole(scene(makeDocument(XY3, 'line')), 'legend').find(
+      (n) => n.tag === 'path',
+    )!;
+    const m = /M([-\d.]+) [-\d.]+ L([-\d.]+) /.exec(String(swatch.attrs?.['d']));
+    expect(Number(m![2]) - Number(m![1])).toBeCloseTo(6, 3);
+  });
+
+  it('a scatter keeps the short block/marker swatch', () => {
+    // No line drawn, so no line sample — the legend stays compact.
+    const swatch = collectByRole(scene(makeDocument(XY3, 'scatter')), 'legend').find(
+      (n) => n.tag !== 'text',
+    )!;
+    expect(swatch.tag).toBe('rect');
+    expect(Number(swatch.attrs?.['width'])).toBeCloseTo(1.4, 3);
+  });
+
+  it('legendOffsetMm shifts the whole key by exactly that delta', () => {
+    const base = legendTranslate(makeDocument(XY3, 'line'));
+    const moved = legendTranslate(
+      makeDocument(XY3, 'line', 80, { legendOffsetMm: { x: 7, y: -4 } }),
+    );
+    expect(moved.x - base.x).toBeCloseTo(7, 3);
+    expect(moved.y - base.y).toBeCloseTo(-4, 3);
+  });
+
+  it('a moved legend does not change the reserved gutter — marks stay put', () => {
+    const markX = (doc: FigureDocument) =>
+      collectByRole(scene(doc), 'point')[0]?.attrs?.['cx'] ??
+      collectByRole(scene(doc), 'line')[0]?.attrs?.['d'];
+    expect(markX(makeDocument(XY3, 'line', 80, { legendOffsetMm: { x: 40, y: 20 } }))).toEqual(
+      markX(makeDocument(XY3, 'line')),
+    );
   });
 });
 
@@ -1782,6 +1855,48 @@ function makeVolcanoDocument(
     }
   });
 }
+
+describe('marker fill and outline', () => {
+  const pointsOf = (patch: Partial<PlotNode>) =>
+    collectByRole(scene(makeDocument(XY, 'scatter', 80, patch)), 'point');
+
+  it('draws a hollow marker edged in the series colour when the fill is none', () => {
+    const seriesColor = pointsOf({})[0]!.attrs?.['fill'];
+    const hollow = pointsOf({ pointFill: 'none' })[0]!;
+    expect(hollow.attrs?.['fill']).toBe('none');
+    // Auto-edge so the marker does not vanish, the box-plot outlier's rule.
+    expect(hollow.attrs?.['stroke']).toBe(seriesColor);
+  });
+
+  it('fills a marker white and edges it in the series colour — invisible on paper otherwise', () => {
+    const seriesColor = pointsOf({})[0]!.attrs?.['fill'];
+    const white = pointsOf({ pointFill: '#ffffff' })[0]!;
+    expect(white.attrs?.['fill']).toBe('#ffffff');
+    expect(white.attrs?.['stroke']).toBe(seriesColor);
+  });
+
+  it('honours an explicit none outline on a white fill — a white-on-dark marker with no rim', () => {
+    const p = pointsOf({ pointFill: '#ffffff', pointStroke: 'none' })[0]!;
+    expect(p.attrs?.['fill']).toBe('#ffffff');
+    expect(p.attrs?.['stroke']).toBe('none');
+  });
+
+  it('draws no border for an explicit none outline', () => {
+    expect(pointsOf({ pointStroke: 'none' })[0]!.attrs?.['stroke']).toBe('none');
+  });
+
+  it('a hollow fill with an explicit none outline draws neither', () => {
+    const p = pointsOf({ pointFill: 'none', pointStroke: 'none' })[0]!;
+    expect(p.attrs?.['fill']).toBe('none');
+    expect(p.attrs?.['stroke']).toBe('none');
+  });
+
+  it('honours a custom outline colour and width', () => {
+    const p = pointsOf({ pointStroke: { color: '#123456', widthMm: 0.3 } })[0]!;
+    expect(p.attrs?.['stroke']).toBe('#123456');
+    expect(p.attrs?.['stroke-width']).toBe(0.3);
+  });
+});
 
 describe('volcano plots', () => {
   it('classifies each point from its fold change and p-value', () => {
@@ -2682,10 +2797,17 @@ describe('the fitted line from a correlation', () => {
     expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
   });
 
-  it('is withheld on a plot type outside the registry', () => {
-    // A line plot already draws a path through its own points; a second,
-    // straight one is a different question and is deliberately not offered.
+  it('is drawn on a line plot, alongside its own connecting path', () => {
+    // A line plot draws a path through its own points; the fitted line is a
+    // separate straight line stated beside it, and an x/y table imports as a
+    // line plot by default, so this is the commonest route to a correlation.
     const doc = withAnalysis(makeDocument(XY, 'line'));
+    expect(trendVertices(doc)).not.toHaveLength(0);
+  });
+
+  it('is withheld on a plot type outside the registry', () => {
+    // A histogram can carry a correlation fit but is not in the registry.
+    const doc = withAnalysis(makeDocument(XY, 'histogram'));
     expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(0);
   });
 
@@ -2711,6 +2833,21 @@ describe('the fitted line from a correlation', () => {
 
     // To four places, not more: path coordinates are rounded on the way out,
     // so inverting them back cannot recover more precision than was written.
+    expect((y1 - y0) / (x1 - x0)).toBeCloseTo(FIT.slope, 4);
+    expect(y0 - FIT.slope * x0).toBeCloseTo(FIT.intercept, 4);
+  });
+
+  it('draws the stored fit on a line plot too, not a refit', () => {
+    const doc = withAnalysis(makeDocument(XY, 'line'));
+    const plot = Object.values(doc.nodes).find((n) => n.type === 'plot')!;
+    const geometry = computePlotGeometry(plot as PlotNode, doc, NATURE_THEME) as ContinuousPlotGeometry;
+    const vertices = trendVertices(doc);
+    const first = vertices[0]!;
+    const last = vertices[vertices.length - 1]!;
+    const x0 = geometry.xScale.invert(first.x);
+    const x1 = geometry.xScale.invert(last.x);
+    const y0 = geometry.yScale.invert(first.y);
+    const y1 = geometry.yScale.invert(last.y);
     expect((y1 - y0) / (x1 - x0)).toBeCloseTo(FIT.slope, 4);
     expect(y0 - FIT.slope * x0).toBeCloseTo(FIT.intercept, 4);
   });
@@ -2781,6 +2918,46 @@ describe('the fitted line from a correlation', () => {
   it('draws on a fold-vs-fold plot too', () => {
     const doc = withAnalysis(makeFoldFoldDocument());
     expect(collectByRole(scene(doc), 'trend-line')).toHaveLength(1);
+  });
+
+  it('draws one line per per-series analysis on a multi-series line plot, in each series colour', () => {
+    const base = makeDocument(XY_PAIRS, 'line');
+    const plotId = Object.values(base.nodes).find((n) => n.type === 'plot')!.id;
+    const geom = computePlotGeometry(
+      base.nodes[plotId] as PlotNode,
+      base,
+      NATURE_THEME,
+    ) as ContinuousPlotGeometry;
+    const colorOf = (name: string) => geom.series.find((s) => s.name === name)!.color;
+
+    const doc = editDocument(base, (draft) => {
+      draft.analyses = (['Y1', 'Y2'] as const).map((name, i) => ({
+        id: `a-${name}`,
+        name: `linear-regression · ${name}`,
+        test: 'linear-regression' as never,
+        spec: { datasetId: draft.datasets[0]!.id, groups: [name], seriesName: name },
+        plotId,
+        options: { alternative: 'two-sided', correction: 'none', alpha: 0.05, welch: true },
+        inputHash: `h${i}`,
+        result: {
+          test: 'linear-regression' as never,
+          omnibus: null,
+          comparisons: [],
+          // Slopes that keep the line inside this fixture's tiny y range.
+          fit: { ...FIT, slope: 0.12 + i * 0.02, intercept: 0 },
+          methodsSentence: '',
+          warnings: [],
+          softwareVersions: {},
+        },
+        computedAt: '2026-01-01T00:00:00.000Z',
+      }));
+    });
+
+    const lines = collectByRole(scene(doc), 'trend-line');
+    expect(lines).toHaveLength(2); // Y3 was not fitted
+    expect(new Set(lines.map((n) => n.attrs?.['stroke']))).toEqual(
+      new Set([colorOf('Y1'), colorOf('Y2')]),
+    );
   });
 });
 

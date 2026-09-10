@@ -256,6 +256,70 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 55 (linear regression / correlation on every series of
+a multi-series line plot):** 1290 TypeScript tests (1287 + 3: a render test
+that N per-series analyses draw N `trend-line` paths each in its series
+colour, and two `doc-model` tests for `replaceSeriesAnalysesForPlot`'s
+prune-to-the-picked-set and a `spec.seriesName` round-trip), 248 Python tests
+unchanged (nothing here touches `services/api` — the server already fits one
+x/y series per call, so the client just calls it once per picked series),
+`tsc --build --force` and `eslint .` clean, 46-check acceptance run
+unaffected, and **18 live-browser checks across light and dark**. **No
+`SCHEMA_VERSION` bump** — `AnalysisSpec.seriesName?: string` is optional and
+additive. **Measured, not assumed** — driven live, a 3-series line plot's
+Stats tab offers Linear regression with a "Fit these series" checkbox per
+series; running with all three ticked draws three `trend-line` paths whose
+strokes are exactly the three plotted line colours; unticking one and
+re-running drops it to two; the Inspector shows a "Fitted lines" block whose
+Show toggle hides them all. See "Round 55" below.
+
+**Verified after round 54 (a readable legend line sample, and a draggable
+legend):** 1287 TypeScript tests (1281 + 6: a `line`/`ecdf` plot's key now
+draws a line sample rather than a block — three rewritten swatch assertions in
+`continuous-axis.test.ts` plus a new `legend line sample and its position`
+suite covering the ~6 mm length, the scatter block, the `legendOffsetMm`
+transform shift and the untouched gutter; a `legendOffsetMm` round-trip in
+`doc-model.test.ts`; a both-adapters parity fixture for a dragged legend),
+248 Python tests unchanged (nothing here touches `services/api`), `tsc --build
+--force` and `eslint .` clean, 46-check acceptance run unaffected, and **28
+live-browser checks across light and dark**. **No `SCHEMA_VERSION` bump** —
+`legendOffsetMm?: {x,y}` is optional and additive, the "auto base + stored
+delta" shape `BracketNode.userOffsetMm` uses. **Measured, not assumed** —
+driven live, a 3-series line plot's key draws three line samples each **6.0 mm**
+long (read off the `<path> d`, against the 1.4 mm block before), a scatter's
+key stays blocks; dragging a sample moves the whole key by the pointer delta
+(read off the wrapper `transform`), selects the plot so the Inspector shows
+its Legend controls, and a plot mark's `d` is byte-identical before and after
+— the reserved gutter is untouched; one Ctrl+Z on a single-motion drag and the
+Inspector's "Reset key position" button both snap it back, the button then
+disappearing. See "Round 54" below.
+
+**Verified after round 53 (a fitted line on line plots, and a four-mode marker
+fill plus three-mode outline):** 1281 TypeScript tests (1271 + 10: a
+`line`-plot case that inverts the drawn endpoints back to the stored
+slope/intercept and a flipped "withheld outside the registry" case in
+`continuous-axis.test.ts`, a six-case `marker fill and outline` suite there
+covering hollow, white and explicit-none in both directions, a
+hollow/none-outline round-trip in `doc-model.test.ts`, and a both-adapters
+parity fixture over hollow, white and none-outline), 248 Python tests
+unchanged (nothing here touches
+`services/api`), `tsc --build --force` and `eslint .` clean, 46-check
+acceptance run unaffected, and **44 live-browser checks across light and
+dark**. **No `SCHEMA_VERSION` bump** — `'line'` joins the
+`TREND_LINE_PLOT_TYPES` set, `pointFill` is already a free string (`'none'`
+and `'#ffffff'` are recognised values), and `pointStroke` gains a `'none'`
+union member that every existing document (a `Stroke` or nothing) still
+validates against. **Measured, not assumed** — the fitted line on a line plot
+is inverted through the plot's own rendered scales and recovers the stored
+slope 2.0000 / intercept 0.0000; driven live, an x/y paste imports as a line
+plot, Pearson draws a `trend-line` beside the connecting path with the run
+notice no longer telling the author to switch to a scatter, and the
+Inspector's Marker fill (Follow series / Custom / White / None) and Marker
+outline (Follow series / Custom / None) selects each move independently with
+the drawn marker's `fill`/`stroke` read back off the DOM at every step — a
+hollow or white fill takes a series-colour hairline edge, an explicit None
+outline removes even that. See "Round 53" below.
+
 **Verified after round 52 (a working directory for Open and Save):** 1271
 TypeScript tests (1240 + 31: 16 in `projectFiles.test.ts` covering the
 feature-detect, the pick/cancel/error paths, a stored folder read back with no
@@ -7384,10 +7448,11 @@ scope, so the run notice now distinguishes three outcomes: the line was drawn;
 a fit was computed but this plot type does not draw one, *and here is what to
 change*; or no line was fitted at all. Invisible to 1,200 green tests.
 
-**Not done, deliberately:** `line` plots still draw no fit — the user named
-scatter and the proteomics plot, a straight fit beside an already-drawn
-connecting line is a different question, and `TREND_LINE_PLOT_TYPES` makes it a
-one-word change if wanted. No colour control for the line or band. No non-linear
+**Not done, deliberately** (at the time; `line` was added in round 53): `line`
+plots still draw no fit — the user named scatter and the proteomics plot, a
+straight fit beside an already-drawn connecting line is a different question,
+and `TREND_LINE_PLOT_TYPES` makes it a one-word change if wanted. No colour
+control for the line or band. No non-linear
 fits, no LOESS, no forced-through-origin. No on-plot equation label. And the
 confidence band is genuinely **invisible at large n** — at 2,500 proteins the
 line's position is known to about a hundredth of a unit — which is the statistic
@@ -8016,6 +8081,206 @@ covered by unit tests over the options and by the smoke run's bridge
 assertions rather than driven.
 ---
 
+### Round 53 — a fitted line on line plots, and three-mode marker fill/outline
+
+Two items from real use. A third — "header titles should be editable in the
+dataset table" — the user confirmed already works (the Data tab's "Edit data…"
+grid has an editable `<input>` per column) and asked to skip.
+
+#### The fitted line reaches line plots
+
+Round 48 restricted the correlation/regression line to
+`TREND_LINE_PLOT_TYPES = {scatter, fold-fold}`, reasoning that a `line` plot
+already draws a path through its own points. But an x/y table imports as a
+`line` plot by default (`defaultPlotTypeFor('simple-xy')`), so the commonest
+route to a correlation ran the test, printed the result, and drew nothing —
+the Stats notice's only advice was to switch the plot to a scatter.
+
+- **`'line'` joins the set.** The fitted line is a straight least-squares line
+  stated *beside* the connecting path, not instead of it. Nothing else in
+  `resolveTrendFit` needed changing — a `line` plot is already
+  `kind: 'continuous'`, the broken-axis and no-fit guards already apply, and
+  `TrendLineControls` already renders for any set member and handles the
+  no-analysis / spearman-no-fit / fit-present cases.
+- **One guard added to `resolveTrendFit`: withhold on a cascade offset**
+  (`hasCascadeOffset`). A cascade needs more than one series and so cannot
+  carry a single-series correlation fit — this keeps the line from being drawn
+  through offset-baked coordinates if that ever stops being true, rather than
+  leaving the two facts to hold together silently.
+- The Stats run notice's "switch it to a scatter" branch now only fires for a
+  continuous type that can run a correlation but is genuinely not in the
+  registry.
+
+#### Marker fill and outline, independent controls
+
+The Inspector had a colour picker for each of fill and outline plus a single
+button that reset *both* to "follow the series" at once, and no way to make a
+hollow marker.
+
+- **Each channel is now a `<select>`**, with the colour picker shown only in
+  Custom. Fill: **Follow series · Custom colour · White · None (hollow)**.
+  Outline: **Follow series · Custom colour · None**. Selecting "Follow series"
+  is that channel's own reset, so the combined button is gone. Decided with
+  the user: **"Follow series" for the outline means "no border"** — the
+  original look — so every existing figure is byte-identical. White was asked
+  for as a follow-up (open/white markers are a standard scientific style).
+- **`pointFill?: string`** — unchanged type, recognised states: absent →
+  series colour, `'none'` → hollow, `'#ffffff'` → white, any other string →
+  that colour. `'none'` already flows straight through to `fill="none"` on the
+  vector path.
+- **`pointStroke?: Stroke | 'none'`** — the one schema edit,
+  `z.union([strokeSchema, z.literal('none')]).optional()`, additive. `'none'`
+  is an explicit no-border choice: it renders like absent but the Inspector
+  remembers it, and — unlike absent — it is honoured even under a hollow fill,
+  so an author who picks None for both gets an invisible marker on purpose
+  (the hint says so).
+- **A hollow *or* white marker with the outline left on "Follow series"
+  borrows a hairline edge in the series colour** (`theme.stroke.hairlineMinMm`),
+  the same rule the box-plot outlier already uses — both are invisible against
+  the paper-white canvas without one. `fillNeedsAutoEdge(fill)` (`fill ===
+  'none' || fill === '#ffffff'`) is the one predicate, read by `markerNode`
+  and `planPointClouds`. `markerNode` gained a `style.seriesColor` param
+  because once `style.fill` is `'none'` the colour is otherwise lost; the
+  three data-point call sites and the legend swatch pass it. An explicit
+  `pointStroke: 'none'` is still honoured over the auto-edge, so a
+  white-on-dark marker with no rim is reachable on purpose.
+- **Raster parity**: `planPointClouds` synthesises the same hairline stroke
+  through `fillNeedsAutoEdge`, and `drawPoint` skips `ctx.fill()` only on
+  `'none'` (`ctx.fillStyle = 'none'` is invalid and would silently keep the
+  previous colour; white is a real opaque fill). The legend swatch draws
+  hollow when the plot's markers are hollow.
+- `volcanoLabelCandidates` and the label-colour path guard `pointFill ===
+  'none'` so a hollow volcano/fold-fold plot does not try to draw its point
+  labels in `'none'`.
+- `checkColorAccessibility` already skips any fill not starting with `#`, so a
+  `fill="none"` marker is ignored rather than parsed as a colour.
+
+**A live-test trap, the recorded one hit again**: `<input type="color">` does
+not take a synthetic `input` event — Playwright's `fill()` (native setter) is
+what drives it. The first run reported the custom colours "not reaching the
+marker" when the feature was fine and only the harness was wrong.
+
+**Not done, deliberately:** replicate points (the faded individual
+measurements behind a mean) still do not honour `pointFill` — they never have;
+`line` plots draw the fit only for a single-series correlation, which is the
+only shape `correlationPossible` allows; no colour control for the fitted line
+itself.
+
+---
+
+### Round 54 — a readable legend line sample, and a draggable legend
+
+Two reports about the series key on graphs.
+
+#### The line sample was 1.4 mm long
+
+`LEGEND_SWATCH_MM` is 1.4 mm — too short to show a dash pattern, and it barely
+reaches past a marker on it. Worse, a plain multi-series `line`/`ecdf` plot's
+key drew a **colour block** per series and only switched to a line sample once
+per-series dash styles were set, so the commonest line-plot key showed no line.
+
+- **`LEGEND_LINE_MM` (6 mm)** is a new constant for the line-sample length;
+  `LEGEND_SWATCH_MM` still sizes the block and the marker.
+- **`legendDrawsLineSample(node, geometry)`** — `continuous &&
+  LINE_STYLED_PLOT_TYPES.has(plotType)` (`line`, `ecdf`) — and
+  **`legendSwatchMm(node, geometry)`** composed once, read by `renderLegend`,
+  the width functions and the `requiredMargin` reserve so the gutter budgeted
+  matches the swatch drawn. `legendWidthMm` / `legendRowLayout` gained an
+  optional trailing `swatchMm` param.
+- **`renderLegend` now draws a line sample for every line/ecdf plot**, in the
+  series colour, carrying the effective dash (per-series, else plot-wide). A
+  per-series marker still overlays it, centred at `x + swatchMm/2`. Scatter and
+  categorical plots keep the block/marker. This changes the byte output of
+  every line-plot key — three swatch assertions in `continuous-axis.test.ts`
+  were rewritten (the old "plain block unless a per-series dash is set" rule is
+  gone), and the parity dashed-line fixture already covered the composite case.
+
+#### Dragging the key
+
+The "Fix 12" request from the bug list: *"Allow the legend in graphs to be
+moved when the user selects it on the panel."*
+
+- **`PlotNode.legendOffsetMm?: {x, y}`** — a delta on the automatic
+  right/bottom anchor, the same "auto base + stored delta" shape
+  `BracketNode.userOffsetMm` uses, so re-laying the plot carries the key with
+  it. `requiredMargin` still reserves the gutter for the *automatic* position:
+  a dragged key is allowed to sit over the plot area (an empty corner is
+  exactly where an author puts one), the same latitude a dragged bracket has.
+- **The legend wrapper `<g>` carries `nodeId: node.id`** (not `role` — that
+  would add the wrapper to every `collectByRole(scene, 'legend')`). The
+  children keep `data-role="legend"`; a pointer-down on one bubbles to the
+  wrapper's handler.
+- **`Canvas.tsx`**: `handlePointerDown` detects
+  `event.target.closest('[data-role="legend"]')`, selects the plot directly
+  (so the Inspector shows its Legend controls — `selectionTarget` would resolve
+  to the panel) and starts a `DragState.legend` drag;
+  `handlePointerMove` commits `legendOffsetMm` per frame (the same per-frame
+  commit an ordinary node move uses — a fast flick is one commit and one
+  Ctrl+Z).
+- **Reset is the Inspector's "Reset key position" button**, shown only when
+  `legendOffsetMm` is set. A double-click-to-reset was tried and dropped: the
+  first press of a double-click on the same target starts a drag, and
+  distinguishing the two reliably was not worth a second reset path when the
+  button is unambiguous. A double-click on the key now just steps into / selects
+  the plot, like a double-click on any mark.
+
+**A live-test note worth keeping**: a legend `<path>` line sample is
+zero-area to Playwright (`fill="none"`, hairline stroke) so `.dblclick()` on it
+times out with "element is not visible" — drive it through `bounding_box()` +
+`page.mouse`. And every drag in this app commits per pointer-move with no
+coalescing in the store, so a multi-step programmatic drag needs multiple
+Ctrl+Z; a single `mouse.move` is one undo step.
+
+**Not done, deliberately:** no snap-to-edge or preset positions beyond the
+existing auto/right/bottom/none dropdown; the reserve is not recomputed for a
+dragged key, so a key dragged far outside can overhang the panel on export
+(the same as a hand-dragged bracket); replicate-point and categorical keys are
+unchanged.
+
+---
+
+### Round 55 — regression on every series of a multi-series line plot
+
+Round 53 added `'line'` to `TREND_LINE_PLOT_TYPES`, but only a **single-series**
+line plot could run a correlation: `correlationPossible` required exactly one
+series carrying `x`. A plain multi-line graph (`X1,Y1,X2,Y2,…`) offered no test
+at all. The user reported it; the fix is a **series picker**.
+
+- **`correlationPossible`** now reads "at least one series carries paired x",
+  and `correlationSeries` is that set. When there is more than one, the Stats
+  tab shows a **"Fit these series"** checkbox per series (default all ticked).
+- **One `Analysis` per fitted series**, keyed by a new
+  **`AnalysisSpec.seriesName?: string`** (additive, optional). `run()`'s
+  correlation path is separated from the group-comparison path: it calls the
+  service once per ticked series (`Promise.all`) and stores the batch through
+  **`replaceSeriesAnalysesForPlot`**, which makes the plot's per-series
+  analyses exactly the ticked set — untick one, re-run, and its result and its
+  drawn line are gone. A group comparison on the same plot (`seriesName`
+  absent) is left alone.
+- **`resolveTrendFit`** (renamed inner helper `trendFitsForPlot`) iterates
+  every analysis for the plot with a `fit` and draws one `trend-line` per.
+  On a `line` plot each takes **its own series' colour** (matched by
+  `seriesName`), so a reader can tell which line each fit belongs to; on a
+  scatter or fold-vs-fold plot it stays `theme.foreground` (there the series
+  colour is a palette entry the points never use). The band follows the line's
+  colour at 0.15 alpha.
+- **Staleness** — both recompute sites (`SidePanel`'s results list and
+  `quality.ts`'s `checkStaleAnalyses`) now hash only the analysis's own series
+  slice when `spec.seriesName` is set, so editing a sibling column does not
+  falsely mark a fit stale. `xForHash` already returns the x for a
+  one-element series array, so a per-series hash picks up its x for free.
+- **Inspector** — `TrendLineControls` reads all the plot's analyses; the block
+  is titled "Fitted lines" and lists each series' equation when there is more
+  than one. The Show toggle and interval/extent controls are global (one set,
+  applying to every drawn fit).
+
+**Not done, deliberately:** no per-series interval or extent (one setting for
+all fits); the picker resets to "all ticked" when you switch panels and back;
+overlapping confidence bands on a busy multi-line plot are the author's to
+turn off, the same stance survival CIs take.
+
+---
+
 ## What's next
 
 Phases 5–9, with the actual entry points:
@@ -8096,7 +8361,7 @@ Phases 5–9, with the actual entry points:
 | **Omics panel volume** | *Fixed, for point counts.* A plot over `MAX_VECTOR_POINTS` (2,000, measured — see "Pre-phase-7") bakes to one raster instead of one SceneNode per point, on both the live canvas and export. Phase 7's chart types still need their own geometry (a heatmap's cell count, a UMAP/volcano's point count all reuse this; a survival curve's step count is small enough to never cross the threshold) — this answers the *rendering-volume* mechanism, not the remaining maths. |
 | **Stale bracket positions** | *Fixed.* `repositionBrackets` re-measures on layout, resize and import; `userOffsetMm` preserves manual nudges. The staleness *warning* (data edited after a test) now fires in the Stats tab and the quality checker, but nothing re-runs the test automatically — by design. |
 | **`measurePlot` recomputes** | *Mitigated.* Memoised on `(plot, dataset, theme)` object identity. The cache is per-call-site correct but unbounded reasoning applies: it is a `WeakMap`, so entries die with their nodes. |
-| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line, and round 50's `histogramStyle`, `histogramCumulative`, `histogramNormalize` and `ksGapMarker` on `PlotNode`, plus `pBound`, `statisticLocation` and `statisticSign` on `Comparison`/`Omnibus` — the second and third result-level fields after round 48's `fit`) is **optional**, so old files still load. Round 50's `ksGapMarker` is the second field, after round 48's `trendLine`, whose absent value reads as **on**: the marker it controls can only appear once the author has explicitly run Kolmogorov-Smirnov on that exact plot, so no saved figure receives one uninvited. Round 48's `trendLine` was the first optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), round 16 by one more again (`proteomics`), round 47 by one more again (`fold-fold`), and round 50 by one more again (`distribution`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way five times — `volcano`, `heatmap`, `survival`, `fold-fold` and `ecdf` — not seven, since `pca` and `umap` both reuse `scatter`, for the same reason: a `volcano`, `heatmap`, `survival`, `fold-fold` or `ecdf` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way, and round 50 widened it by four more (`'kolmogorov-smirnov'`, `'anderson-darling'`, `'cramer-von-mises'`, `'epps-singleton'`) in one change. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
+| **No schema migrations** | `SCHEMA_VERSION` is still 1 and `loadArchive` rejects anything newer. Every field added since (`plotId`, `userOffsetMm`, `comparisonIndex`, `gapMm`, `slot`, `pointsUseSeriesColor`, `calibrationSource`, `errorBarDirection`, `pointShape`, `pointFill`, `pointStroke`, `y2`, `seriesAxis`, `minorTicks`, `tickDirection`, `breaks`, and round 4's `hasRowNames`, `columnGroups`, `editedAt`, `legend`, `errorDisplay`, `contentGrid`, and round 5's `showReplicates`, `pointShapes`, `barGapFraction`, `groupGapFraction`, phase 7 stage 1's `volcanoThresholds`, `volcanoColors`, `volcanoThresholdLines`, stage 2's `heatmapScale`, `heatmapStops`, `heatmapMissingColor`, `showCellValues`, and stage 3's `showCensorMarks`, `showSurvivalCI`, and round 7's `labelFormat`, `labelDecimals` on `AxisSpec`, `linthresh` on `AxisSpec`, `volcanoLabels`, `offsetStepMm`, `offsetStepXMm`, `offsetFill` on `PlotNode`, and round 8's `clipToRange` on `AxisSpec`, `pointLabelOffsets`, `pointLabelSizePt`, `showCascadeAxis`, `cascadeAxisTitle` on `PlotNode`, and round 9's `boxed`, `showGridlines`, `gridlineColor`, `gridlineStyle` on `PlotNode`, and round 16's `derivedFrom` on `Dataset`, and round 19's `volcanoTest` on `PlotNode`, and round 23's `richText` on `TextNode`, and round 24's `richText` on `AxisSpec` and `cascadeAxisTitleRichText` on `PlotNode`, and round 29's `reverseLegend` on `PlotNode`, and round 32's `alignX`/`alignY` on `ImageNode` and `gapMm` on `GroupLabelNode`, and round 33's `placement`/`labelColor` on `GroupLabelNode` and `autoFit` inside `PanelNode.contentGrid`, and round 37's `liftMm` on `PanelLabelNode`, and round 38's `placement` on `ScaleBarNode`, and round 46's `pointLabelLimit` on `PlotNode`, and round 47's `foldFoldThresholds`, `foldFoldColorBy`, `foldFoldColors`, `foldFoldZeroLines` and `foldFoldCutoffLines` on `PlotNode`, and round 48's `trendLine`, `trendInterval` and `trendExtent` on `PlotNode` plus `fit` on `StatResult` — the first optional field added to a *result* rather than a node, and nullable as well as optional because the wire sends `null` for every test that fits no line, and round 50's `histogramStyle`, `histogramCumulative`, `histogramNormalize` and `ksGapMarker` on `PlotNode`, plus `pBound`, `statisticLocation` and `statisticSign` on `Comparison`/`Omnibus` — the second and third result-level fields after round 48's `fit`) is **optional**, so old files still load. Round 50's `ksGapMarker` is the second field, after round 48's `trendLine`, whose absent value reads as **on**: the marker it controls can only appear once the author has explicitly run Kolmogorov-Smirnov on that exact plot, so no saved figure receives one uninvited. Round 48's `trendLine` was the first optional field here whose absent value reads as **on** rather than off, which is a deliberate, stated exception: the line it controls can only appear once somebody has explicitly run a correlation, so there is no saved figure it arrives on uninvited. Round 47 also widened two enums the same additive way every earlier one was: `DataFormat` gained `'fold-fold'` and `PlotType` gained `'fold-fold'`, so an older build cannot read a fold-vs-fold figure but every file it already has still validates. Round 33 also *changed two defaults* for absent fields — `showRule` now reads as false and the group-label size as 6 pt — which is a deliberate, retroactive presentation change rather than a compatibility break: an old file still validates and still loads, its headings simply draw the way a published one does. `autoFit` is pointedly **not** retroactive, since it moves frames. Round 32's two enums (`FitAlign`, and the widened `SceneRole`) are not persisted at all — `alignX`/`alignY` are the only new *stored* enum, and absent reads as `'middle'`, which is what every image already did. **Round 31 added a new node `type` variant, `group-label`** — the same bump-free precedent `bracket`/`panel-label`/`scale-bar` themselves already are, since a file with no such node still validates on any future build — plus one widened `LayoutOptions`/`GridSpec`-adjacent function signature (`gridCells`'s `columnGutterExtraMm`/`rowGutterExtraMm`) that touches no persisted schema at all. **Round 10 added no field at all**: rotation writes `NodeBase.rotation`, which has been required and defaulted since phase 1 and is simply the first round to set it to something other than `0`; `SceneNode.editTarget` is render-time metadata that is never persisted; and the new layout templates and `clearBlock` touch no schema. Stages 4 (PCA) and 5 (UMAP) added no new `PlotNode` fields at all — the smallest schema footprint of any phase-7 stages, since both are the existing `scatter` type. Round 4 also widened the `format` enum by three members, phase 7 stage 1 by one more (`differential`), stage 2 by one more again (`matrix`), stage 3 by one more again (`survival`), stage 4 by one more again (`pca`), stage 5 by one more again (`umap`), round 16 by one more again (`proteomics`), round 47 by one more again (`fold-fold`), and round 50 by one more again (`distribution`), which is backward-compatible in the same direction `contingency` already was: an older build cannot read the new layouts, but every file it *has* still validates. The `plotType` enum was widened the same way five times — `volcano`, `heatmap`, `survival`, `fold-fold` and `ecdf` — not seven, since `pca` and `umap` both reuse `scatter`, for the same reason: a `volcano`, `heatmap`, `survival`, `fold-fold` or `ecdf` node is unreadable by an older build, not unreadable by this one. `StatTest` gained `'log-rank'` the same additive way, and round 50 widened it by four more (`'kolmogorov-smirnov'`, `'anderson-darling'`, `'cramer-von-mises'`, `'epps-singleton'`) in one change. Round 53 widened `PlotNode.pointStroke` from `Stroke` to `Stroke | 'none'` — additive, since every existing document holds a `Stroke` or nothing there — and added `'line'` to the `TREND_LINE_PLOT_TYPES` runtime set, which is not persisted; `pointFill: 'none'` needed no schema edit at all, the field was already `z.string().optional()`. Round 54 added `PlotNode.legendOffsetMm?: {x, y}`, optional and additive. Round 55 added `AnalysisSpec.seriesName?: string`, optional and additive — a plot can now carry several correlation analyses, one per fitted series, where before `replaceAnalysisForPlot` kept exactly one. Round 7 widened `AxisSpec.scale` by one member (`'symlog'`), the same direction as every other enum widening here — an existing `'linear'`/`'log10'` axis is untouched, and only a `'symlog'` axis is unreadable by a pre-round-7 build. Phase 4 also *narrowed* `crop.width`/`height` from non-negative to `.gt(0).max(1)`, which would normally force a bump — it did not, because nothing could create an image node before that change, so no file in existence contains one. The next *required* field forces it. **zod strips unknown keys**: a field added to a TS type but not to `schema.ts` is silently dropped on save/load. |
 | **Text metrics are estimated** | `text-width.ts` uses static Helvetica/Arial advance widths. Correct for the shipped Liberation Sans, and deterministic across canvas and export, which is what matters — but a user-supplied font with different metrics would make the collision decisions slightly off. This now sets the *plot area*, not just label angles: `requiredMargin` sizes the gutters from these numbers, so a mismatched font shifts geometry rather than only the odd label. **Round 35 raises the stakes again**: smart layout derives each plot's demand from exactly these measurements, so a mismatched font would shift the *arrangement* — which grid wins — not merely a gutter. Still identical between canvas and export, which is the property that matters. |
 | **No autosave or session restore** | *Guarded on both platforms; still no autosave.* The desktop shell's `before-quit` prompts Save / Don't Save / Cancel and can run the renderer's own save before exiting (phase 8 stage 2). Round 51 added the browser's half — a `beforeunload` guard registered only while dirty — plus a **Close File** command on both platforms, one renderer-side dialog with the same three choices, so a figure can be put down without either saving it or reloading the page. What a browser cannot do is write the wording or save on the user's behalf, which is why the shell keeps its own prompt. **There is still no autosave and no session restore**: a crash or a force-quit loses unsaved work on either platform. `store.ts` records patches and their inverses, so incremental autosave is one mechanism away when it is wanted. |
 | **Autofixes are advertised, not implemented** | *Fixed.* `autoFixable: boolean` is gone; `Finding.fix?` carries the recipe the rule built while it still had the answer. A boolean can claim a repair that does not exist, a closure cannot. Ten claims became seven fixes plus one conditional; the three that needed an authorial decision were withdrawn rather than faked. |

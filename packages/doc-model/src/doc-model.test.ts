@@ -105,6 +105,7 @@ import {
   MIN_TILE_MM,
   reparentNode,
   replaceAnalysisForPlot,
+  replaceSeriesAnalysesForPlot,
   repositionBrackets,
   rescaleArrowPoints,
   reserveSpaceForGroupLabels,
@@ -3599,6 +3600,66 @@ describe('.figureforge archive', () => {
     expect(loaded.document).toEqual(doc);
   });
 
+  it('round-trips a hollow marker fill and an explicit none outline', () => {
+    /*
+     * `pointStroke` gained a `'none'` union member; zod strips a key present
+     * only on the TS type, and an unexercised schema branch is the same risk
+     * from the far side — delete `z.literal('none')` and this fails.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      const ds = dataset('Dose,Response\n1,2\n2,4\n3,6', newId());
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Scatter',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'scatter';
+        plotNode.pointFill = 'none';
+        plotNode.pointStroke = 'none';
+      }
+    });
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+  });
+
+  it('round-trips a dragged legend position', () => {
+    // `legendOffsetMm` is a new optional object field; a missing `schema.ts`
+    // line drops it on save and the key snaps back on the next open.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      const ds = dataset('X1,Y1,X2,Y2\n1,2,1,3\n2,4,2,5', newId());
+      draft.datasets = [ds];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 0, y: 0, width: 80, height: 60 },
+        datasetId: ds.id,
+        name: 'Line',
+      });
+      const plotNode = draft.nodes[plot.id];
+      if (plotNode?.type === 'plot') {
+        plotNode.plotType = 'line';
+        plotNode.legendOffsetMm = { x: 12.5, y: -8 };
+      }
+    });
+    const loaded = loadArchive(saveArchive(buildArchiveContents(doc)));
+    expect(loaded.document).toEqual(doc);
+  });
+
   it('round-trips a fold-fold plot with all five of its new fields', () => {
     /*
      * zod strips a key present only on the TS type, so a round-trip is the
@@ -5156,6 +5217,49 @@ describe('statistical annotation lifecycle', () => {
     expect(after.analyses).toHaveLength(1);
     expect(after.analyses[0]!.test).toBe('mann-whitney');
     expect(Object.values(after.nodes).filter((n) => n.type === 'bracket')).toHaveLength(1);
+  });
+
+  it('stores one per-series correlation per plot and prunes the unpicked ones', () => {
+    const { doc, newId, plotId, analysis } = annotatedDocument();
+    const dsId = analysis.spec.datasetId;
+    const seriesAnalysis = (seriesName: string): Analysis => ({
+      ...sampleAnalysis(newId(), plotId, dsId),
+      test: 'linear-regression',
+      spec: { datasetId: dsId, groups: [seriesName], seriesName },
+    });
+
+    // A group comparison already sits on this plot; the per-series batch must
+    // leave it and add one analysis per fitted series.
+    const first = editDocument(doc, (draft) => {
+      replaceSeriesAnalysesForPlot(draft, plotId, [seriesAnalysis('Y1'), seriesAnalysis('Y2')]);
+    });
+    expect(first.analyses).toHaveLength(3);
+    expect(first.analyses.filter((a) => a.spec.seriesName !== undefined).map((a) => a.spec.seriesName))
+      .toEqual(['Y1', 'Y2']);
+    expect(first.analyses.some((a) => a.test === 'ttest-welch')).toBe(true);
+
+    // Re-run with only Y2 picked: Y1's analysis is gone, the group test stays.
+    const second = editDocument(first, (draft) => {
+      replaceSeriesAnalysesForPlot(draft, plotId, [seriesAnalysis('Y2')]);
+    });
+    expect(second.analyses.filter((a) => a.spec.seriesName !== undefined).map((a) => a.spec.seriesName))
+      .toEqual(['Y2']);
+    expect(second.analyses.some((a) => a.test === 'ttest-welch')).toBe(true);
+  });
+
+  it('round-trips a per-series correlation analysis', () => {
+    const { doc, newId, plotId, analysis } = annotatedDocument();
+    const withSeries = editDocument(doc, (draft) => {
+      replaceSeriesAnalysesForPlot(draft, plotId, [
+        {
+          ...sampleAnalysis(newId(), plotId, analysis.spec.datasetId),
+          test: 'linear-regression',
+          spec: { datasetId: analysis.spec.datasetId, groups: ['Y1'], seriesName: 'Y1' },
+        },
+      ]);
+    });
+    const loaded = loadArchive(saveArchive(buildArchiveContents(withSeries)));
+    expect(loaded.document.analyses.find((a) => a.spec.seriesName === 'Y1')).toBeDefined();
   });
 
   it('keeps analyses for other plots when one is re-run', () => {

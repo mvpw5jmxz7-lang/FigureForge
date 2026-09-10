@@ -306,6 +306,60 @@ describe('adapter parity', () => {
     }
   });
 
+  it('draws a hollow marker and an explicit none outline identically through both adapters', () => {
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('Dose,Response\n1,2.1\n2,3.9\n3,6.2\n4,7.8\n5,10.1');
+
+    for (const patch of [
+      { pointFill: 'none' as const },
+      { pointFill: '#ffffff' as const },
+      { pointStroke: 'none' as const },
+      { pointFill: 'none' as const, pointStroke: 'none' as const },
+    ]) {
+      const doc = editDocument(base, (draft) => {
+        const dataset: Dataset = {
+          id: 'ds-hollow',
+          name: 'Dose response',
+          format: inferFormat(parsed.columns),
+          columns: parsed.columns,
+          rows: parsed.rows,
+          sourcePath: 'data/xy.csv',
+          sourceFilename: 'xy.csv',
+          importedAt: '2026-01-01T00:00:00.000Z',
+        };
+        draft.datasets = [dataset];
+        addPanelWithPlot(draft, newId, {
+          frame: { x: 2, y: 2, width: 80, height: 60 },
+          name: 'Dose response',
+          datasetId: dataset.id,
+          plotType: 'scatter',
+        });
+        for (const node of Object.values(draft.nodes)) {
+          if (node.type === 'plot') Object.assign(node, patch);
+        }
+      });
+
+      const scene = renderDocument(doc, { theme: NATURE_THEME });
+      const points = collectByRole(scene, 'point');
+      expect(points.length).toBeGreaterThan(0);
+      if (patch.pointFill === 'none') {
+        expect(points[0]!.attrs?.['fill']).toBe('none');
+      }
+
+      const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+        .replace(/ data-role="[^"]*"/g, '')
+        .replace(/ data-edit-target="[^"]*"/g, '')
+        .replace(/ data-node-id="[^"]*"/g, '');
+      expect(fromReact).toBe(normalise(toSvgString(scene)));
+    }
+  });
+
   it('draws the continuous types through both adapters identically', () => {
     // These need a numeric x axis and paired x values, so they get their own
     // two-column document rather than the replicate CSV above.
@@ -817,6 +871,50 @@ describe('adapter parity', () => {
     );
     expect(dashed).toHaveLength(1);
 
+    const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
+      .replace(/ data-role="[^"]*"/g, '')
+      .replace(/ data-edit-target="[^"]*"/g, '')
+      .replace(/ data-node-id="[^"]*"/g, '');
+    expect(fromReact).toBe(normalise(toSvgString(scene)));
+  });
+
+  it('draws a dragged legend identically through both adapters', () => {
+    // `legendOffsetMm` shifts the wrapper transform; the wrapper carries the
+    // plot id (`data-node-id`, stripped below) so the canvas can grab it, and
+    // that id must not leak into the exported string.
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 75,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const parsed = parseDelimited('X1,Y1,X2,Y2\n1,2,1,3\n2,4,2,5\n3,6,3,7');
+    const doc = editDocument(base, (draft) => {
+      const dataset: Dataset = {
+        id: 'ds-legend-drag',
+        name: 'Two lines',
+        format: inferFormat(parsed.columns),
+        columns: parsed.columns,
+        rows: parsed.rows,
+        sourcePath: 'data/l.csv',
+        sourceFilename: 'l.csv',
+        importedAt: '2026-01-01T00:00:00.000Z',
+      };
+      draft.datasets = [dataset];
+      const { plot } = addPanelWithPlot(draft, newId, {
+        frame: { x: 2, y: 2, width: 80, height: 60 },
+        name: 'Lines',
+        datasetId: dataset.id,
+        plotType: 'line',
+      });
+      const node = draft.nodes[plot.id];
+      if (node?.type === 'plot') node.legendOffsetMm = { x: -15, y: 10 };
+    });
+
+    const scene = renderDocument(doc, { theme: NATURE_THEME });
+    expect(toSvgString(scene)).not.toContain('data-node-id');
+    expect(renderToStaticMarkup(toReact(scene))).toContain('data-node-id');
     const fromReact = normalise(renderToStaticMarkup(toReact(scene)))
       .replace(/ data-role="[^"]*"/g, '')
       .replace(/ data-edit-target="[^"]*"/g, '')

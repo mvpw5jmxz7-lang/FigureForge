@@ -76,6 +76,14 @@ export interface AnalysisSpec {
   datasetId: DatasetId;
   /** Series names, resolved through `toSeries`. */
   groups: readonly string[];
+  /**
+   * For a correlation/regression run on one series of a multi-series plot: the
+   * name of that series. A plot then carries one such analysis per fitted
+   * series, each keyed here, rather than the single analysis every group
+   * comparison leaves. Absent for group comparisons and for a single-series
+   * correlation, which is the whole plot. Optional so older documents load.
+   */
+  seriesName?: string;
 }
 
 export interface Comparison {

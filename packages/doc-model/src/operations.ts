@@ -2359,6 +2359,28 @@ export function replaceAnalysisForPlot(draft: FigureDocument, analysis: Analysis
 }
 
 /**
+ * Store a batch of per-series correlation/regression analyses as *the* set for
+ * a plot: one per fitted series, keyed by `spec.seriesName`.
+ *
+ * Unlike `replaceAnalysisForPlot` this keeps a plot's several results side by
+ * side — a multi-series line plot fits each line the author picks. Any
+ * previous per-series analysis for the plot whose series is not in the new
+ * batch is dropped, so unpicking a series and re-running removes its result
+ * and its drawn line. A group comparison on the same plot (no `seriesName`)
+ * is left untouched.
+ */
+export function replaceSeriesAnalysesForPlot(
+  draft: FigureDocument,
+  plotId: NodeId,
+  analyses: readonly Analysis[],
+): void {
+  const kept = draft.analyses.filter(
+    (a) => (a.plotId ?? null) !== plotId || a.spec.seriesName === undefined,
+  );
+  draft.analyses = [...kept, ...analyses];
+}
+
+/**
  * Re-measure every bracket against its plot's current geometry.
  *
  * Brackets are top-level nodes in absolute page space, deliberately, so they

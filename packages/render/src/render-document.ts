@@ -2818,6 +2818,7 @@ function requiredMargin(
   );
 
   const placement = legendPlacement(node, geometry);
+  const legendSwatch = legendSwatchMm(node, geometry);
   const legendRow =
     Math.max(LEGEND_SWATCH_MM, estimateTextHeightMm(theme.type.legendPt)) + LEGEND_ROW_GAP_MM;
 
@@ -2840,6 +2841,7 @@ function requiredMargin(
           orderedLegendEntries(node, geometry),
           theme,
           Math.max(0, node.frame.width - leftUsed),
+          legendSwatch,
         )
           .rows
       : 0;
@@ -2875,7 +2877,8 @@ function requiredMargin(
     y2 +
       cascade +
       (placement === 'right'
-        ? theme.spacing.tickLabelGapMm + legendWidthMm(legendEntries(geometry), theme)
+        ? theme.spacing.tickLabelGapMm +
+          legendWidthMm(legendEntries(geometry), theme, legendSwatch)
         : 0),
   );
 
@@ -3156,6 +3159,11 @@ export function computePlotGeometry(
 
 /** Style and points for one series of a plot's point cloud, in plot-area-local mm. */
 export interface PointCloudSeries {
+  /**
+   * Marker fill. `'none'` draws hollow markers — `planPointClouds` then also
+   * fills in `stroke` with a series-colour hairline so they stay visible, the
+   * same rule `markerNode` applies on the vector path.
+   */
   color: string;
   shape: PointShape;
   sizeMm: number;
@@ -3208,16 +3216,25 @@ export function planPointClouds(doc: FigureDocument, theme: Theme): PointCloudPl
       widthMm: geometry.plotWidth,
       heightMm: geometry.plotHeight,
       count,
-      series: geometry.series.map((s, index) => ({
-        color: node.pointFill ?? s.color,
-        shape: shapeForSeries(node, index) ?? node.pointShape ?? 'circle',
-        sizeMm: node.pointSizeMm,
-        stroke: node.pointStroke,
-        points: s.points.map((p) => {
-          const color = resolvePointCategoryColor(node, p.category);
-          return { x: p.x, y: p.y, ...(color ? { color } : {}) };
-        }),
-      })),
+      series: geometry.series.map((s, index) => {
+        const fill = node.pointFill ?? s.color;
+        const strokeExplicitlyNone = node.pointStroke === 'none';
+        const explicitStroke = node.pointStroke === 'none' ? undefined : node.pointStroke;
+        return {
+          color: fill,
+          shape: shapeForSeries(node, index) ?? node.pointShape ?? 'circle',
+          sizeMm: node.pointSizeMm,
+          stroke:
+            explicitStroke ??
+            (fillNeedsAutoEdge(fill) && !strokeExplicitlyNone
+              ? { color: s.color, widthMm: theme.stroke.hairlineMinMm }
+              : undefined),
+          points: s.points.map((p) => {
+            const color = resolvePointCategoryColor(node, p.category);
+            return { x: p.x, y: p.y, ...(color ? { color } : {}) };
+          }),
+        };
+      }),
     });
   }
 
@@ -3367,7 +3384,30 @@ export function reflowBrackets(draft: FigureDocument, theme: Theme): void {
 
 /** Height of a legend swatch, and the gap between two entries. */
 const LEGEND_SWATCH_MM = 1.4;
+/**
+ * The length of a *line* sample in the key — long enough to read a dash
+ * pattern, where the 1.4 mm block barely reaches past a marker sitting on it.
+ * `LEGEND_SWATCH_MM` still sizes the block and the marker.
+ */
+const LEGEND_LINE_MM = 6;
 const LEGEND_ROW_GAP_MM = 0.8;
+
+/**
+ * Whether this plot's key draws a line sample rather than a block — every
+ * `line`/`ecdf` plot, whose series are drawn *as* connecting lines, so the key
+ * shows a line the way matplotlib and Prism do. A per-series dash is layered
+ * on when set, and a per-series marker is still overlaid on top; a scatter or
+ * categorical plot keeps the block/marker swatch.
+ */
+function legendDrawsLineSample(node: PlotNode, geometry: PlotGeometry): boolean {
+  return geometry.kind === 'continuous' && LINE_STYLED_PLOT_TYPES.has(node.plotType);
+}
+
+/** The swatch width this plot's key lays out against — composed once, read by
+ *  the width functions, the margin reserve and `renderLegend`. */
+function legendSwatchMm(node: PlotNode, geometry: PlotGeometry): number {
+  return legendDrawsLineSample(node, geometry) ? LEGEND_LINE_MM : LEGEND_SWATCH_MM;
+}
 
 /** What the legend would list, in draw order. Empty means there is none. */
 function legendEntries(geometry: PlotGeometry): { label: string; color: string }[] {
@@ -3422,13 +3462,14 @@ function legendPlacement(node: PlotNode, geometry: PlotGeometry): 'right' | 'bot
 function legendWidthMm(
   entries: readonly { label: string }[],
   theme: Theme,
+  swatchMm: number = LEGEND_SWATCH_MM,
 ): number {
   if (entries.length === 0) return 0;
   const widest = entries.reduce(
     (max, e) => Math.max(max, estimateTextWidthMm(e.label, theme.type.legendPt)),
     0,
   );
-  return LEGEND_SWATCH_MM + theme.spacing.tickLabelGapMm + widest;
+  return swatchMm + theme.spacing.tickLabelGapMm + widest;
 }
 
 /**
@@ -3491,6 +3532,7 @@ function legendRowLayout(
   entries: readonly { label: string }[],
   theme: Theme,
   availableMm: number,
+  swatchMm: number = LEGEND_SWATCH_MM,
 ): { rows: number; at: { x: number; row: number }[] } {
   const gap = theme.spacing.axisTitleGapMm;
   const at: { x: number; row: number }[] = [];
@@ -3498,7 +3540,7 @@ function legendRowLayout(
   let row = 0;
 
   for (const entry of entries) {
-    const width = legendWidthMm([entry], theme);
+    const width = legendWidthMm([entry], theme, swatchMm);
     // The first entry of a row never wraps: a label wider than the whole panel
     // would otherwise wrap forever and still not fit.
     if (x > 0 && x + width > availableMm) {
@@ -3534,12 +3576,14 @@ function renderLegend(
   const rowHeight = Math.max(LEGEND_SWATCH_MM, estimateTextHeightMm(theme.type.legendPt));
   const pitch = rowHeight + LEGEND_ROW_GAP_MM;
   const gap = theme.spacing.tickLabelGapMm;
+  const swatchMm = legendSwatchMm(node, geometry);
+  const drawsLine = legendDrawsLineSample(node, geometry);
 
   // The row layout is computed against the same width `requiredMargin`
   // reserved for it, so the rows it budgeted are the rows drawn.
   const below =
     placement === 'bottom'
-      ? legendRowLayout(entries, theme, Math.max(0, node.frame.width - margin.left))
+      ? legendRowLayout(entries, theme, Math.max(0, node.frame.width - margin.left), swatchMm)
       : null;
 
   const children: SceneNode[] = [];
@@ -3571,23 +3615,19 @@ function renderLegend(
         ? (shapeForSeries(node, series) ?? node.pointShape ?? 'circle')
         : undefined;
     /*
-     * The same "any series carries one" rule as the shape swatch above, for
-     * the same reason — but scoped to the plot types whose line an author can
-     * style through the Inspector at all, which is the one place that set is
-     * spelled. Composes with the marker rather than replacing it, so a series
-     * using both per-series shapes and per-series line styles shows both.
+     * The dash the sample carries: a `line`/`ecdf` plot's key always draws a
+     * line, so it resolves the effective style (per-series, else plot-wide)
+     * and shows it. A solid style resolves to no dasharray, so nothing changes
+     * for a plain solid line plot beyond the line itself now being drawn.
      */
-    const lineDash =
-      LINE_STYLED_PLOT_TYPES.has(node.plotType) && (node.lineStyles?.some((s) => s != null) ?? false)
-        ? dashArrayFor(lineStyleForSeries(node, series) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
-        : undefined;
-    const drawsLine =
-      LINE_STYLED_PLOT_TYPES.has(node.plotType) && (node.lineStyles?.some((s) => s != null) ?? false);
+    const lineDash = drawsLine
+      ? dashArrayFor(lineStyleForSeries(node, series) ?? node.lineStyle ?? 'solid', theme.stroke.dataMm)
+      : undefined;
     const swatchMarks: SceneNode[] = [];
     if (drawsLine) {
       swatchMarks.push(
         el('path', {
-          d: `M${round(x)} ${round(y + rowHeight / 2)} L${round(x + LEGEND_SWATCH_MM)} ${round(y + rowHeight / 2)}`,
+          d: `M${round(x)} ${round(y + rowHeight / 2)} L${round(x + swatchMm)} ${round(y + rowHeight / 2)}`,
           fill: 'none',
           stroke: entry.color,
           'stroke-width': theme.stroke.dataMm,
@@ -3598,8 +3638,11 @@ function renderLegend(
     }
     if (shape) {
       swatchMarks.push(
-        markerNode(node, theme, x + LEGEND_SWATCH_MM / 2, y + rowHeight / 2, {
-          fill: entry.color,
+        markerNode(node, theme, x + swatchMm / 2, y + rowHeight / 2, {
+          // Match the marker the swatch stands for: a hollow-fill plot gets a
+          // hollow (series-edged) swatch rather than a filled block.
+          fill: node.pointFill === 'none' ? 'none' : entry.color,
+          seriesColor: entry.color,
           sizeMm: LEGEND_SWATCH_MM,
           shape,
           role: 'legend',
@@ -3621,7 +3664,7 @@ function renderLegend(
     children.push(
       ...swatchMarks,
       text(entry.label, {
-        x: x + LEGEND_SWATCH_MM + gap,
+        x: x + swatchMm + gap,
         // Baseline within the row, matching how tick labels are placed.
         y: y + rowHeight * 0.8,
         'font-family': theme.fontFamily,
@@ -3636,16 +3679,29 @@ function renderLegend(
   // A secondary axis stands between the plot and the legend, so the legend
   // starts past it — otherwise the key is drawn over the right-hand tick
   // labels, which is exactly what the shared reserve now budgets for.
-  const originX =
+  const autoX =
     placement === 'right'
       ? margin.left + plotWidth + y2WidthMm(node, theme, geometry) + gap
       : margin.left;
-  const originY =
+  const autoY =
     placement === 'right'
       ? margin.top + Math.max(0, (plotHeight - entries.length * pitch) / 2)
       : margin.top + plotHeight + margin.bottom - (below?.rows ?? 1) * pitch;
 
-  return [group({ transform: translate(originX, originY) }, children)];
+  // A user drag is a delta on the automatic anchor — so re-laying the plot
+  // carries the key with it, the same shape `BracketNode.userOffsetMm` uses.
+  // `requiredMargin` still reserves the gutter for the automatic position:
+  // a dragged key is allowed to sit over the plot area.
+  const originX = autoX + (node.legendOffsetMm?.x ?? 0);
+  const originY = autoY + (node.legendOffsetMm?.y ?? 0);
+
+  // `nodeId` on the wrapper is what lets the canvas catch a pointer-down that
+  // bubbled up from a legend child (the children carry `data-role="legend"`
+  // but no id of their own) and start a drag. Deliberately *no* `role` here —
+  // that would add the wrapper `<g>` to every `collectByRole(scene, 'legend')`.
+  // `data-node-id` is stripped before the parity comparison, so exported
+  // markup is unchanged.
+  return [group({ transform: translate(originX, originY) }, children, { nodeId: node.id })];
 }
 
 /**
@@ -3852,14 +3908,15 @@ function renderPlot(node: PlotNode, doc: FigureDocument, options: RenderOptions)
     }
 
     for (const point of mark.points) {
+      // Dark points over a coloured bar by default — conventional and legible,
+      // but it means recolouring a series leaves the dots alone, so the plot can
+      // opt into series-coloured points instead.
+      const pointSeriesColor =
+        mark.bar && !node.pointsUseSeriesColor ? theme.foreground : mark.color;
       markChildren.push(
         markerNode(node, theme, point.x, point.y, {
-          // Dark points over a coloured bar by default — conventional and
-          // legible, but it means recolouring a series leaves the dots alone,
-          // so the plot can opt into series-coloured points instead.
-          fill:
-            node.pointFill ??
-            (mark.bar && !node.pointsUseSeriesColor ? theme.foreground : mark.color),
+          fill: node.pointFill ?? pointSeriesColor,
+          seriesColor: pointSeriesColor,
           fillOpacity: mark.bar ? 0.85 : 1,
         }),
       );
@@ -4235,17 +4292,35 @@ function renderVolcanoSamCurve(
 const TREND_SAMPLES = 64;
 
 /**
- * The stored fit for a plot, if it has one that can be drawn.
+ * Every drawable fit stored against a plot, with the colour to draw it in.
  *
- * `replaceAnalysisForPlot` guarantees at most one analysis per plot, so this is
- * a `find`, not a search for the best of several. A result carrying no `fit` —
- * every test but Pearson and linear regression, Spearman included — yields
- * nothing, which is what keeps the Inspector's control and the drawing in step
- * without either asking which test was run.
+ * A scatter or fold-vs-fold plot carries one (from its single group analysis).
+ * A multi-series line plot carries one per series the author picked in the
+ * Stats tab, each keyed by `spec.seriesName` — matched here to a `geometry`
+ * series so the line takes that series' own colour, which is how a reader
+ * tells which line it fits. A result with no `fit` (Spearman, every group
+ * comparison) contributes nothing, which keeps the Inspector's control and the
+ * drawing in step without either asking which test was run.
  */
-function trendFitForPlot(node: PlotNode, doc: FigureDocument): RegressionFit | null {
-  const analysis = doc.analyses.find((a) => (a.plotId ?? null) === node.id);
-  return analysis?.result?.fit ?? null;
+function trendFitsForPlot(
+  node: PlotNode,
+  doc: FigureDocument,
+  theme: Theme,
+  geometry: PlotGeometry,
+): { fit: RegressionFit; color: string }[] {
+  const out: { fit: RegressionFit; color: string }[] = [];
+  for (const analysis of doc.analyses) {
+    if ((analysis.plotId ?? null) !== node.id) continue;
+    const fit = analysis.result?.fit;
+    if (!fit) continue;
+    const seriesName = analysis.spec.seriesName;
+    const series =
+      node.plotType === 'line' && seriesName !== undefined && geometry.kind === 'continuous'
+        ? geometry.series.find((s) => s.name === seriesName)
+        : undefined;
+    out.push({ fit, color: series?.color ?? theme.foreground });
+  }
+  return out;
 }
 
 /**
@@ -4269,6 +4344,14 @@ export function resolveTrendFit(
   if (!TREND_LINE_PLOT_TYPES.has(node.plotType) || geometry.kind !== 'continuous') return nothing;
   if ((node.trendLine ?? 'show') !== 'show') return nothing;
   /*
+   * Withheld on a cascade offset. The fit was computed on the raw x/y values,
+   * but a cascaded series' marks are shifted after the fact, so a straight line
+   * through the stored slope would sit nowhere near them. A cascade needs more
+   * than one series and so cannot carry a single-series correlation fit — this
+   * keeps that from being the only thing standing between the two.
+   */
+  if (hasCascadeOffset(node, geometry.series.length)) return nothing;
+  /*
    * Withheld outright on a broken axis. A break states that a range is not
    * shown; a line drawn straight across the gap asserts a continuity the axis
    * has explicitly denied, and the fit was computed over the removed values
@@ -4276,120 +4359,119 @@ export function resolveTrendFit(
    */
   if (geometry.xScale.breaks?.length || geometry.yScale.breaks?.length) return nothing;
 
-  const fit = trendFitForPlot(node, doc);
-  if (!fit) return nothing;
-
-  /*
-   * Sampled at evenly spaced MILLIMETRE positions and inverted back to data,
-   * not stepped through the data range. That gives uniform resolution on the
-   * page whatever the scale kind — on a log or symlog axis a straight line in
-   * data space is a curve, and two endpoints would draw it as a chord.
-   */
-  const dataStart = geometry.xScale.scale(fit.xMin);
-  const dataEnd = geometry.xScale.scale(fit.xMax);
-  if (!Number.isFinite(dataStart) || !Number.isFinite(dataEnd)) return nothing;
-  const [startMm, endMm] =
-    (node.trendExtent ?? 'data') === 'axis'
-      ? [0, geometry.plotWidth]
-      : [Math.min(dataStart, dataEnd), Math.max(dataStart, dataEnd)];
-  if (!(endMm > startMm)) return nothing;
+  const fits = trendFitsForPlot(node, doc, theme, geometry);
+  if (fits.length === 0) return nothing;
 
   const interval = node.trendInterval ?? 'none';
-  const samples: { x: number; y: number; low: number; high: number }[] = [];
-  for (let i = 0; i < TREND_SAMPLES; i += 1) {
-    const xMm = startMm + ((endMm - startMm) * i) / (TREND_SAMPLES - 1);
-    const xValue = geometry.xScale.invert(xMm);
-    if (!Number.isFinite(xValue)) continue;
-    const point = fitIntervalAt(fit, xValue, interval === 'prediction' ? 'prediction' : 'confidence');
-    const y = geometry.yScale.scale(point.y);
-    if (!Number.isFinite(y)) continue;
-    samples.push({
-      x: xMm,
-      y,
-      low: geometry.yScale.scale(point.low),
-      high: geometry.yScale.scale(point.high),
-    });
-  }
-  if (samples.length < 2) return nothing;
-
   const band: SceneNode[] = [];
-  if (interval !== 'none') {
+  const line: SceneNode[] = [];
+
+  for (const { fit, color } of fits) {
     /*
-     * Clamped to the plot area rather than clipped. The band is x-simple — one
-     * vertical interval per x — so intersecting it with the panel rectangle is
-     * exactly what clamping each edge produces, and where the clamped edges
-     * cross, the polygon closes on itself and paints nothing. `clipPolylineToRect`
-     * handles open polylines only and could not do this; an SVG clipPath would
-     * mean a `<defs>` block and per-node unique ids, which neither output
-     * adapter emits anywhere today.
+     * Sampled at evenly spaced MILLIMETRE positions and inverted back to data,
+     * not stepped through the data range. That gives uniform resolution on the
+     * page whatever the scale kind — on a log or symlog axis a straight line in
+     * data space is a curve, and two endpoints would draw it as a chord.
      */
-    const clamp = (v: number): number => Math.min(geometry.plotHeight, Math.max(0, v));
-    const usable = samples.filter((s) => Number.isFinite(s.low) && Number.isFinite(s.high));
-    if (usable.length > 1) {
-      // One closed polygon — out along the upper edge and back along the lower
-      // — for the reason the error band already gives: two adjacent translucent
-      // shapes double their alpha where they meet and print as a seam.
-      const upper = usable.map(
-        (s, i) => `${i === 0 ? 'M' : 'L'}${round(s.x)} ${round(clamp(s.high))}`,
-      );
-      const lower = [...usable].reverse().map((s) => `L${round(s.x)} ${round(clamp(s.low))}`);
-      band.push(
+    const dataStart = geometry.xScale.scale(fit.xMin);
+    const dataEnd = geometry.xScale.scale(fit.xMax);
+    if (!Number.isFinite(dataStart) || !Number.isFinite(dataEnd)) continue;
+    const [startMm, endMm] =
+      (node.trendExtent ?? 'data') === 'axis'
+        ? [0, geometry.plotWidth]
+        : [Math.min(dataStart, dataEnd), Math.max(dataStart, dataEnd)];
+    if (!(endMm > startMm)) continue;
+
+    const samples: { x: number; y: number; low: number; high: number }[] = [];
+    for (let i = 0; i < TREND_SAMPLES; i += 1) {
+      const xMm = startMm + ((endMm - startMm) * i) / (TREND_SAMPLES - 1);
+      const xValue = geometry.xScale.invert(xMm);
+      if (!Number.isFinite(xValue)) continue;
+      const point = fitIntervalAt(fit, xValue, interval === 'prediction' ? 'prediction' : 'confidence');
+      const y = geometry.yScale.scale(point.y);
+      if (!Number.isFinite(y)) continue;
+      samples.push({
+        x: xMm,
+        y,
+        low: geometry.yScale.scale(point.low),
+        high: geometry.yScale.scale(point.high),
+      });
+    }
+    if (samples.length < 2) continue;
+
+    if (interval !== 'none') {
+      /*
+       * Clamped to the plot area rather than clipped. The band is x-simple —
+       * one vertical interval per x — so intersecting it with the panel
+       * rectangle is exactly what clamping each edge produces, and where the
+       * clamped edges cross, the polygon closes on itself and paints nothing.
+       * `clipPolylineToRect` handles open polylines only and could not do this;
+       * an SVG clipPath would mean a `<defs>` block and per-node unique ids,
+       * which neither output adapter emits anywhere today.
+       */
+      const clamp = (v: number): number => Math.min(geometry.plotHeight, Math.max(0, v));
+      const usable = samples.filter((s) => Number.isFinite(s.low) && Number.isFinite(s.high));
+      if (usable.length > 1) {
+        // One closed polygon — out along the upper edge and back along the
+        // lower — for the reason the error band already gives: two adjacent
+        // translucent shapes double their alpha where they meet.
+        const upper = usable.map(
+          (s, i) => `${i === 0 ? 'M' : 'L'}${round(s.x)} ${round(clamp(s.high))}`,
+        );
+        const lower = [...usable].reverse().map((s) => `L${round(s.x)} ${round(clamp(s.low))}`);
+        band.push(
+          el(
+            'path',
+            {
+              d: `${upper.join(' ')} ${lower.join(' ')} Z`,
+              // Follows the line's colour — the series' own on a multi-series
+              // line plot, the foreground otherwise. Lighter than the 0.25 the
+              // error band uses: a heavier alpha over a dense cloud reads as ink.
+              fill: color,
+              'fill-opacity': 0.15,
+              stroke: 'none',
+            },
+            undefined,
+            { role: 'trend-band' },
+          ),
+        );
+      }
+    }
+
+    const runs = clipPolylineToRect(
+      samples.map((s) => ({ x: s.x, y: s.y })),
+      geometry.plotWidth,
+      geometry.plotHeight,
+    );
+    if (runs.length > 0) {
+      // Every surviving run as a sub-path of one node, the same way the SAM
+      // boundary is drawn: a fit that leaves the panel and returns is still one
+      // line. One `<path>` per fitted series.
+      const d = runs
+        .map((run) => run.map((p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.y)}`).join(' '))
+        .join(' ');
+      line.push(
         el(
           'path',
           {
-            d: `${upper.join(' ')} ${lower.join(' ')} Z`,
-            fill: theme.foreground,
+            d,
+            fill: 'none',
             /*
-             * Lighter than the 0.25 the error band uses, because the colour is
-             * different in kind: that band is filled in a mid-tone series
-             * colour, this one in the foreground, and black at the same alpha
-             * reads far heavier over a grey point cloud.
+             * The series' own colour on a multi-series line plot, so a reader
+             * can tell which line each fit belongs to. Elsewhere the
+             * foreground: on a fold-vs-fold plot the series colour is a palette
+             * entry the points never use (they are coloured per category), so a
+             * "series colour" line would match nothing on screen.
              */
-            'fill-opacity': 0.15,
-            stroke: 'none',
+            stroke: color,
+            'stroke-width': theme.stroke.dataMm,
+            'stroke-linecap': 'round',
           },
           undefined,
-          { role: 'trend-band' },
+          { role: 'trend-line' },
         ),
       );
     }
-  }
-
-  const runs = clipPolylineToRect(
-    samples.map((s) => ({ x: s.x, y: s.y })),
-    geometry.plotWidth,
-    geometry.plotHeight,
-  );
-  const line: SceneNode[] = [];
-  if (runs.length > 0) {
-    // Every surviving run as a sub-path of one node, the same way the SAM
-    // boundary is drawn: a fit that leaves the panel and returns is still one
-    // line, and splitting it would make a `trend-line` role count depend on
-    // the data.
-    const d = runs
-      .map((run) => run.map((p, i) => `${i === 0 ? 'M' : 'L'}${round(p.x)} ${round(p.y)}`).join(' '))
-      .join(' ');
-    line.push(
-      el(
-        'path',
-        {
-          d,
-          fill: 'none',
-          /*
-           * The foreground, not the series colour. On a fold-vs-fold plot the
-           * series colour is a palette entry the points never use — they are
-           * coloured per category — so a "series colour" line would match
-           * nothing on screen. Foreground reads as an annotation over the data
-           * and is legible in both themes.
-           */
-          stroke: theme.foreground,
-          'stroke-width': theme.stroke.dataMm,
-          'stroke-linecap': 'round',
-        },
-        undefined,
-        { role: 'trend-line' },
-      ),
-    );
   }
 
   return { band, line };
@@ -4595,7 +4677,12 @@ function pointLabelCandidates(node: PlotNode, geometry: ContinuousPlotGeometry):
     x: p.x,
     y: p.y,
     text: p.label!,
-    color: node.pointFill ?? resolvePointCategoryColor(node, p.category) ?? series.color,
+    // A hollow marker (`pointFill: 'none'`) still needs a readable label, so
+    // fall through to the point's own colour rather than drawing text in 'none'.
+    color:
+      (node.pointFill === 'none' ? undefined : node.pointFill) ??
+      resolvePointCategoryColor(node, p.category) ??
+      series.color,
   }));
 }
 
@@ -4822,6 +4909,19 @@ export function placedPointLabelsForPlot(node: PlotNode, doc: FigureDocument, th
   }));
 }
 
+/**
+ * A marker fill that is invisible against the paper-white canvas, so a marker
+ * carrying it needs an edge to exist. `'none'` (hollow) and white are the two
+ * — both drawn on white read as nothing without an outline. When the outline
+ * is left on "follow the series" the marker borrows a series-colour hairline,
+ * the same rule the box-plot outlier already uses; an explicit `pointStroke:
+ * 'none'` is still honoured, so an author can force a white-on-dark marker with
+ * no rim on purpose.
+ */
+function fillNeedsAutoEdge(fill: string): boolean {
+  return fill === 'none' || fill === '#ffffff';
+}
+
 function markerNode(
   node: PlotNode,
   theme: Theme,
@@ -4856,10 +4956,23 @@ function markerNode(
      * raster with no per-point node to attach a title to.
      */
     label?: string;
+    /**
+     * The series colour behind this marker. Passed so a hollow fill
+     * (`style.fill === 'none'`) can borrow it for an edge — once `fill` is
+     * `'none'` the colour is otherwise lost — and so the legend swatch matches.
+     */
+    seriesColor?: string;
   },
 ): SceneNode {
   const r = (style.sizeMm ?? node.pointSizeMm) / 2;
-  const stroke = style.forceStroke ?? node.pointStroke;
+  const strokeExplicitlyNone = node.pointStroke === 'none';
+  const explicitStroke: { color: string; widthMm: number } | undefined =
+    style.forceStroke ?? (node.pointStroke === 'none' ? undefined : node.pointStroke);
+  const stroke =
+    explicitStroke ??
+    (fillNeedsAutoEdge(style.fill) && !strokeExplicitlyNone
+      ? { color: style.seriesColor ?? theme.foreground, widthMm: theme.stroke.hairlineMinMm }
+      : undefined);
   const strokeAttrs = stroke
     ? { stroke: stroke.color, 'stroke-width': stroke.widthMm }
     : { stroke: 'none' };
@@ -5209,9 +5322,11 @@ function renderContinuousMarks(
 
     if (!rasterizePoints) {
       for (const point of s.points) {
+        const pointSeriesColor = resolvePointCategoryColor(node, point.category) ?? s.color;
         markChildren.push(
           markerNode(node, theme, point.x, point.y, {
-            fill: node.pointFill ?? resolvePointCategoryColor(node, point.category) ?? s.color,
+            fill: node.pointFill ?? pointSeriesColor,
+            seriesColor: pointSeriesColor,
             ...(shape ? { shape } : {}),
             ...(point.label !== undefined ? { label: point.label } : {}),
           }),

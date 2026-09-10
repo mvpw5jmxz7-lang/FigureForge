@@ -227,13 +227,19 @@ export const LABELLED_POINT_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType
  * `LABELLED_POINT_PLOT_TYPES` is one: the renderer and the Inspector both ask
  * the question and must not answer it differently.
  *
- * Deliberately not `line`: that type already draws a path through its own
- * points, and a second, straight one beside it is a different question from
- * the one this answers. PCA and UMAP panels are `scatter` nodes, so they are
+ * `line` is included even though that type already draws a path through its
+ * own points: the fitted line is a straight least-squares line stated *beside*
+ * that path, and an x/y table — the commonest route to a correlation — imports
+ * as a `line` plot by default, so withholding it there meant the test ran and
+ * nothing appeared. A multi-series or cascade line plot never reaches it
+ * anyway: `correlationPossible` in the Stats tab requires exactly one series
+ * carrying paired `x`, and `resolveTrendFit` withholds it outright once an
+ * offset is in play. PCA and UMAP panels are `scatter` nodes, so they are
  * covered without being named.
  */
 export const TREND_LINE_PLOT_TYPES: ReadonlySet<PlotType> = new Set<PlotType>([
   'scatter',
+  'line',
   'fold-fold',
 ]);
 
@@ -610,10 +616,19 @@ export interface PlotNode extends NodeBase {
    * legend draws the shape rather than a plain swatch once it is set.
    */
   pointShapes?: readonly (PointShape | null)[];
-  /** Marker interior. Unset keeps the series/foreground rule in the renderer. */
+  /**
+   * Marker interior. Three states: absent follows the series/foreground rule in
+   * the renderer, `'none'` draws a hollow marker (no fill), any other string is
+   * that colour. A hollow marker with no explicit `pointStroke` is given a
+   * hairline edge in the series colour so it stays visible.
+   */
   pointFill?: string;
-  /** Marker outline. Unset draws no outline, as before. */
-  pointStroke?: Stroke;
+  /**
+   * Marker outline. Absent follows the series — which is "no border", the
+   * original look; `'none'` is an explicit no-border choice that renders
+   * identically but the Inspector remembers; a `Stroke` is that border.
+   */
+  pointStroke?: Stroke | 'none';
   /**
    * Connecting-line stroke style for `line` plots. Solid unless asked
    * otherwise — absent renders byte-identical to `'solid'`. See
@@ -667,6 +682,19 @@ export interface PlotNode extends NodeBase {
    * a categorical legend keys on the second factor, not series order.
    */
   reverseLegend?: boolean;
+  /**
+   * A user drag of the series key, in millimetres from wherever `legend`
+   * (right/bottom/auto) places it.
+   *
+   * A delta on top of the automatic position, the same "auto base + stored
+   * delta" shape `BracketNode.userOffsetMm` uses — so re-laying the plot moves
+   * the key's anchor and the drag rides along, rather than pinning it to a
+   * page position. Absent is `{0, 0}`. `requiredMargin` still reserves the
+   * gutter for the *automatic* position only: a dragged key is allowed to
+   * overlap the plot area (an empty corner is exactly where an author puts
+   * one), the same latitude a dragged bracket has.
+   */
+  legendOffsetMm?: { x: number; y: number };
   /**
    * Which physical edge the categorical axis draws against.
    *

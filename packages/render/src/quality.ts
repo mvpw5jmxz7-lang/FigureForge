@@ -706,7 +706,14 @@ const checkStaleAnalyses: Rule = ({ document }) => {
     const dataset = findDataset(document, analysis.spec.datasetId);
     if (!dataset) continue;
 
-    const series = toSeries(dataset);
+    // A per-series correlation hashed only its own series (`spec.seriesName`);
+    // rehash that same slice so a sibling column's edit does not falsely mark
+    // it stale.
+    const allSeries = toSeries(dataset);
+    const series =
+      analysis.spec.seriesName !== undefined
+        ? allSeries.filter((s) => s.name === analysis.spec.seriesName)
+        : allSeries;
     const current = analysisInputHash(
       { test: analysis.test, correction: analysis.options.correction },
       series.map((s) => s.values),

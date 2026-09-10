@@ -92,6 +92,9 @@ interface DragState {
   pointIndex?: number;
   /** The dragged point's start position, in page space. */
   pointOrigin?: { x: number; y: number };
+  /** Set when the drag started on a plot's legend — moves `legendOffsetMm`,
+   *  a delta on the automatic key position, not the plot's frame. */
+  legend?: { startOffset: { x: number; y: number } };
   /** Set when the drag started on the rotate grip. */
   rotate?: {
     /** Page-space centre the node turns about. */
@@ -321,6 +324,29 @@ export function Canvas({
 
   const handlePointerDown = useCallback(
     (nodeId: NodeId, event: React.PointerEvent) => {
+      /*
+       * The legend carries its plot's id, so a pointer-down that lands on it
+       * arrives here as the plot. Grab it directly: select the plot (so the
+       * Inspector shows its legend controls — `selectionTarget` would resolve
+       * to the enclosing panel) and drag `legendOffsetMm`, a delta on the
+       * automatic key position, per frame.
+       */
+      if ((event.target as Element).closest?.('[data-role="legend"]')) {
+        const plot = doc.nodes[nodeId];
+        if (plot?.type === 'plot' && !isLocked(doc, nodeId)) {
+          onSelectionChange([nodeId]);
+          dragRef.current = {
+            nodeId,
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            originalFrames: new Map(),
+            legend: { startOffset: plot.legendOffsetMm ?? { x: 0, y: 0 } },
+          };
+          (event.target as Element).setPointerCapture?.(event.pointerId);
+        }
+        return;
+      }
+
       // Stepping outside the container being edited leaves it.
       const inside =
         enteredId !== null &&
@@ -433,6 +459,17 @@ export function Canvas({
       const pxPerMm = PX_PER_MM * zoom;
       const dxMm = (event.clientX - drag.startClientX) / pxPerMm;
       const dyMm = (event.clientY - drag.startClientY) / pxPerMm;
+
+      // --- moving the legend ----------------------------------------------
+      if (drag.legend) {
+        const { startOffset } = drag.legend;
+        api.commit('Move legend', (draft) => {
+          const node = draft.nodes[drag.nodeId];
+          if (node?.type !== 'plot' || isLocked(draft, drag.nodeId)) return;
+          node.legendOffsetMm = { x: startOffset.x + dxMm, y: startOffset.y + dyMm };
+        });
+        return;
+      }
 
       const primary = doc.nodes[drag.nodeId];
       const primaryOriginal = drag.originalFrames.get(drag.nodeId);
