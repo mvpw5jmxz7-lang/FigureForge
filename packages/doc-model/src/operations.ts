@@ -2103,6 +2103,10 @@ export function bracketFrame(
 
   const panel = plot.parentId ? draft.nodes[plot.parentId] : null;
   if (!panel) return null;
+  // `panel.frame` is only page space for a top-level panel — for one
+  // grouped with another it is relative to the group, the same distinction
+  // `relabelPanels` already has to make for a panel-label.
+  const panelFrame = absoluteFrame(draft.nodes, panel.id) ?? panel.frame;
 
   const span = bracketSpan(draft, options);
   if (!span) return null;
@@ -2112,10 +2116,10 @@ export function bracketFrame(
   const right = Math.max(span.xA, span.xB);
 
   return {
-    x: panel.frame.x + left,
+    x: panelFrame.x + left,
     // The tick ends are the bottom of the frame, so position the frame so
     // they stop `gap` above the tallest datum rather than overlapping it.
-    y: panel.frame.y + span.contentTop - gap - BRACKET_HEIGHT_MM,
+    y: panelFrame.y + span.contentTop - gap - BRACKET_HEIGHT_MM,
     width: Math.max(1, right - left),
     height: BRACKET_HEIGHT_MM,
   };
@@ -2176,6 +2180,12 @@ export function layoutBracketsForPlot(
   if (!plot || plot.type !== 'plot') return frames;
   const panel = plot.parentId ? draft.nodes[plot.parentId] : null;
   if (!panel) return frames;
+  // `panel.frame` is only page space for a top-level panel — the moment
+  // it's grouped with another, `.frame` is relative to the group and this
+  // function is the one `reflowBrackets` actually calls on every reflow, so
+  // using it directly left every bracket on a grouped panel's plot
+  // positioned in the wrong space the instant the group itself moved.
+  const panelFrame = absoluteFrame(draft.nodes, panel.id) ?? panel.frame;
 
   const gapMm = options.gapMm ?? DEFAULT_BRACKET_GAP_MM;
   const stepMm = options.stepMm ?? DEFAULT_BRACKET_STEP_MM;
@@ -2223,8 +2233,8 @@ export function layoutBracketsForPlot(
 
     placed.push({ left, right, y });
     frames.set(entry.id, {
-      x: panel.frame.x + left,
-      y: panel.frame.y + y,
+      x: panelFrame.x + left,
+      y: panelFrame.y + y,
       width: Math.max(1, right - left),
       height: BRACKET_HEIGHT_MM,
     });
@@ -2242,7 +2252,7 @@ export function layoutBracketsForPlot(
    * `computePlotGeometry` reserves headroom from the bracket count, so this is
    * a backstop rather than the normal path.
    */
-  const highest = Math.min(...[...frames.values()].map((f) => f.y - panel.frame.y));
+  const highest = Math.min(...[...frames.values()].map((f) => f.y - panelFrame.y));
   if (highest < 0) {
     for (const [id, frame] of frames) frames.set(id, { ...frame, y: frame.y - highest });
   }

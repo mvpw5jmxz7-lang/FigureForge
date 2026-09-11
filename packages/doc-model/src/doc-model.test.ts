@@ -5469,6 +5469,59 @@ describe('statistical annotation lifecycle', () => {
     expect(after.nodes[before.id]!.frame).toEqual(before.frame);
   });
 
+  it('keeps a bracket on its bars once its panel has been grouped with another and the group moves', () => {
+    /*
+     * Reported from real use: grouping a bracketed panel with another, then
+     * moving the group, left the bracket behind — or worse, moved it in the
+     * wrong direction entirely. Traced to `layoutBracketsForPlot` (what
+     * `repositionBrackets`/`reflowBrackets` actually calls) reading
+     * `panel.frame.x/y` directly rather than the panel's absolute position.
+     * `panel.frame` is only page space for a top-level panel; the moment it
+     * is grouped with another, `.frame` is relative to the group, and using
+     * it unconverted put the bracket somewhere in the group's *local* space
+     * instead of the page space every bracket lives in. `bracketFrame` (the
+     * creation-time placement) had the identical bug.
+     */
+    const { doc, newId, plotId } = annotatedDocument();
+    const bracketId = Object.values(doc.nodes).find((n) => n.type === 'bracket')!.id;
+    const plot = doc.nodes[plotId]!;
+    const panelId = plot.parentId!;
+    const otherPanel = Object.values(doc.nodes).find(
+      (n) => n.type === 'panel' && n.id !== panelId,
+    )!;
+    const measurements = new Map([[plotId, measurementsAt(10, 30)]]);
+
+    // A baseline computed by the same `repositionBrackets` call the grouped
+    // case will also go through, not the bracket's own creation-time frame
+    // — `addBracket`'s default gap (4 mm) and `repositionBrackets`' default
+    // (`DEFAULT_BRACKET_GAP_MM`, 2 mm) legitimately differ, which is not
+    // what this test is about.
+    const baseline = editDocument(doc, (draft) => {
+      repositionBrackets(draft, measurements);
+    }).nodes[bracketId]!.frame;
+
+    const grouped = editDocument(doc, (draft) => {
+      addGroup(draft, newId, [panelId, otherPanel.id]);
+    });
+    // Grouping alone must not move anything — round 21's own guarantee —
+    // so the bracket is still exactly where it started.
+    expect(grouped.nodes[bracketId]!.frame).toEqual(doc.nodes[bracketId]!.frame);
+
+    const group = Object.values(grouped.nodes).find((n) => n.type === 'group')!;
+    const after = editDocument(grouped, (draft) => {
+      // Moving the group, the same way a drag does: translate its own
+      // frame directly, leaving every member's frame — relative to the
+      // group — untouched.
+      const node = draft.nodes[group.id]!;
+      node.frame = { ...node.frame, x: node.frame.x + 50, y: node.frame.y + 30 };
+      repositionBrackets(draft, measurements);
+    });
+
+    const bracketAfter = after.nodes[bracketId]!.frame;
+    expect(bracketAfter.x).toBeCloseTo(baseline.x + 50, 6);
+    expect(bracketAfter.y).toBeCloseTo(baseline.y + 30, 6);
+  });
+
   it('collapses a stale bracket to a harmless full-width marker, not a crash, when its plot flips to horizontal', () => {
     // `packages/render`'s `measurePlot` refuses a horizontal plot's brackets
     // the same way it already refuses a continuous plot's — empty but
