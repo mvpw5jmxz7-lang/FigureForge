@@ -6603,6 +6603,64 @@ describe('group labels', () => {
     expect(after.nodes[top.id]!.frame.y).toBeCloseTo(top.frame.y + needed, 6);
   });
 
+  it('reserves against the page edge even when the heading’s panel has been grouped with another', () => {
+    /*
+     * Reported from real use through the AI layout helper, but reproducible
+     * with no AI at all: grouping a headed top-row panel with another panel
+     * anywhere else on the page, then triggering a from-scratch layout, left
+     * the heading — and the letter lifted above it — drawn over the page's
+     * own top edge. Two compounding causes, both in
+     * `reserveSpaceForGroupLabels`:
+     *
+     *   - `letterMm` resolved each member via `topLevelOwner`, whose answer
+     *     for a grouped panel is the *group*, never `type === 'panel'` — so
+     *     the panel's own letter-clearance need was silently counted as
+     *     zero, and the reservation was short by exactly that much.
+     *   - the pushable candidate list was top-level *panels* only, so even
+     *     with the right shortfall computed, the grouped panel itself could
+     *     never be one of the things moved to make room for it.
+     *
+     * Both are fixed via `layoutUnits`/`panelOwning`, the same abstraction
+     * the smart-layout solver already uses for "the top-level thing that
+     * moves, panel or group."
+     */
+    const { doc, newId, panels } = twoLetteredPanels(200);
+    const top = panels[0]!;
+
+    const withThird = editDocument(doc, (draft) => {
+      addPanel(draft, newId, { frame: { x: 100, y: 150, width: 40, height: 30 }, name: 'Elsewhere' });
+    });
+    const elsewhere = Object.values(withThird.nodes).find(
+      (n) => n.type === 'panel' && n.id !== top.id && n.id !== panels[1]!.id,
+    )!;
+    const grouped = editDocument(withThird, (draft) => {
+      addGroup(draft, newId, [top.id, elsewhere.id]);
+    });
+    // Grouping alone must not move anything — round 21's own guarantee.
+    expect(absoluteFrame(grouped.nodes, top.id)).toEqual(absoluteFrame(doc.nodes, top.id));
+
+    const after = editDocument(grouped, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [top.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    const letter = letterOf(after, top.id);
+    const needed =
+      groupLabelClearanceMm(undefined, false, undefined) +
+      panelLetterHeightMm(letter.style.fontSizePt);
+    const topBefore = absoluteFrame(grouped.nodes, top.id)!;
+    const topAfter = absoluteFrame(after.nodes, top.id)!;
+
+    // The grouped panel moved down by exactly the shortfall, the identical
+    // amount an ungrouped panel would — not left in place with nothing
+    // reserved for it.
+    expect(topAfter.y).toBeCloseTo(topBefore.y + needed, 6);
+    // And the letter sits at a real, on-page position, not lifted off the
+    // top of it.
+    expect(letter.frame.y).toBeGreaterThanOrEqual(0);
+  });
+
   it('puts the panel letter above the heading, and the heading above the graph', () => {
     const { doc, newId, panels } = twoLetteredPanels(200);
     const top = panels[0]!;

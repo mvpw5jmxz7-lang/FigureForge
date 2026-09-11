@@ -2895,16 +2895,25 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
      * this the two land on the same line and the letter has nowhere to go.
      * Only panels have letters, and only a heading above the panel's own top
      * edge displaces one — a montage cell caption sits inside the frame.
+     *
+     * Resolved via `panelOwning` over `label.memberIds` directly, not
+     * `ownerIds` (built from `topLevelOwner`, correct for the bounds/push
+     * purposes below but the *wrong* question here): the moment a member
+     * panel is grouped with another, its top-level owner is the group, which
+     * is never `type === 'panel'` — so the panel's own letter-clearance need
+     * was silently read as zero, reserving too little room and leaving the
+     * heading (and the letter lifted above it) drawn over the page's own top
+     * edge. `panelOwning` resolves through any grouping to the real panel.
      */
     const letterMm =
       label.edge === 'top' && label.placement !== 'overlay'
         ? Math.max(
             0,
-            ...[...ownerIds].map((id) => {
-              const owner = draft.nodes[id];
-              if (owner?.type !== 'panel') return 0;
+            ...label.memberIds.map((memberId) => {
+              const owner = panelOwning(draft.nodes, memberId);
+              if (!owner) return 0;
               const letter = Object.values(draft.nodes).find(
-                (n) => n.type === 'panel-label' && n.panelId === id,
+                (n) => n.type === 'panel-label' && n.panelId === owner.id,
               );
               return letter?.type === 'panel-label'
                 ? panelLetterHeightMm(letter.style.fontSizePt)
@@ -2921,9 +2930,16 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
     const spanStart = axis === 'y' ? bounds.x : bounds.y;
     const spanEnd = axis === 'y' ? bounds.x + bounds.width : bounds.y + bounds.height;
 
-    const panels = Object.values(draft.nodes).filter(
-      (n): n is PanelNode => n.type === 'panel' && n.parentId === null,
-    );
+    /*
+     * Top-level panels *and* top-level groups — `layoutUnits`, the same
+     * abstraction the smart-layout solver uses. A plain panel search missed
+     * a group entirely: a group could neither be found as the "nearest
+     * neighbour" to push, nor be pushed itself, so a heading whose nearest
+     * obstruction (or whose own member) was a grouped panel had nothing
+     * available to move to make room. Read fresh on every label, since an
+     * earlier label in this same loop may already have pushed something.
+     */
+    const units = layoutUnits(draft.nodes);
 
     const overlaps = (rect: RectMm): boolean => {
       const rStart = axis === 'y' ? rect.x : rect.y;
@@ -2936,10 +2952,10 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
     // the panel immediately after them (the heading's own space is beyond
     // the members either way, so "before"/"after" flips with `boundary`).
     let neighborEdge: number | null = null;
-    for (const panel of panels) {
-      if (ownerIds.has(panel.id)) continue;
-      const rect = absoluteFrame(draft.nodes, panel.id);
-      if (!rect || !overlaps(rect)) continue;
+    for (const unit of units) {
+      if (ownerIds.has(unit.id)) continue;
+      const rect = unit.frame;
+      if (!overlaps(rect)) continue;
       const near = axis === 'y' ? rect.y : rect.x;
       const far = axis === 'y' ? rect.y + rect.height : rect.x + rect.width;
 
@@ -2971,7 +2987,7 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
     const shortfall = clearance - currentGap;
     if (shortfall <= EPS) continue;
 
-    pushPanelsFrom(draft, panels, axis, boundary, shortfall);
+    pushUnitsFrom(draft, units, axis, boundary, shortfall);
   }
 }
 
@@ -2992,9 +3008,10 @@ export function reserveSpaceForGroupLabels(draft: FigureDocument): void {
 export function reserveSpaceForScaleBars(draft: FigureDocument): void {
   const EPS = 1e-6;
 
-  const panels = Object.values(draft.nodes).filter(
-    (n): n is PanelNode => n.type === 'panel' && n.parentId === null,
-  );
+  // See `reserveSpaceForGroupLabels`'s identical `units` for why this reads
+  // top-level groups as well as panels — `pushUnitsFrom` shares one
+  // implementation with that function's own push.
+  const units = layoutUnits(draft.nodes);
 
   for (const bar of Object.values(draft.nodes)) {
     if (bar.type !== 'scale-bar' || bar.placement !== 'below') continue;
@@ -3018,13 +3035,12 @@ export function reserveSpaceForScaleBars(draft: FigureDocument): void {
     const ownerFrame = absoluteFrame(draft.nodes, owner.id);
     if (!ownerFrame) continue;
 
-    // The nearest panel below that actually sits under this picture. A panel
-    // off to one side is not in the bar's way.
+    // The nearest panel or group below that actually sits under this
+    // picture. One off to one side is not in the bar's way.
     let below: number | null = null;
-    for (const panel of panels) {
-      if (panel.id === owner.id) continue;
-      const rect = absoluteFrame(draft.nodes, panel.id);
-      if (!rect) continue;
+    for (const unit of units) {
+      if (unit.id === owner.id) continue;
+      const rect = unit.frame;
       if (rect.x + rect.width <= pictureLeft + EPS || rect.x >= pictureRight - EPS) continue;
       if (rect.y < pictureBottom - EPS) continue;
       if (below === null || rect.y < below) below = rect.y;
@@ -3035,7 +3051,7 @@ export function reserveSpaceForScaleBars(draft: FigureDocument): void {
     if (shortfall <= EPS) continue;
 
     if (below !== null) {
-      pushPanelsFrom(draft, panels, 'y', ownerFrame.y + ownerFrame.height, shortfall);
+      pushUnitsFrom(draft, units, 'y', ownerFrame.y + ownerFrame.height, shortfall);
       continue;
     }
 
@@ -3097,8 +3113,18 @@ function marginMm(draft: FigureDocument): number {
 }
 
 /**
- * Push every panel at or beyond a boundary, then take back whatever no longer
- * fits on the page.
+ * Push every top-level unit — panel or group — at or beyond a boundary, then
+ * take back whatever no longer fits on the page.
+ *
+ * Operates on `LayoutUnit`s, not bare panels: a heading's nearest obstruction,
+ * or one of its own members, may be a whole group rather than a lone
+ * top-level panel — reported from real use, where a heading spanning a
+ * grouped panel had nothing pushable found for it at all, and the heading
+ * (with the letter lifted above it) ended up drawn over the page's own top
+ * edge. Pushing a group is a plain translation of its own frame, exactly like
+ * a panel — `snapshotPanelAbsolutePositions`/`syncPanelLabelsFromSnapshot`
+ * already walk every *descendant* panel of whatever root id they are given,
+ * so a group's member panels' letters follow it for free.
  *
  * Pushing alone would walk the bottom row off the page — on the sample figure
  * the required band is about 6.4 mm against 3.6 mm of slack, so the shrink is
@@ -3106,50 +3132,63 @@ function marginMm(draft: FigureDocument): number {
  * considered and refused: a caption silently making a figure taller can breach
  * a journal's maximum height, and the page is not this function's to spend.
  *
- * Panels are shrunk by *row*, banded on `y` with the same 5 mm tolerance
- * `readingOrder` uses to decide what a row is, so a row's panels keep their
- * shared top and bottom edges.
+ * Only panels shrink to relieve overflow. A pushed group is left exactly
+ * where the push put it, even if that leaves a little overflow: shrinking a
+ * group would need `resizeGroup`'s proportional scale, which changes its
+ * width along with its height — a far larger and more surprising move than
+ * trimming one panel's own height — and "a figure slightly over its page is
+ * recoverable" already covers this outcome.
+ *
+ * Shrinkable panels are grouped by *row*, banded on `y` with the same 5 mm
+ * tolerance `readingOrder` uses to decide what a row is, so a row's panels
+ * keep their shared top and bottom edges.
  */
-function pushPanelsFrom(
+function pushUnitsFrom(
   draft: FigureDocument,
-  panels: readonly PanelNode[],
+  units: readonly LayoutUnit[],
   axis: 'x' | 'y',
   boundary: number,
   shortfall: number,
 ): void {
   const EPS = 1e-6;
-  const moved: PanelNode[] = [];
+  const moved: LayoutUnit[] = [];
 
-  for (const panel of panels) {
-    const rect = absoluteFrame(draft.nodes, panel.id);
+  for (const unit of units) {
+    const rect = absoluteFrame(draft.nodes, unit.id);
     if (!rect) continue;
     const coord = axis === 'y' ? rect.y : rect.x;
     if (coord < boundary - EPS) continue;
 
-    const before = snapshotPanelAbsolutePositions(draft.nodes, panel.id);
-    panel.frame =
+    const node = draft.nodes[unit.id];
+    if (!node) continue;
+
+    const before = snapshotPanelAbsolutePositions(draft.nodes, unit.id);
+    node.frame =
       axis === 'y'
-        ? { ...panel.frame, y: panel.frame.y + shortfall }
-        : { ...panel.frame, x: panel.frame.x + shortfall };
+        ? { ...node.frame, y: node.frame.y + shortfall }
+        : { ...node.frame, x: node.frame.x + shortfall };
     syncPanelLabelsFromSnapshot(draft, before);
-    moved.push(panel);
+    moved.push({ ...unit, frame: node.frame });
   }
 
   // Only a downward push can run off the page; a `left`/`right` heading moves
-  // panels sideways within a width this function never changes.
+  // things sideways within a width this function never changes.
   if (axis !== 'y' || moved.length === 0) return;
 
   const margin = marginMm(draft);
   const limit = draft.page.heightMm - margin;
-  const lowest = Math.max(...moved.map((p) => p.frame.y + p.frame.height));
+  const lowest = Math.max(...moved.map((u) => u.frame.y + u.frame.height));
   const overflow = lowest - limit;
   if (overflow <= EPS) return;
 
-  // Rows, by the rule `readingOrder` already uses to decide what a row is.
-  const rows = rowBands(moved, (panel) => panel.frame.y);
+  const shrinkable = moved.filter((u) => u.kind === 'panel');
+  if (shrinkable.length === 0) return;
 
-  const rowHeight = (row: readonly PanelNode[]): number =>
-    Math.max(...row.map((p) => p.frame.height));
+  // Rows, by the rule `readingOrder` already uses to decide what a row is.
+  const rows = rowBands(shrinkable, (unit) => unit.frame.y);
+
+  const rowHeight = (row: readonly LayoutUnit[]): number =>
+    Math.max(...row.map((u) => u.frame.height));
   const totalHeight = rows.reduce((sum, row) => sum + rowHeight(row), 0);
   if (totalHeight <= EPS) return;
 
@@ -3165,7 +3204,9 @@ function pushPanelsFrom(
     const wanted = (overflow * height) / totalHeight;
     const take = Math.max(0, Math.min(wanted, height - MIN_TILE_MM));
 
-    for (const panel of row) {
+    for (const unit of row) {
+      const panel = draft.nodes[unit.id];
+      if (panel?.type !== 'panel') continue;
       const next: RectMm = {
         ...panel.frame,
         y: panel.frame.y - shift,
@@ -3176,16 +3217,18 @@ function pushPanelsFrom(
        * by `shift` and its letter up by *twice* `shift`, landing the letter
        * well above — sometimes overlapping — the row above it. `resizePanel`
        * already carries the label along by its own dx/dy shim, computed
-       * from `panel.frame` — correct here because this function moves only
-       * top-level panels, whose `.frame` already is page space (see this
-       * function's own doc comment). The `snapshotPanelAbsolutePositions`/
-       * `syncPanelLabelsFromSnapshot` pair a few lines up, in the push loop,
-       * needs to exist for the reason its own doc comment gives — it
-       * mutates `panel.frame` directly, bypassing `resizePanel` entirely —
-       * but calling it *again* here, after `resizePanel` has already moved
-       * the label once, moved it a second time for the same resize.
+       * from `panel.frame` — correct here because a *shrinkable* unit is
+       * always a genuinely top-level panel (a group is never in `shrinkable`,
+       * and a panel inside one is never in `moved` at all — only the group
+       * itself is), whose `.frame` already is page space. The
+       * `snapshotPanelAbsolutePositions`/`syncPanelLabelsFromSnapshot` pair a
+       * few lines up, in the push loop, needs to exist for the reason its own
+       * doc comment gives — it mutates a node's frame directly, bypassing
+       * `resizePanel` entirely — but calling it *again* here, after
+       * `resizePanel` has already moved the label once, moved it a second
+       * time for the same resize.
        */
-      resizePanel(draft, panel.id, next);
+      resizePanel(draft, unit.id, next);
     }
     shift += take;
   }
