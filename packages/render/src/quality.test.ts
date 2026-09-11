@@ -108,6 +108,53 @@ function findingsFor(csv: string, plotType: PlotType) {
   return checkFigure({ document, theme: NATURE_THEME, scene }).findings;
 }
 
+describe('page-too-tall tolerance', () => {
+  /*
+   * A smart-layout candidate solved *for* the journal's own page-height
+   * limit routinely realises a few femtometres over it — plain IEEE-754
+   * float residue from summing and subtracting millimetre values through a
+   * multi-pass layout (push, shrink, reserve), not a genuine overshoot from
+   * anything miscomputing the height. Reported from real use: the exported
+   * figure was flagged as exceeding the limit it was, in every real sense,
+   * exactly at.
+   */
+  function documentAtHeight(heightMm: number): FigureDocument {
+    const newId = createIdFactory();
+    return createDocument({
+      title: 'Height check',
+      widthMm: 183,
+      heightMm,
+      presetId: 'nature-double',
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+  }
+
+  function pageTooTall(heightMm: number): Finding | undefined {
+    const document = documentAtHeight(heightMm);
+    const scene = renderDocument(document, { theme: NATURE_THEME });
+    return checkFigure({ document, theme: NATURE_THEME, scene }).findings.find(
+      (f) => f.id === 'page-too-tall',
+    );
+  }
+
+  it('tolerates float residue at the limit', () => {
+    expect(pageTooTall(247.00000000000003)).toBeUndefined();
+  });
+
+  it('tolerates the limit exactly', () => {
+    expect(pageTooTall(247)).toBeUndefined();
+  });
+
+  it('still flags a genuine overshoot', () => {
+    expect(pageTooTall(248)).toBeDefined();
+  });
+
+  it('still flags an overshoot just past the tolerance', () => {
+    expect(pageTooTall(247.02)).toBeDefined();
+  });
+});
+
 describe('distribution sample size', () => {
   const ids = (csv: string, plotType: PlotType) =>
     findingsFor(csv, plotType)

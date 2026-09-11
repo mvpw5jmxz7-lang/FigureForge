@@ -640,7 +640,20 @@ const checkPageDimensions: Rule = ({ document }) => {
     });
   }
 
-  if (document.page.heightMm > preset.maxHeightMm) {
+  /*
+   * A small tolerance, matching the width check's own `+ 0.01` above — a
+   * multi-pass layout (push, shrink, reserve) sums and subtracts millimetre
+   * values through several steps, and IEEE-754 float arithmetic accumulates
+   * residue at that scale even when every logical step is a no-op. Measured
+   * directly: a smart-layout candidate solved *for* a page at exactly the
+   * journal's own limit still realised as 247.00000000000003 mm, not a
+   * genuine overshoot from anything miscomputing the height, tripping this
+   * check by three femtometres — clamping to the limit and re-adding slack
+   * to hide it in the number shown was rejected in round 40 for changing
+   * what "the realised page height" honestly means; a comparison tolerant of
+   * the arithmetic it is comparing is not that.
+   */
+  if (document.page.heightMm > preset.maxHeightMm + 0.01) {
     findings.push({
       id: 'page-too-tall',
       severity: 'error',
