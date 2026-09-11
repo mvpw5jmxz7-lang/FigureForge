@@ -6,8 +6,11 @@ import {
   DISTRIBUTION_PLOT_TYPES,
   LABELLED_POINT_PLOT_TYPES,
   TREND_LINE_PLOT_TYPES,
+  MAX_SIZE_MULTIPLIER,
+  MIN_SIZE_MULTIPLIER,
   addAsset,
   addBracket,
+  addGroup,
   addPanelWithImage,
   addPanelWithImages,
   addPanelWithPlot,
@@ -60,6 +63,7 @@ import {
   type Dataset,
   type Delimiter,
   type FigureDocument,
+  type FigureNode,
   type NodeId,
   type PanelNode,
   type PlotNode,
@@ -70,6 +74,11 @@ import {
   type SmartLayoutCandidate,
   type SmartLayoutOptions,
 } from '@figureforge/doc-model';
+import {
+  type GroupingSuggestion,
+  type LayoutAssistant,
+  type PanelSummary as AiPanelSummary,
+} from '../aiLayoutAssistant.js';
 import {
   measureAllPlots,
   measurePlot,
@@ -444,6 +453,7 @@ const ROW_NAME_FORMATS: ReadonlySet<DataFormat> = new Set<DataFormat>([
 export interface SidePanelProps {
   api: DocumentApi;
   theme: Theme;
+  layoutAssistant: LayoutAssistant;
   selectedIds: NodeId[];
   onSelectionChange: (ids: NodeId[]) => void;
   onError: (message: string | null) => void;
@@ -3125,22 +3135,66 @@ function CandidateGlyph({
 }
 
 /**
+ * What the AI layout helper is told about one panel — metadata only, never
+ * pixel data or the dataset's own values (`aiLayoutAssistant.ts`'s own
+ * standing rule). The axis titles and dataset name come off the panel's own
+ * plot, if it has one; the caption comes off a `group-label` whose sole
+ * member is this panel — the same test `Inspector.tsx`'s own "Caption a
+ * pane" affordance already uses to find one.
+ */
+function panelSummaryFor(doc: FigureDocument, panel: PanelNode): AiPanelSummary {
+  const plot = childrenOf(doc.nodes, panel.id).find((n): n is PlotNode => n.type === 'plot');
+  const dataset = plot ? findDataset(doc, plot.datasetId) : undefined;
+  const caption = Object.values(doc.nodes).find(
+    (n): n is Extract<FigureNode, { type: 'group-label' }> =>
+      n.type === 'group-label' && n.memberIds.length === 1 && n.memberIds[0] === panel.id,
+  );
+  const axisTitles = plot ? [plot.x.title, plot.y.title].filter((t) => t.trim().length > 0) : [];
+
+  return {
+    panelId: panel.id,
+    letter: panel.label ?? panel.id,
+    plotType: plot?.plotType,
+    axisTitles,
+    datasetName: dataset?.name,
+    captionText: caption?.title,
+  };
+}
+
+/**
  * Arrangements the solver found, best first, each with what it costs.
  *
  * A list rather than a dropdown because the author is choosing between four
  * things that differ in several ways at once — a `<select>` can show a label
  * and nothing else, and would apply on change with no chance to compare.
  */
-function SmartLayoutTab({ api, theme, exportDpi, onSelectionChange }: SidePanelProps) {
+function SmartLayoutTab({
+  api,
+  theme,
+  exportDpi,
+  onSelectionChange,
+  layoutAssistant,
+  onError,
+  setBusy,
+}: SidePanelProps) {
   const doc = api.document;
   const panelCount = Object.values(doc.nodes).filter((n) => n.type === 'panel').length;
+
+  /*
+   * A per-panel nudge the AI assistant's resize instructions write to and the
+   * solver reads — session state only, the same "no persisted state, re-solve
+   * fresh" convention the candidate list itself already follows. It survives
+   * a re-solve (so several "make it bigger" instructions compound) but not a
+   * tab change, since it describes a search in progress, not the document.
+   */
+  const [sizeMultipliers, setSizeMultipliers] = useState<Map<NodeId, number>>(new Map());
 
   // Solving measures every plot at up to three type sizes, so it is not free
   // and must not run on every keystroke elsewhere in the app. Memoised on the
   // document identity, which Immer replaces on any edit.
   const result = useMemo(
-    () => (panelCount >= 2 ? solveForDocument(doc, theme, exportDpi) : null),
-    [doc, theme, exportDpi, panelCount],
+    () => (panelCount >= 2 ? solveForDocument(doc, theme, exportDpi, sizeMultipliers) : null),
+    [doc, theme, exportDpi, panelCount, sizeMultipliers],
   );
 
   const options = useMemo(
@@ -3164,6 +3218,106 @@ function SmartLayoutTab({ api, theme, exportDpi, onSelectionChange }: SidePanelP
     });
   };
 
+  // What the assistant is told about each panel — metadata only, built fresh
+  // from the document on every render rather than cached, so it can never go
+  // stale against an edit made from another tab.
+  const panelSummaries: AiPanelSummary[] = useMemo(
+    () => panelsInReadingOrder(doc.nodes).map((panel) => panelSummaryFor(doc, panel)),
+    [doc],
+  );
+  const letterFor = (id: NodeId): string =>
+    panelSummaries.find((p) => p.panelId === id)?.letter ?? id;
+
+  const [groupSuggestion, setGroupSuggestion] = useState<GroupingSuggestion | null>(null);
+  const [checkedGroups, setCheckedGroups] = useState<ReadonlySet<number>>(new Set());
+  const [instructionText, setInstructionText] = useState('');
+  const [assistantBusy, setAssistantBusy] = useState<'grouping' | 'instruction' | null>(null);
+
+  // The suggestion checklist is real structured state (it needs checkboxes),
+  // but every status line — success, decline, or failure — goes through the
+  // same shared `onError` channel PCA/UMAP/the volcano test already use:
+  // there is no separate success-notice or chat-history surface in this app.
+  const suggestGroups = async (): Promise<void> => {
+    setAssistantBusy('grouping');
+    setBusy('Suggesting panel groups');
+    onError(null);
+    try {
+      const suggestion = await layoutAssistant.suggestGrouping(panelSummaries);
+      setGroupSuggestion(suggestion);
+      setCheckedGroups(new Set(suggestion.groups.map((_, index) => index)));
+      if (suggestion.groups.length === 0) {
+        onError('Nothing worth grouping — every panel reads as its own topic.');
+      }
+    } catch (error) {
+      setGroupSuggestion(null);
+      onError(
+        error instanceof ApiError
+          ? `The layout assistant failed: ${error.message}`
+          : `Could not reach the layout assistant. (${String(error)})`,
+      );
+    } finally {
+      setBusy(null);
+      setAssistantBusy(null);
+    }
+  };
+
+  const applyGroups = (): void => {
+    if (!groupSuggestion) return;
+    const chosen = groupSuggestion.groups.filter((_, index) => checkedGroups.has(index));
+    if (chosen.length === 0) return;
+    // One commit for every checked group, so accepting several suggestions
+    // at once is still a single Ctrl+Z — the same discipline `applyFix`'s
+    // batch path already follows.
+    api.commit('Group panels (AI suggestion)', (draft) => {
+      for (const group of chosen) addGroup(draft, api.newId, group.panelIds);
+    });
+    setGroupSuggestion(null);
+    setCheckedGroups(new Set());
+    onError(`Grouped ${chosen.length} suggested set${chosen.length === 1 ? '' : 's'} of panels.`);
+  };
+
+  const sendInstruction = async (): Promise<void> => {
+    const text = instructionText.trim();
+    if (!text) return;
+    setAssistantBusy('instruction');
+    setBusy('Interpreting layout instruction');
+    onError(null);
+    try {
+      const instruction = await layoutAssistant.interpretInstruction(text, panelSummaries);
+      if (instruction.kind === 'group') {
+        api.commit('Group panels (AI suggestion)', (draft) => {
+          addGroup(draft, api.newId, instruction.panelIds);
+        });
+      } else if (instruction.kind === 'resize') {
+        // A step, not an absolute — a second "make it even bigger" compounds
+        // rather than resetting, and the solver's own clamp
+        // ([MIN_SIZE_MULTIPLIER, MAX_SIZE_MULTIPLIER]) is what stops a run of
+        // them from starving every other panel.
+        setSizeMultipliers((prev) => {
+          const next = new Map(prev);
+          const current = next.get(instruction.panelId) ?? 1;
+          const step = instruction.direction === 'bigger' ? 0.15 : -0.15;
+          next.set(
+            instruction.panelId,
+            Math.min(MAX_SIZE_MULTIPLIER, Math.max(MIN_SIZE_MULTIPLIER, current + step)),
+          );
+          return next;
+        });
+      }
+      onError(instruction.reason);
+      setInstructionText('');
+    } catch (error) {
+      onError(
+        error instanceof ApiError
+          ? `The layout assistant failed: ${error.message}`
+          : `Could not reach the layout assistant. (${String(error)})`,
+      );
+    } finally {
+      setBusy(null);
+      setAssistantBusy(null);
+    }
+  };
+
   if (panelCount < 2) {
     return (
       <section>
@@ -3184,6 +3338,84 @@ function SmartLayoutTab({ api, theme, exportDpi, onSelectionChange }: SidePanelP
         which it still holds {exportDpi} dpi, and a plot&rsquo;s from the axis furniture it actually
         draws. Applying one is a single undo step.
       </p>
+
+      <div className="ai-layout-assistant">
+        <h4>AI layout helper</h4>
+        <p className="muted small">
+          Suggests which panels belong together, or turns a plain instruction into a grouping or a
+          size nudge the search above can act on. It never places a panel itself — nothing changes
+          until you approve a suggestion or a checked group.
+        </p>
+
+        <div className="finding-actions">
+          <button disabled={assistantBusy !== null} onClick={() => void suggestGroups()}>
+            {assistantBusy === 'grouping' ? 'Thinking…' : 'Suggest panel groups'}
+          </button>
+        </div>
+
+        {groupSuggestion && groupSuggestion.groups.length > 0 && (
+          <div className="finding">
+            {groupSuggestion.groups.map((group, index) => (
+              <label key={group.panelIds.join(',')} className="check">
+                <input
+                  type="checkbox"
+                  checked={checkedGroups.has(index)}
+                  onChange={(event) => {
+                    setCheckedGroups((prev) => {
+                      const next = new Set(prev);
+                      if (event.target.checked) next.add(index);
+                      else next.delete(index);
+                      return next;
+                    });
+                  }}
+                />
+                <span>
+                  <strong>{group.panelIds.map((id) => letterFor(id)).join(', ')}</strong>
+                  {' — '}
+                  {group.rationale}
+                </span>
+              </label>
+            ))}
+            <div className="finding-actions">
+              <button
+                className="primary"
+                disabled={checkedGroups.size === 0}
+                onClick={applyGroups}
+              >
+                Apply grouping
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="field-row">
+          <input
+            type="text"
+            value={instructionText}
+            placeholder='e.g. "give the heatmap more room" or "keep the montage near panel c"'
+            onChange={(event) => setInstructionText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void sendInstruction();
+            }}
+          />
+          <button
+            disabled={assistantBusy !== null || instructionText.trim().length === 0}
+            onClick={() => void sendInstruction()}
+          >
+            {assistantBusy === 'instruction' ? 'Thinking…' : 'Send'}
+          </button>
+        </div>
+
+        {sizeMultipliers.size > 0 && (
+          <p className="muted small">
+            Adjusted by instruction:{' '}
+            {[...sizeMultipliers.entries()]
+              .map(([id, multiplier]) => `${letterFor(id)} ×${multiplier.toFixed(2)}`)
+              .join(', ')}{' '}
+            <button onClick={() => setSizeMultipliers(new Map())}>Reset</button>
+          </p>
+        )}
+      </div>
 
       {result?.blockedBy && (
         <div className="finding error">

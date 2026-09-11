@@ -24,11 +24,14 @@ import {
   FONT_SCALES,
   IMAGE_LEGIBILITY_MM,
   MAX_CANDIDATES,
+  MAX_SIZE_MULTIPLIER,
+  MIN_SIZE_MULTIPLIER,
   applySmartLayout,
   explainCandidate,
   imagePanelDemand,
   scoreCandidate,
   solveSmartLayout,
+  unitDemands,
   type PanelDemand,
   type SmartLayoutCandidate,
   type SmartLayoutInput,
@@ -231,6 +234,72 @@ describe('solved column weights', () => {
     const widths = ['a', 'b', 'c'].map((id) => oneRow.frames.get(id)!.width);
     expect(widths[0]).toBeCloseTo(widths[1]!, 6);
     expect(widths[1]).toBeCloseTo(widths[2]!, 6);
+  });
+});
+
+describe('size multipliers', () => {
+  it('scales comfort demand into a genuinely bigger frame, the same as asking for more room directly', () => {
+    /*
+     * Three panels min 20 mm each on the same 183 mm page as "divides the page
+     * in the ratio of what the panels asked for" above — usable 169, minimums
+     * 60, surplus 109. Panel b's `sizeMultiplier` (2.0, the maximum) doubles
+     * its comfortWidthMm from 50 to 100 — the identical want that test reaches
+     * by declaring 100 directly — so the two must land on the same widths:
+     *
+     *   hunger   = 30 / 80 / 30       = 140
+     *   widths   = 20 + 109*30/140    = 43.357  (a, c)
+     *              20 + 109*80/140    = 82.286  (b)
+     */
+    const result = solveSmartLayout(
+      input([demand('a'), demand('b'), demand('c')], {
+        sizeMultipliers: new Map([['b', MAX_SIZE_MULTIPLIER]]),
+      }),
+    );
+    const oneRow = withShape(result, '3');
+    expect(oneRow).toBeDefined();
+    expect(oneRow!.frames.get('a')!.width).toBeCloseTo(43.357, 3);
+    expect(oneRow!.frames.get('b')!.width).toBeCloseTo(82.286, 3);
+    expect(oneRow!.frames.get('c')!.width).toBeCloseTo(43.357, 3);
+  });
+
+  it('is byte-identical to a solve with no multiplier at all when the map is absent or empty', () => {
+    const demands = [demand('a'), demand('b'), demand('c')];
+    const withEmptyMap = solveSmartLayout(input(demands, { sizeMultipliers: new Map() }));
+    const withoutMap = solveSmartLayout(input(demands));
+    expect(withShape(withEmptyMap, '3')!.frames.get('a')).toEqual(
+      withShape(withoutMap, '3')!.frames.get('a'),
+    );
+  });
+
+  it('clamps to [MIN_SIZE_MULTIPLIER, MAX_SIZE_MULTIPLIER] and never touches the wall', () => {
+    const doc = {
+      nodes: {
+        p: { id: 'p', type: 'panel', parentId: null, frame: { x: 0, y: 0, width: 10, height: 10 } },
+      },
+    } as unknown as FigureDocument;
+    const units = [
+      {
+        id: 'p' as NodeId,
+        kind: 'panel' as const,
+        frame: { x: 0, y: 0, width: 10, height: 10 },
+        panelIds: ['p' as NodeId],
+      },
+    ];
+    const base = demand('p', { minWidthMm: 20, comfortWidthMm: 22, comfortHeightMm: 40 });
+
+    // A multiplier past the ceiling behaves exactly like the ceiling itself.
+    const wayOver = unitDemands(doc, units, [base], new Map([['p', 10]]))[0]!;
+    const atMax = unitDemands(doc, units, [base], new Map([['p', MAX_SIZE_MULTIPLIER]]))[0]!;
+    expect(wayOver.comfortWidthMm).toBeCloseTo(atMax.comfortWidthMm, 6);
+
+    // And one past the floor behaves like the floor.
+    const wayUnder = unitDemands(doc, units, [base], new Map([['p', 0.01]]))[0]!;
+    const atMin = unitDemands(doc, units, [base], new Map([['p', MIN_SIZE_MULTIPLIER]]))[0]!;
+    expect(wayUnder.comfortWidthMm).toBeCloseTo(atMin.comfortWidthMm, 6);
+
+    // The wall itself — minWidthMm — is never scaled, whatever the multiplier.
+    expect(wayUnder.minWidthMm).toBe(20);
+    expect(atMax.minWidthMm).toBe(20);
   });
 });
 

@@ -24,6 +24,7 @@ import {
   type ExportFormat,
 } from './api.js';
 import { useAssets, type AssetStore } from './assets.js';
+import { httpLayoutAssistant, type LayoutAssistant } from './aiLayoutAssistant.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
 import { openAuthorisedPath } from './desktopFiles.js';
@@ -134,9 +135,20 @@ export interface AppProps {
   /** Injectable so the native-picker/fallback choice is testable — see
    *  `projectFiles.ts`. Defaults to the real browser implementation. */
   fileSystem?: ProjectFileSystem;
+  /**
+   * Injectable for the same reason `fileSystem` is — see `aiLayoutAssistant.ts`.
+   * Unlike `fileSystem` there is only one real backend on both platforms
+   * (the desktop-vs-browser split lives inside `api.ts`'s own `base()`), so
+   * the interface exists purely for testability, not a genuine production
+   * choice.
+   */
+  layoutAssistant?: LayoutAssistant;
 }
 
-export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
+export function App({
+  fileSystem = browserProjectFileSystem,
+  layoutAssistant = httpLayoutAssistant(),
+}: AppProps = {}) {
   const api = useDocument(blankDocument);
   useUndoShortcuts(api);
 
@@ -1026,6 +1038,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         <SidePanel
           api={api}
           theme={theme}
+          layoutAssistant={layoutAssistant}
           selectedIds={selectedIds}
           onSelectionChange={selectNodes}
           onError={setError}

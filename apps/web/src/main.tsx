@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
+import { httpLayoutAssistant } from './aiLayoutAssistant.js';
 import { desktopProjectFileSystem } from './desktopFiles.js';
 import { browserProjectFileSystem } from './projectFiles.js';
 import { isDesktop } from './shell.js';
@@ -13,8 +14,14 @@ if (!container) throw new Error('Missing #root element');
 // keeps the shell out of the app.
 const fileSystem = isDesktop() ? desktopProjectFileSystem : browserProjectFileSystem;
 
+// No desktop-vs-browser split here — `api.ts`'s own `base()` already picks
+// the right service URL on either platform. Wired explicitly anyway, so this
+// file stays the one place every injected dependency the app depends on is
+// visible in one look.
+const layoutAssistant = httpLayoutAssistant();
+
 createRoot(container).render(
   <StrictMode>
-    <App fileSystem={fileSystem} />
+    <App fileSystem={fileSystem} layoutAssistant={layoutAssistant} />
   </StrictMode>,
 );

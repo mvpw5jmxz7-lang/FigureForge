@@ -127,6 +127,77 @@ export async function runUmap(request: UmapRequest): Promise<UmapResult> {
   return (await response.json()) as UmapResult;
 }
 
+/**
+ * A panel as the AI layout assistant is told about it — metadata only, never
+ * pixel data or the dataset's own values. See `aiLayoutAssistant.ts`, which
+ * builds this from the document and is the only caller of the two functions
+ * below.
+ */
+export interface AiPanelSummary {
+  panelId: string;
+  letter: string;
+  plotType?: string;
+  axisTitles?: string[];
+  datasetName?: string;
+  captionText?: string;
+}
+
+export interface SuggestPanelGroupingRequest {
+  panels: AiPanelSummary[];
+}
+
+export interface AiGroupSuggestion {
+  panelIds: string[];
+  rationale: string;
+}
+
+export interface SuggestPanelGroupingResult {
+  groups: AiGroupSuggestion[];
+}
+
+export async function suggestPanelGrouping(
+  request: SuggestPanelGroupingRequest,
+): Promise<SuggestPanelGroupingResult> {
+  const response = await fetch(`${base()}/layout/suggest-grouping`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as SuggestPanelGroupingResult;
+}
+
+export interface InterpretLayoutInstructionRequest {
+  instruction: string;
+  panels: AiPanelSummary[];
+}
+
+/**
+ * A closed shape, not free text — only the fields `kind` names are ever
+ * populated. See `aiLayoutAssistant.ts`'s `LayoutInstruction`, which turns
+ * this wire shape into a real discriminated union and re-validates every id
+ * against the panels the request actually sent.
+ */
+export interface LayoutInstructionResult {
+  kind: 'group' | 'resize' | 'unsupported';
+  reason: string;
+  panelIds?: string[] | null;
+  panelId?: string | null;
+  direction?: 'bigger' | 'smaller' | null;
+}
+
+export async function interpretLayoutInstruction(
+  request: InterpretLayoutInstructionRequest,
+): Promise<LayoutInstructionResult> {
+  const response = await fetch(`${base()}/layout/interpret`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as LayoutInstructionResult;
+}
+
 export interface VolcanoTestRequest {
   rowLabels: string[];
   values: (number | null)[][];

@@ -5,6 +5,15 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+    environment:
+      # The AI layout assistant's backend. Defaults to the deterministic,
+      # network-free stub — no key, no cost, no external call — so `make up`
+      # needs neither variable set. `anthropic` opts into a real, billed
+      # call and needs ANTHROPIC_API_KEY; see
+      # services/api/figureforge/llm_anthropic.py for what is and is not
+      # done for that path yet.
+      AI_LAYOUT_ASSISTANT_BACKEND: ${AI_LAYOUT_ASSISTANT_BACKEND:-stub}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - ./services/api:/app:z
     ports:

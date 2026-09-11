@@ -17,10 +17,13 @@ export cannot drift from what the author saw on screen.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Literal, TypeVar
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +32,13 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .export.renderer import ExportRequest, render, shutdown_browser
 from .images.decode import DecodeError, TooLargeError, decode
+from .layout_assistant import (
+    LlmClient,
+    PanelSummary,
+    interpret_instruction,
+    suggest_grouping,
+)
+from .llm_stub import StubLlmClient
 from .pca import compute_pca
 from .sam_volcano import compute_sam_volcano, compute_sam_volcano_one_sample
 from .stats.methods import methods_sentence, software_versions
@@ -402,6 +412,164 @@ async def umap(request: UmapRequest) -> UmapResponse:
         droppedSamples=outcome.droppedSamples,
         warnings=outcome.warnings,
         nNeighborsUsed=outcome.nNeighborsUsed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AI layout assistant
+#
+# `layout_assistant.py` never talks to a model directly — it takes an
+# `LlmClient` and validates whatever comes back before returning it, so a
+# malformed or hallucinated reply can never reach the document model. Which
+# client it gets is decided here, by `AI_LAYOUT_ASSISTANT_BACKEND`
+# (`stub` by default; `anthropic` opts into a real, billed call — see
+# `llm_anthropic.py`). Nothing above `_llm_client` needs to know which one it
+# is talking to, and the default requires no key and makes no network call.
+# ---------------------------------------------------------------------------
+
+# Same reasoning as MAX_PCA_SAMPLES/MAX_UMAP_SAMPLES: a defensive dimension
+# cap on how many panels' worth of text is ever sent, not a performance tune.
+MAX_LAYOUT_PANELS = 60
+
+
+def _llm_client() -> LlmClient:
+    backend = os.getenv("AI_LAYOUT_ASSISTANT_BACKEND", "stub")
+    if backend == "stub":
+        return StubLlmClient()
+    if backend == "anthropic":
+        # Imported here, not at module load, so a stub-backed deployment is
+        # unaffected by whether the `anthropic` package or its key are
+        # present at all.
+        from .llm_anthropic import AnthropicLlmClient
+
+        return AnthropicLlmClient()
+    raise HTTPException(
+        status_code=503, detail=f"Unknown AI_LAYOUT_ASSISTANT_BACKEND '{backend}'."
+    )
+
+
+# `LlmClient.complete` is a synchronous call — trivial for the stub, but for
+# `AnthropicLlmClient` a real, possibly slow network request. Calling it
+# directly from an `async def` endpoint would block the event loop for every
+# other request the whole time it ran. `asyncio.to_thread` moves it off the
+# loop, `asyncio.wait_for` gives it a wall-clock bound, and the semaphore
+# caps how many run at once — the identical shape (bound concurrency, bound
+# time) `export/renderer.py` already uses around Chromium, applied here
+# because `suggest_grouping`/`interpret_instruction` are synchronous
+# functions regardless of which backend answers them. Harmless overhead for
+# the stub, and what makes `AnthropicLlmClient` safe to select without this
+# module needing to know which backend is active.
+_LAYOUT_ASSISTANT_SLOTS = asyncio.Semaphore(2)
+LAYOUT_ASSISTANT_TIMEOUT_S = 60
+
+_T = TypeVar("_T")
+
+
+async def _run_llm_task(fn: Callable[..., _T], *args: object) -> _T:
+    async with _LAYOUT_ASSISTANT_SLOTS:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fn, *args), timeout=LAYOUT_ASSISTANT_TIMEOUT_S
+        )
+
+
+class PanelSummaryIn(BaseModel):
+    panelId: str
+    letter: str
+    plotType: str | None = None
+    axisTitles: list[str] = []
+    datasetName: str | None = None
+    captionText: str | None = None
+
+
+def _panel_summaries(panels: list[PanelSummaryIn]) -> list[PanelSummary]:
+    return [
+        PanelSummary(
+            panel_id=p.panelId,
+            letter=p.letter,
+            plot_type=p.plotType,
+            axis_titles=p.axisTitles,
+            dataset_name=p.datasetName,
+            caption_text=p.captionText,
+        )
+        for p in panels
+    ]
+
+
+class SuggestGroupingRequest(BaseModel):
+    panels: list[PanelSummaryIn] = Field(min_length=1, max_length=MAX_LAYOUT_PANELS)
+
+
+class GroupSuggestionOut(BaseModel):
+    panelIds: list[str]
+    rationale: str
+
+
+class SuggestGroupingResponse(BaseModel):
+    groups: list[GroupSuggestionOut]
+
+
+@app.post("/layout/suggest-grouping", response_model=SuggestGroupingResponse)
+async def layout_suggest_grouping(request: SuggestGroupingRequest) -> SuggestGroupingResponse:
+    try:
+        outcome = await _run_llm_task(
+            suggest_grouping, _panel_summaries(request.panels), _llm_client()
+        )
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("AI layout grouping suggestion failed")
+        raise HTTPException(
+            status_code=500, detail=f"AI layout grouping suggestion failed: {error}"
+        ) from error
+
+    return SuggestGroupingResponse(
+        groups=[
+            GroupSuggestionOut(panelIds=g.panel_ids, rationale=g.rationale)
+            for g in outcome.groups
+        ]
+    )
+
+
+class InterpretInstructionRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=500)
+    panels: list[PanelSummaryIn] = Field(min_length=1, max_length=MAX_LAYOUT_PANELS)
+
+
+class LayoutInstructionOut(BaseModel):
+    kind: Literal["group", "resize", "unsupported"]
+    reason: str
+    panelIds: list[str] | None = None
+    panelId: str | None = None
+    direction: Literal["bigger", "smaller"] | None = None
+
+
+@app.post("/layout/interpret", response_model=LayoutInstructionOut)
+async def layout_interpret(request: InterpretInstructionRequest) -> LayoutInstructionOut:
+    try:
+        outcome = await _run_llm_task(
+            interpret_instruction,
+            request.instruction,
+            _panel_summaries(request.panels),
+            _llm_client(),
+        )
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("AI layout instruction interpretation failed")
+        raise HTTPException(
+            status_code=500, detail=f"AI layout instruction interpretation failed: {error}"
+        ) from error
+
+    return LayoutInstructionOut(
+        kind=outcome.kind,
+        reason=outcome.reason,
+        panelIds=outcome.panel_ids,
+        panelId=outcome.panel_id,
+        direction=outcome.direction,
     )
 
 

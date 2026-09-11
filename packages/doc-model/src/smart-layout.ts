@@ -15,6 +15,14 @@
  * Every one of them is an existing, already-schema'd field, so this adds
  * nothing to the document format.
  *
+ * A fifth, optional lever — `SmartLayoutOptions.sizeMultipliers` — scales one
+ * unit's comfort demand up or down before it reaches the search. It exists for
+ * a caller (the AI layout assistant) that wants to say "give this panel more
+ * room" without inventing millimetres itself: the multiplier only ever adjusts
+ * how hungry a unit is, and the same deterministic search, `shareOut` and
+ * scoring decide what that buys it. Absent, every existing solve is
+ * byte-identical.
+ *
  * Deterministic and pure. Nothing here reads the DOM, calls a service or
  * consults a random source: the same document must produce the same candidates
  * in the same order every time, or the preview would not describe what Apply
@@ -143,6 +151,15 @@ export interface SmartLayoutOptions {
   marginMm: number;
   gutterMm: number;
   labelGutterMm: number;
+  /**
+   * Per-unit comfort-demand scale, keyed by unit id (a panel id, or a group's
+   * own id for a unit that is a group). Clamped to `[MIN_SIZE_MULTIPLIER,
+   * MAX_SIZE_MULTIPLIER]` wherever it is read, never trusted raw — an
+   * unclamped caller could otherwise force every other panel to its floor or
+   * blow up the search. Absent or missing an entry reads as `1`, today's
+   * behaviour exactly.
+   */
+  sizeMultipliers?: ReadonlyMap<NodeId, number>;
 }
 
 export interface SmartLayoutInput {
@@ -280,6 +297,15 @@ export const OFFERED_CANDIDATES = 8;
 
 /** Smallest picture worth drawing at all, regardless of its pixel count. */
 export const IMAGE_LEGIBILITY_MM = 15;
+
+/**
+ * The range `sizeMultipliers` is clamped to. A caller asking for "much bigger"
+ * cannot double a demand more than once, and cannot ask for less than half —
+ * either extreme would either starve every other unit or make the multiplier
+ * itself the reason nothing fits, rather than the panel's real content.
+ */
+export const MIN_SIZE_MULTIPLIER = 0.5;
+export const MAX_SIZE_MULTIPLIER = 2.0;
 
 /**
  * The dpi at which `checkImageResolution` escalates a warning to an error.
@@ -486,15 +512,34 @@ export interface UnitDemand extends Omit<PanelDemand, 'panelId'> {
  * group already resized by `s` both `G` and `wᵢ` carry the `s` and it cancels.
  * That is what keeps `rescoreCandidate` reporting the same numbers the solve
  * did, which is the property four document clones were spent on in round 35.
+ *
+ * `sizeMultipliers` scales `comfortWidthMm`/`comfortHeightMm` together, after
+ * every other rule above has already produced them, and only for the unit its
+ * key names — never `minWidthMm`/`minHeightMm`, so a multiplier can never let
+ * a panel be sized below what it needs to draw at all. Scaling both dimensions
+ * by the same factor is safe for either kind of unit `arrangement.ts` sees:
+ * `columnWantHeight` derives an aspect-locked unit's height demand from its
+ * *width* alone (`heightForWidth`), so a scaled `comfortHeightMm` is simply
+ * unread there, while a free-shape unit (an ordinary plot) reads both
+ * independently, and scaling them together is exactly "make this panel about
+ * this much bigger" rather than distorting its ratio.
  */
 export function unitDemands(
   doc: FigureDocument,
   units: readonly LayoutUnit[],
   panelDemands: readonly PanelDemand[],
+  sizeMultipliers?: ReadonlyMap<NodeId, number>,
 ): UnitDemand[] {
   const byPanel = new Map(panelDemands.map((d) => [d.panelId, d]));
+  const multiplierFor = (unitId: NodeId): number => {
+    const raw = sizeMultipliers?.get(unitId);
+    return raw === undefined
+      ? 1
+      : clamp(raw, MIN_SIZE_MULTIPLIER, MAX_SIZE_MULTIPLIER);
+  };
 
   return units.map((unit) => {
+    const mult = multiplierFor(unit.id);
     const own = byPanel.get(unit.id);
     if (unit.kind === 'panel' && own) {
       const { panelId: _panelId, ...rest } = own;
@@ -502,6 +547,8 @@ export function unitDemands(
         ...rest,
         unitId: unit.id,
         panelIds: unit.panelIds,
+        comfortWidthMm: rest.comfortWidthMm * mult,
+        comfortHeightMm: rest.comfortHeightMm * mult,
         shape:
           own.aspectFromContent && own.aspect
             ? {
@@ -549,8 +596,8 @@ export function unitDemands(
       kind: 'other',
       minWidthMm: ratio((d) => d.minWidthMm, (f) => f.width, gw),
       minHeightMm: ratio((d) => d.minHeightMm, (f) => f.height, gh),
-      comfortWidthMm: ratio((d) => d.comfortWidthMm, (f) => f.width, gw),
-      comfortHeightMm: ratio((d) => d.comfortHeightMm, (f) => f.height, gh),
+      comfortWidthMm: ratio((d) => d.comfortWidthMm, (f) => f.width, gw) * mult,
+      comfortHeightMm: ratio((d) => d.comfortHeightMm, (f) => f.height, gh) * mult,
       // A group has no `aspectLock` field to write, and writing one onto a
       // member the solver never sized individually would be a fabricated
       // number — exactly what round 41 removed. Its shape constraint is decided
@@ -872,7 +919,9 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
   for (const scale of scales) {
     // Demands must arrive in the unit order the slots are indexed by, so a
     // mismatched measurement can never be silently paired with the wrong unit.
-    const byId = new Map(unitDemands(doc, units, scale.demands).map((d) => [d.unitId, d]));
+    const byId = new Map(
+      unitDemands(doc, units, scale.demands, options.sizeMultipliers).map((d) => [d.unitId, d]),
+    );
     const demands = order.map((id) => byId.get(id)).filter((d): d is UnitDemand => d !== undefined);
     if (demands.length !== n) continue;
 
@@ -1098,8 +1147,11 @@ export function solveSmartLayout(input: SmartLayoutInput): SmartLayoutResult {
     .sort((a, b) => bestPerShape.indexOf(a) - bestPerShape.indexOf(b));
 
   const baseScale = scales[0]!;
+  // Scored under the same multipliers as every candidate above it, or a
+  // candidate's reported improvement would be measured against a baseline
+  // whose comfort targets meant something different.
   const baselineByUnit = new Map(
-    unitDemands(doc, units, baseScale.demands).map((d) => [d.unitId, d]),
+    unitDemands(doc, units, baseScale.demands, options.sizeMultipliers).map((d) => [d.unitId, d]),
   );
   const baselineDemands = order
     .map((id) => baselineByUnit.get(id))

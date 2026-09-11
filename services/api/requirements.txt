@@ -22,6 +22,13 @@ playwright==1.49.1
 pillow==11.1.0
 pypdf==5.1.0
 
+# Only imported when AI_LAYOUT_ASSISTANT_BACKEND=anthropic selects
+# llm_anthropic.AnthropicLlmClient (see main.py) — the default backend is the
+# deterministic, network-free stub in llm_stub.py. Verified with
+# `pip install --dry-run anthropic` against this image before pinning: full
+# wheel resolution, nothing to compile, ~1.7 MB total.
+anthropic==1.5.0
+
 pytest==8.3.4
 httpx==0.28.1
 ruff==0.8.4

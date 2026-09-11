@@ -80,8 +80,9 @@ export function solveForDocument(
   doc: FigureDocument,
   theme: Theme,
   exportDpi: number,
+  sizeMultipliers?: ReadonlyMap<NodeId, number>,
 ): SmartLayoutResult {
-  const basics = layoutBasics(doc, theme);
+  const basics = { ...layoutBasics(doc, theme), sizeMultipliers };
   const demandOptions: PanelDemandOptions = {
     ...basics,
     exportDpi,
@@ -135,7 +136,7 @@ export function solveForDocument(
     return rescoreCandidate(
       candidate,
       frames,
-      unitDemands(applied, appliedUnits, [...demands.values()]),
+      unitDemands(applied, appliedUnits, [...demands.values()], sizeMultipliers),
       basics,
     );
   });

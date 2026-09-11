@@ -32,6 +32,8 @@ up: build ## Create the pod and start web (:5173) + api (:8000)
 	-podman rm -f figureforge-web figureforge-api 2>/dev/null
 	podman run -d --pod $(POD) --name figureforge-api \
 		-v $(ROOT)/services/api:/app:z \
+		-e AI_LAYOUT_ASSISTANT_BACKEND=$${AI_LAYOUT_ASSISTANT_BACKEND:-stub} \
+		-e ANTHROPIC_API_KEY=$${ANTHROPIC_API_KEY:-} \
 		figureforge-api
 	podman run -d --pod $(POD) --name figureforge-web \
 		$(MOUNT) -v figureforge-node-modules:/app/node_modules \
