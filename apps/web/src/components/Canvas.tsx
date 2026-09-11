@@ -683,6 +683,12 @@ export function Canvas({
         // a gap on its own account, which is exactly why this recomputes the
         // heading's own frame and touches nothing else.
         reflowGroupLabels(draft);
+        // A significance bracket is absolute-space too, positioned from the
+        // plot's own current frame — nothing else moves it with a dragged
+        // panel. The resize branch above already calls this; a plain move
+        // left it out, which is exactly what stranded a panel's brackets
+        // behind it on drag.
+        reflowBrackets(draft, theme);
       });
     },
     [api, doc, theme, zoom],
