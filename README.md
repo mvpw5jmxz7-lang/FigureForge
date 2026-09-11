@@ -189,6 +189,8 @@ limit rather than pretending the palette is universally safe.
 
 ## Status
 
+*Version 0.1.0, September 2026 (rounds 1–55 of reported-bug/feature work merged).*
+
 Phases 1–7 of the plan are complete and verified end to end: import → plot →
 statistics → annotation → layout → export, with a 100/100 readiness score and a
 PDF confirmed to carry selectable text at exact journal dimensions. Phase 8
@@ -209,7 +211,7 @@ with crop, calibrated scale bars and annotations; all five export formats,
 now streamed rather than built whole in memory; a quality checker that
 repairs what it honestly can and explains what it cannot; canvas selection,
 copy/paste, rotation and draw-order control; data import with format
-detection and live preview across fourteen
+detection and live preview across fifteen
 table layouts.
 
 **Phase 8 (Electron shell), stages 1–3 done:** the app runs inside a real

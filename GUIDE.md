@@ -1,5 +1,9 @@
 # FigureForge — A Guide for Everyone
 
+**Version 0.1.0 · September 2026.** FigureForge has no version number on screen
+yet; if you're not sure how current your copy is, run `git log -1` in the
+project folder and compare the date.
+
 This guide is written for people trying FigureForge who don't write code. If
 you've never used a "terminal" before, that's fine — every command you need to
 type is written out exactly, and there's a short glossary at the end for any
@@ -100,7 +104,8 @@ between "this is broken" and "this hasn't been built yet."
 - **Multi-panel layout.** Add several panels, click one button, and they're
   arranged evenly on a journal-sized page with matching gutters and correctly
   lettered — with more than twenty layout templates to choose from, including
-  vertical stacks.
+  vertical stacks, plus a **Smart layout** that measures each panel and sizes
+  them against one another (small charts small, detailed micrographs large).
 - **A "publication readiness" score** out of 100, with a plain-English list of
   anything that would likely get the figure sent back (text too small, images
   too low-resolution, colours that don't work for colour-blind readers, and so
@@ -110,8 +115,14 @@ between "this is broken" and "this hasn't been built yet."
 - **Export** to PDF, EPS, SVG (all fully editable, with real selectable text —
   not a picture of text), or PNG/TIFF at print resolution.
 - **Save and reopen your work** as a project file (see the glossary entry for
-  `.ffg` files) — use the **Save**, **Save as…** and **Open project** buttons
-  at the bottom of the window.
+  `.ffg` files) — use the **Save**, **Save as…**, **Open project** and **Close
+  file** buttons at the bottom of the window. On a browser that supports it, a
+  **Set folder…** button there fixes which folder the Open and Save dialogs
+  start in.
+- **A built-in sample figure** — **Open sample** loads an eight-panel worked
+  example (statistics, brackets, group titles and a microscopy montage
+  already in place) to explore. It
+  can't be overwritten; **Save as…** turns it into a figure of your own.
 
 ### Not finished yet — please don't report these as bugs
 
@@ -121,10 +132,10 @@ between "this is broken" and "this hasn't been built yet."
 - **No AI layout assistant.** Layout is manual (with auto-layout, templates
   and smart guides to help) — there's no "arrange this for me automatically
   using AI" feature.
-- **No autosave.** FigureForge doesn't save your work in the background —
-  closing the browser tab without clicking **Save** first loses whatever
-  hasn't been saved. Save often, especially before trying something you might
-  want to undo.
+- **No autosave.** FigureForge doesn't save your work in the background. If
+  you have unsaved changes the browser will warn you before you close the tab,
+  but there's no recovery after a crash or a forced quit. Save often,
+  especially before trying something you might want to undo.
 - **A couple of smaller, documented trade-offs**, mentioned here so they don't
   come as a surprise: a 16-bit scientific image (common for microscopy)
   displays and exports at 8-bit for the figure itself, though your original
@@ -419,10 +430,16 @@ Open `http://localhost:5173` in your browser.
 ### What "it's working" looks like
 
 You should see a page titled **FigureForge**, with a toolbar across the top, a
-journal-page-shaped figure in the middle already showing two example charts
-side by side (labelled **a** and **b**), and a panel on the right with tabs
-marked **Data / Stats / Quality / Layers**. (The exact colours depend on
-whether your computer is set to light or dark mode — either is normal.)
+blank journal-page-shaped sheet in the middle (with a line of text on it
+pointing you at the Data tab to add your first panel), and a panel on the
+right with tabs marked **Data / Inspector / Stats / Layout / Quality /
+Layers**. (The exact colours depend on whether your computer is set to light
+or dark mode — either is normal.)
+
+FigureForge opens with an empty figure — there's no sample data loaded. The
+next section walks you through building one from scratch; if you'd rather
+look at a finished example first, click **Open sample** at the bottom of the
+window.
 
 ### If the browser shows nothing or an error
 
@@ -440,50 +457,74 @@ whether your computer is set to light or dark mode — either is normal.)
 
 ## 7. Using the app for the first time
 
-This walks through the whole loop once, using the sample data that's already
-loaded when you open the app, so you can see everything working before trying
-your own data.
+**Want to see a finished figure first?** Click **Open sample** at the bottom
+of the window. It loads an eight-panel worked example — a bar chart, a
+scatter with a fitted line, a timecourse, a violin plot, a survival curve, a
+volcano plot, a heatmap and a microscopy montage — with statistics run,
+significance brackets placed, and group titles and captions added, so you can
+see the range of features in use. It
+**can't be saved over**: your first **Save** opens a fresh "save as" dialog,
+so anything you change becomes a new figure of your own rather than
+overwriting the example.
 
-1. **Look at the two charts already on screen.** Panel **a** shows cell
-   viability dropping across four doses of a compound; panel **b** shows gene
-   expression across three genotypes. This is sample data, loaded
-   automatically so there's always something to look at.
+The walkthrough below builds a figure from scratch instead. The app opens
+empty, so the first step is to bring in some data — you can use the small
+example table below and then swap in your own once you've seen the loop work.
 
-2. **Click the Stats tab** on the right.
+1. **Click the Data tab** on the right, and paste this into the big paste box
+   (select it here, copy, and paste — it's tab- and comma-tolerant):
 
-3. Under **Analysis**, the **Plot** dropdown should already show **Viability**
-   (panel a). Leave the **Test** as **Welch's t-test** (the default), and
-   click **Run and annotate**.
+   ```
+   Group,Value
+   Vehicle,10.1
+   Vehicle,9.7
+   Vehicle,10.4
+   Vehicle,9.9
+   Drug A,6.2
+   Drug A,5.8
+   Drug A,6.5
+   Drug A,6.0
+   Drug B,3.1
+   Drug B,2.7
+   Drug B,3.4
+   Drug B,2.9
+   ```
 
-4. Watch the figure — a set of horizontal brackets with asterisks (`****`)
-   appears above the bars, stacked so they don't overlap. Panel a has four
-   groups (Vehicle and three doses), so the tool compares every pair of them
-   automatically — six comparisons in total — which is why several brackets
-   appear at once rather than just one. Underneath, in the Stats panel,
-   you'll see a table with the actual p-value, an *adjusted* p-value (the one
-   that accounts for testing six comparisons at once — using it instead of
-   the raw p-value is what stops a figure from overstating how significant a
-   result is), an effect size for each pair, and (click "Methods sentence" to
-   expand it) a ready-to-paste sentence describing exactly what test was run
-   and how it was corrected.
+   A preview appears showing how it will be read (three groups of four
+   replicates). Give the dataset a name if you like, then click **Import as
+   new panel**. A bar-and-dot chart appears on the page, labelled **a**.
 
-   If you'd rather see a single, simpler bracket, switch the **Plot**
-   dropdown to **Expression** (panel b) instead — it only has three groups,
-   so it produces three comparisons rather than six.
+2. **Click the Stats tab.**
+
+3. Under **Analysis**, the **Panel** dropdown should already show your new
+   panel. Leave the **Test** as **Welch's t-test** (the default), and click
+   **Run and annotate**.
+
+4. Watch the figure — horizontal brackets with asterisks appear above the
+   bars, stacked so they don't overlap. Three groups means three pairwise
+   comparisons, so three brackets. Underneath, in the Stats panel, you'll see
+   a table with the actual p-value, an *adjusted* p-value (the one that
+   accounts for testing several comparisons at once — using it instead of the
+   raw p-value is what stops a figure from overstating a result), an effect
+   size for each pair, and (expand **Methods sentence**) a ready-to-paste
+   sentence describing exactly what test was run and how it was corrected.
 
 5. **Click the Quality tab.** You'll see a **Publication readiness** score out
    of 100, and a list of anything the tool thinks a journal would flag —
-   ideally short or empty for the sample figure.
+   ideally short for this small figure.
 
 6. **Click PDF** in the bottom-right corner of the window. A file downloads —
    open it. The text in it is real, selectable text (try clicking and
    dragging over a label), and the page is sized exactly to the journal
    column width shown in the toolbar.
 
-7. **Try your own data.** Click the **Data** tab, paste a table copied from a
-   spreadsheet (or drag a `.csv` file onto the paste box), check the preview
-   looks right, and click **Import as new panel**. Then click **Auto layout**
-   in the toolbar to tidy everything up.
+7. **Now try your own data.** Back in the **Data** tab, paste a table copied
+   from a spreadsheet (or drag a `.csv` file onto the paste box), check the
+   preview looks right, and click **Import as new panel** (for a proteomics
+   intensity matrix the button reads **Import data table** instead, since
+   that's an input to a test rather than a figure). Add a few panels, then
+   click **Auto layout** in the toolbar — or open the **Layout** tab and try
+   **Smart layout**, which sizes each panel against the others.
 
 That's the whole loop: data in, chart and statistics, a quality check,
 export. Once you're comfortable with it, the more specialised chart types —

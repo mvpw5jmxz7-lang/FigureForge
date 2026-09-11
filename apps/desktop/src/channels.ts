@@ -101,6 +101,7 @@ export const PROJECT_SAVED = 'figureforge:project-saved';
 export type MenuCommand =
   | { type: 'new' }
   | { type: 'open' }
+  | { type: 'open-sample' }
   | { type: 'open-path'; path: string }
   | { type: 'save' }
   | { type: 'save-as' }

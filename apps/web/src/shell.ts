@@ -70,6 +70,7 @@ export interface DesktopShellState {
 export type DesktopMenuCommand =
   | { type: 'new' }
   | { type: 'open' }
+  | { type: 'open-sample' }
   | { type: 'open-path'; path: string }
   | { type: 'save' }
   | { type: 'save-as' }

@@ -66,6 +66,12 @@ describe('buildMenuTemplate', () => {
       }
     });
 
+    it('offers Open Sample Figure with no accelerator', () => {
+      const item = find(buildMenuTemplate(context()), 'Open Sample Figure');
+      expect(item?.command).toEqual({ type: 'open-sample' });
+      expect(item?.accelerator).toBeUndefined();
+    });
+
     it('registers keys nothing in the page binds', () => {
       const template = buildMenuTemplate(context());
       for (const label of ['New Figure', 'Open…', 'Save', 'Save As…', 'Zoom In']) {

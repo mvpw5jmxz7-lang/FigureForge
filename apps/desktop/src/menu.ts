@@ -100,6 +100,9 @@ function fileMenu(context: MenuContext): MenuTemplateItem {
     submenu: [
       { label: 'New Figure', accelerator: 'CmdOrCtrl+N', command: { type: 'new' } },
       { label: 'Open…', accelerator: 'CmdOrCtrl+O', command: { type: 'open' } },
+      // No accelerator: nothing in the page owns one, and this is a rare,
+      // deliberate action rather than a hot path.
+      { label: 'Open Sample Figure', command: { type: 'open-sample' } },
       openRecent,
       separator,
       { label: 'Save', accelerator: 'CmdOrCtrl+S', command: { type: 'save' } },

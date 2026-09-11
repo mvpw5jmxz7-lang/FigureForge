@@ -256,6 +256,40 @@ internal anchor link against its heading, and every shell command shown
 against `Makefile`/`compose.yaml`. There is no automated test over prose, so
 this is not part of the TypeScript/Python counts below.
 
+**Verified after round 56 (a built-in eight-panel sample figure, on an opt-in
+"Open sample" button that cannot be saved over — extended with a confocal
+montage, whole-figure headings, and a fix to a real letter-lift defect the
+montage's headings exposed):** 1301 TypeScript tests (1290 + 11: ten in
+`sampleDocument.test.ts` — the eight panels and plot/image kinds, four
+analyses with stored results, zero error-severity findings at score ≥ 90, the
+3 + 3 significance brackets with none on the survival panel, the omics/
+top-row/left-column/tile-caption group titles with the scale bar below its
+picture, panel b's hollow red markers and callout, eight volcano labels, a
+save/reload round-trip carrying real asset bytes, and the 183 mm SVG — plus
+one in `menu.test.ts` for the File-menu item), 248 Python tests unchanged
+(the four statistics results were fetched from `/analyze` once and pinned in
+`sampleStats.ts`; nothing here touches `services/api`), `tsc --build --force`
+and `eslint .` clean, 46-check acceptance run unaffected (it builds its own
+document). **No `SCHEMA_VERSION` bump** — the sample writes only fields that
+exist today, and `fromSample` is session state like `saveTarget`. **Measured,
+not assumed, and a real defect found and fixed along the way** —
+`reflowPanelLetterLifts` lifts a panel's letter clear of any `edge: 'top'`
+heading it is nominally a member of by testing only `heading.y < panel.y`,
+never whether the heading is *adjacent* to that panel; a heading whose
+members span disjoint rows (first tried: one heading over the whole figure)
+lifted every lower panel's letter almost to the top of the page — read
+directly off the rendered `<text>` y-coordinates before the fix, not assumed
+from reading the code. The sample now builds its two whole-figure headings,
+and its omics heading, from the panels' **real post-layout adjacency**
+(same-row/same-column banding, the tolerance `readingOrder` itself uses)
+rather than a semantic pairing decided before layout ran — which is what a
+future heading should do too, rather than reopening the same defect.
+`checkFigure` on the result returns score **95** (a `colour-blind-conflict`
+warning from the new red markers echoing the volcano's red, an
+`uneven-gutters` warning from the montage's headings, both pre-existing
+finding classes) with **no error-severity finding**; the sample loads with
+`saveTarget` null, so a plain Save is already a Save As. See "Round 56" below.
+
 **Verified after round 55 (linear regression / correlation on every series of
 a multi-series line plot):** 1290 TypeScript tests (1287 + 3: a render test
 that N per-series analyses draw N `trend-line` paths each in its series
@@ -8278,6 +8312,186 @@ at all. The user reported it; the fix is a **series picker**.
 all fits); the picker resets to "all ticked" when you switch panels and back;
 overlapping confidence bands on a busy multi-line plot are the author's to
 turn off, the same stance survival CIs take.
+
+---
+
+### Round 56 — a built-in sample figure, on an opt-in button
+
+Requested: a five-panel sample showcasing different graph styles with
+statistics and labels, reachable from an "Open sample" button, and **not**
+saveable over — only Save As turns it into the user's own figure. Taken to
+**seven** panels at the user's request so it covers every graph family.
+
+**This restores what round 51 deleted (`createSampleDocument`, round 35), with
+one change that answers round 51's actual objection.** Round 51 removed the
+demo because it *greeted* every new user with a figure they had never touched —
+its volcano/scale-bar/violin panels could raise Quality findings and pop the
+export dialog on an untouched page. As an explicit button it greets nobody:
+the app still opens blank (`blankDocument()`), and the sample is reached only
+by choosing it.
+
+- **`apps/web/src/sampleDocument.ts`** — `sampleDocument(): FigureDocument`,
+  synchronous and DOM-free, the same restriction `createSampleDocument` was
+  written under. Seven panels: **a** bar+dot (one-way ANOVA, Holm → three
+  brackets), **b** scatter (Pearson → a fitted line + confidence band — forced
+  `plotType: 'scatter'` since `simple-xy` defaults to `line`), **c** line
+  timecourse (two series, a legend), **d** violin n = 12 (Kruskal-Wallis, Holm
+  → three brackets), **e** Kaplan-Meier (log-rank → a methods sentence, no
+  bracket — continuous x), **f** volcano with a real pinned Perseus SAM/S0
+  boundary, **g** heatmap. Plus automatic letters `a`-`g`, a **group title**
+  spanning f + g, and a **text callout + leader arrow** on b. Layout is plain
+  `applyAutoLayout` (an even grid — Smart layout in the Layout tab is what
+  improves on it), then `reserveLayoutSpace` / `reflowGroupLabels` /
+  `relabelPanels`, then `measurePlot` + `addBracket` per significant comparison
+  + `reflowBrackets`.
+- **No API at open time.** The four `StatResult`s ship pinned in
+  **`apps/web/src/sampleStats.ts`**; the SAM volcano data is the round-19
+  `sampleVolcanoTest.ts`, restored verbatim from git. Brackets draw from the
+  stored `BracketNode` fields, never recomputed on load — the figure renders
+  and scores **96** (the same as the old demo; one cross-panel
+  `colour-blind-conflict` warning, which is itself a teaching moment) with no
+  error-severity finding, so the export confirmation never opens.
+- **The `inputHash` is not pinned** — `sampleDocument.ts` recomputes it from
+  the dataset via `analysisInputHash` with exactly the four arguments the Stats
+  tab and `checkStaleAnalyses` use (`series.map(s => s.values)`, `xForHash`,
+  `eventsForHash`), so a pinned result can never read as stale. A test asserts
+  `checkFigure` finds zero `severity: 'error'` findings, which is the guard on
+  that.
+- **`scripts/build-sample-stats.ts`** regenerates the pinned results: it
+  imports the CSV constants from `sampleDocument.ts` (so they cannot drift),
+  calls the live `/analyze` once per panel, and prints a `sampleStats.ts` body.
+  Not in CI — the committed constants are the source of truth.
+- **"Cannot be saved over" is emergent, not a new flag.** `openSample` loads
+  the document with `saveTarget` null, and `save()` already falls through to
+  `saveAs()` (a fresh picker) with no target — the same as `openProject`. No
+  `readOnly` field on `FigureDocument`, no schema change. A session-only
+  `fromSample` boolean (like `saveTarget`, never in the document) drives one
+  visible status-bar note — *"Sample figure — use 'Save as…' to keep your
+  changes"* — and clears the instant the figure is written to a real file, a
+  fresh one is opened, or a blank one is started.
+- **`openSample` guards unsaved work** through the existing discard-changes
+  dialog (`CloseConfirmDialog`, its copy generalised from "before closing?" to
+  "first?"), reusing a new `afterDiscardGuard` ref so the same dialog serves
+  Close file and Open sample. `openViaPicker` still does not guard — unchanged,
+  and noted.
+- **Desktop menu** — `MenuCommand`/`DesktopMenuCommand` gain `open-sample`
+  (additive, not serialised); a File-menu **Open Sample Figure** item with no
+  accelerator, after "Open…".
+
+#### Extended in the same round — an eighth panel, whole-figure headings, and a real letter-lift defect
+
+Requested next: an eighth panel — a confocal micrograph montage with a scale
+bar below the picture and a caption above each tile — plus headings spanning
+the top and one side of the whole figure, panel b's callout moved clear of
+the data with larger hollow red markers, five to ten point labels on the
+volcano, and confirmation that Smart layout has actually been applied.
+
+- **Panel h — the montage.** `sampleMicrographs.ts` (three ~15 KB JPEGs,
+  round-35's confocal-style samples) is restored verbatim from git, the same
+  way `sampleVolcanoTest.ts` already was. `sampleDocument()` registers the
+  three `Asset` records and builds the montage with `addPanelWithImages`; a
+  per-tile caption is an `addGroupLabel` with a **single** member each
+  (`MAP1LC3B`, `LAMP1`, `Merge` — the same "a caption is a group of one"
+  mechanism rounds 31–33 built); the scale bar sits on the last tile with
+  `labelPosition: 'below'` **and** `updateNode(..., { placement: 'below' })`
+  — the field `addScaleBar`'s options do not expose, since round 38 added it
+  to the node directly. **Asset bytes are seeded by `App.tsx`, not this
+  module** — `seedSampleAssets(assets.store)` runs in `openSampleNow` right
+  after `api.store.reset(sampleDocument())`, mirroring exactly how the old
+  `createSampleDocument` needed the launch path and `newFigure` both to seed
+  it. The round-trip test now builds a real asset map (decoding the same
+  base64 the store does) rather than an empty one, so it proves the montage
+  survives a save, not just the document around it.
+- **Panel b — restyled and moved.** `pointSizeMm: 2.6`, `pointFill: 'none'`,
+  `pointStroke: { color: '#d62728', … }` — large hollow red circles, the
+  round-53 fill/outline controls exercised together. The callout is now built
+  **after** Smart layout runs, reading panel b's *final* frame rather than a
+  frame from the pre-solve layout pass: it sits in the empty upper-left of the
+  scatter (a positive-slope cloud leaves that corner clear) with a short arrow
+  down into the point cluster, instead of wherever the seed frame happened to
+  put it.
+- **Panel f — eight labelled features**, `volcanoLabels`, a spread of the
+  most significant up- and down-regulated proteins from the pinned SAM rows;
+  the placement engine draws seven of the eight (round 7's own "drop rather
+  than overprint" rule — a real, disclosed `point-label-missing` finding, not
+  a defect).
+- **Smart layout is genuinely applied**, not merely available: `sampleDocument()`
+  calls `solveForDocument`/`applyCandidate` (`apps/web/src/smartLayout.ts`,
+  the same functions the Layout tab's "Smart layout…" button calls) rather
+  than stopping at `applyAutoLayout`'s even grid. Driven live, the panel
+  frames are visibly unlike sizes — the heatmap and the montage each claim a
+  full-width row, the top three panels split unevenly by content demand —
+  which an even 3×3 `applyAutoLayout` grid could never produce.
+- **A real defect, found by measuring rather than assumed from reading.** The
+  first attempt gave the top and left headings `memberIds` spanning **all
+  eight panels**, reasoning that the union of every panel's frame is exactly
+  the whole-figure bounding box `groupLabelFrame` needs. It renders the
+  heading in the right place — but `reflowPanelLetterLifts`
+  (`packages/doc-model/src/operations.ts`, round 37) decides whether a
+  top-edge heading lifts a given panel's letter with `gap = owner.frame.y -
+  label.frame.y; if (gap <= 1e-6) continue` — true for *every* panel below
+  the heading's top edge, not only the ones it is actually drawn above. Read
+  directly off the rendered panel-label frames before changing anything: a
+  heading at `y = 5.4` with every panel as a member gave panels three and
+  four rows down a `liftMm` of **77** and **145**, placing their letters
+  within a millimetre of the page's own top edge — confirmed with a
+  screenshot showing two full rows of letters stacked at the top of the page,
+  not one. This is a genuine pre-existing gap in a mechanism that had only
+  ever been exercised with headings over a *contiguous* row or column (a
+  montage row, two side-by-side panels); nothing before this round had built
+  one spanning panels several rows apart.
+  - **The fix is in how the sample builds its headings, not in
+    `reflowPanelLetterLifts` itself** — the function's contract ("a heading
+    lifts a letter only when it is really drawn above the panel's own top
+    edge") is sound for the case it was built for, and narrowing its test to
+    "immediately adjacent" is a separate, larger change with its own risk to
+    every existing heading. The sample now derives its top and left headings
+    from the panels' **real post-layout adjacency** — same-row banding for
+    the top heading (the identical 5 mm tolerance `readingOrder` and
+    `rowBands` already use), same-column banding for the left one — computed
+    only after `applyCandidate` has run, never a semantic pairing (all eight
+    panels, or "f and g are the omics ones") decided before the arrangement
+    is known. The pre-existing f+g "Compound X proteomics" heading gets the
+    same treatment: paired only if the solver actually put them in the same
+    row, else captioned onto the heatmap alone — a heading over a coherent
+    row is honest either way, where a heading whose width spans the page but
+    is visually unconnected to one of its two named members is not.
+  - **Left-edge headings were never at risk**: `reflowPanelLetterLifts`
+    explicitly skips `label.edge !== 'top'`, so a heading spanning the whole
+    left column needed no such fix — confirmed by the same measurement, not
+    assumed from the asymmetry in the code.
+
+Driven live (screenshotted, not just measured): panel letters `a`–`h` sit
+directly above their own panels with no duplicates; "Compound X remodels the
+HEK293 proteome" spans row 1 only; "Compound X proteomics" sits directly
+above the heatmap; a rotated "Biological triplicate" runs down the left
+margin; the montage shows three tiles each captioned above it and a
+`20 µm` scale bar below the rightmost; panel b's red hollow circles and its
+callout arrow read cleanly against the fitted line and band with no overlap;
+panel f names seven proteins. `checkFigure` score **95** (a
+`colour-blind-conflict` between the new red markers and the volcano's own
+red, and an `uneven-gutters` warning from the montage's reserved captions —
+both pre-existing, disclosure-only finding classes), no error-severity
+finding, no export confirmation.
+
+**Verified:** 1301 TypeScript tests (1290 + 11 in `sampleDocument.test.ts` —
+eight panels and plot/image kinds, four analyses each with a result and a
+valid `plotId`, zero error-severity findings at score ≥ 90, 3 + 3 brackets
+and none on survival, the four group-label titles including the two derived
+from final adjacency, the tile captions and the below-picture scale bar,
+panel b's marker/fill/outline/size and its callout, eight volcano labels, a
+save/reload round-trip that now carries real decoded asset bytes, and the
+183 mm SVG — plus one in `menu.test.ts`), 248 Python tests unchanged (nothing
+here touches `services/api`; the four results were fetched once and pinned),
+`tsc --build --force` and `eslint .` clean, `make acceptance` unaffected (it
+builds its own document; the sample module is not imported there), and
+**36 + 9 live-browser checks in each of light and dark** (the Open-sample
+walkthrough, and the discard/save-guard flow, both re-run after the montage
+and heading changes). **No `SCHEMA_VERSION` bump** — every field the sample
+writes exists today, and `fromSample` is session-only. **Regenerating the
+pinned stats:** `podman exec figureforge-web npx vite-node
+scripts/build-sample-stats.ts` reproduces the four `StatResult` blobs in
+`sampleStats.ts` exactly.
 
 ---
 

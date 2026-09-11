@@ -34,6 +34,8 @@ import {
   type WorkingDirectory,
 } from './projectFiles.js';
 import { blankDocument } from './blankDocument.js';
+import { sampleDocument } from './sampleDocument.js';
+import { seedSampleAssets } from './sampleMicrographs.js';
 import { isDesktop, type DesktopMenuCommand } from './shell.js';
 import { useDocument, useUndoShortcuts } from './useDocument.js';
 import './styles.css';
@@ -257,8 +259,28 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   /** Format waiting on the author's confirmation; null means nothing pending. */
   const [pendingExport, setPendingExport] = useState<ExportFormat | null>(null);
 
-  /** Whether the Close File confirmation is up. */
+  /**
+   * The built-in sample figure is loaded, and has not yet been saved to a file
+   * of the user's own.
+   *
+   * Session state like `saveTarget`, never in the document — there is no
+   * `readOnly` flag on `FigureDocument` and this needs none: the sample loads
+   * with `saveTarget` null, so a plain Save is already a Save As and cannot
+   * overwrite anything. This only drives the visible "use Save as…" note, and
+   * clears the moment the figure is written to a real file (or a fresh one is
+   * opened / started).
+   */
+  const [fromSample, setFromSample] = useState(false);
+
+  /** Whether the discard-changes confirmation is up (Close file, or Open sample). */
   const [closeConfirm, setCloseConfirm] = useState(false);
+  /**
+   * What to run once the discard-changes guard is resolved — blanking the page
+   * for Close file, loading the sample for Open sample. A ref for the same
+   * reason `closeAfterSave` is: `SaveDialog` completes a whole round trip later
+   * and must run the intent that was current when Save was pressed.
+   */
+  const afterDiscardGuard = useRef<() => void>(() => {});
   /**
    * A close waiting on a save that has not finished.
    *
@@ -487,6 +509,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
       downloadArchive(name);
       setSaveName(null);
       setDirty(false);
+      setFromSample(false);
       showSaveConfirmation(`Downloaded "${name}${ARCHIVE_EXTENSION}" to your browser's downloads folder.`);
     },
     [renameIfNeeded, downloadArchive, showSaveConfirmation],
@@ -515,6 +538,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         }
         setSaveTarget(target);
         setDirty(false);
+        setFromSample(false);
         // A path when the platform has one, the name when it does not — the
         // browser genuinely cannot say where the file went, and claiming
         // otherwise would be worse than the vaguer sentence.
@@ -599,6 +623,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         setSaveTarget(target);
         // A freshly opened project is by definition what is on disk.
         setDirty(false);
+        setFromSample(false);
         setError(result.warnings.length > 0 ? result.warnings.join(' ') : null);
 
         await rehydrateProxies(result.document, assets.store, setError);
@@ -658,12 +683,51 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
     setMeasuredPx(null);
     setPendingExport(null);
     setSaveName(null);
+    setFromSample(false);
     closeAfterSave.current = false;
     if (saveConfirmationTimeout.current !== null) clearTimeout(saveConfirmationTimeout.current);
     setSaveConfirmation(null);
   }, [api.store, assets.store]);
 
   const newFigure = resetToBlank;
+
+  /**
+   * Load the built-in sample figure (`sampleDocument()`).
+   *
+   * The same reset `resetToBlank` does, then the sample document and the
+   * `fromSample` flag. It deliberately does **not** set a `saveTarget`, so the
+   * user's first Save opens a fresh picker — the sample cannot be written over,
+   * only copied into a figure of their own with Save as….
+   */
+  const openSampleNow = useCallback(() => {
+    assets.store.clear();
+    dataOriginals.current = new Map();
+    api.store.reset(sampleDocument());
+    // The montage panel's three micrographs — bytes live outside the document.
+    seedSampleAssets(assets.store);
+    setSelectedIds([]);
+    setSaveTarget(null);
+    setDirty(false);
+    setFromSample(true);
+    setError(null);
+    setCropNodeId(null);
+    setMeasureNodeId(null);
+    setMeasuredPx(null);
+    setPendingExport(null);
+    setSaveName(null);
+    closeAfterSave.current = false;
+    if (saveConfirmationTimeout.current !== null) clearTimeout(saveConfirmationTimeout.current);
+    setSaveConfirmation(null);
+  }, [api.store, assets.store]);
+
+  const openSample = useCallback(() => {
+    if (dirty) {
+      afterDiscardGuard.current = openSampleNow;
+      setCloseConfirm(true);
+    } else {
+      openSampleNow();
+    }
+  }, [dirty, openSampleNow]);
 
   /**
    * Put the figure down: blank the page, offering to save first if it matters.
@@ -675,8 +739,12 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
    * the same one-shot `PROJECT_SAVED` channel a concurrent quit is waiting on.
    */
   const requestClose = useCallback(() => {
-    if (dirty) setCloseConfirm(true);
-    else resetToBlank();
+    if (dirty) {
+      afterDiscardGuard.current = resetToBlank;
+      setCloseConfirm(true);
+    } else {
+      resetToBlank();
+    }
   }, [dirty, resetToBlank]);
 
   /*
@@ -800,6 +868,9 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
         case 'open':
           void openViaPicker();
           break;
+        case 'open-sample':
+          openSample();
+          break;
         case 'open-path':
           void (async () => {
             try {
@@ -858,6 +929,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
   }, [
     newFigure,
     openViaPicker,
+    openSample,
     applyLoaded,
     save,
     saveAs,
@@ -1087,11 +1159,21 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
           {/* Outside the ternary so both branches get it exactly once. */}
           <button
             disabled={busy !== null}
+            onClick={openSample}
+            title="Load a worked example — seven panels with statistics and annotations"
+          >
+            Open sample
+          </button>
+          <button
+            disabled={busy !== null}
             onClick={requestClose}
             title="Put this figure down and start a blank page"
           >
             Close file
           </button>
+          {fromSample && !saveTarget && (
+            <span className="muted">Sample figure — use “Save as…” to keep your changes</span>
+          )}
         </div>
 
         <div className="group">
@@ -1146,7 +1228,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
                * that boolean would silently cancel itself on every Firefox
                * and Safari, so the intent travels in the ref instead.
                */
-              if (closeAfterSave.current) resetToBlank();
+              if (closeAfterSave.current) afterDiscardGuard.current();
             }}
             onCancel={() => {
               setSaveName(null);
@@ -1171,7 +1253,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
                 // itself; leave the flag alone for it.
                 if (ok) {
                   closeAfterSave.current = false;
-                  resetToBlank();
+                  afterDiscardGuard.current();
                 } else if (fileSystem.supported()) {
                   closeAfterSave.current = false;
                 }
@@ -1179,7 +1261,7 @@ export function App({ fileSystem = browserProjectFileSystem }: AppProps = {}) {
             }}
             onDiscard={() => {
               setCloseConfirm(false);
-              resetToBlank();
+              afterDiscardGuard.current();
             }}
             onCancel={() => setCloseConfirm(false)}
           />
@@ -1266,8 +1348,8 @@ function CloseConfirmDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="save-dialog right" role="dialog" aria-label="Close file">
-      <strong>Save changes to &ldquo;{title}&rdquo; before closing?</strong>
+    <div className="save-dialog right" role="dialog" aria-label="Save changes">
+      <strong>Save changes to &ldquo;{title}&rdquo; first?</strong>
       <span className="hint">Your changes will be lost if you don&rsquo;t save them.</span>
       <div className="group">
         <button className="primary" onClick={onSave}>
