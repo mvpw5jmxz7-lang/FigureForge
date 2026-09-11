@@ -6680,6 +6680,38 @@ describe('group labels', () => {
     }
   });
 
+  it('moves a pushed-and-shrunk panel’s letter by exactly as far as the panel itself, not twice as far', () => {
+    /*
+     * Reported from real use: applying a smart-layout candidate on the
+     * sample figure left panel g's and h's letters far above their own
+     * panels, sometimes over a different row entirely. Traced to
+     * `pushPanelsFrom`'s shrink loop (the branch the test above already
+     * exercises): it called `resizePanel`, which already carries a panel's
+     * label along by its own dx/dy shim, and then *also* called
+     * `syncPanelLabelsFromSnapshot` for the identical move — every panel
+     * the shrink pass touches had its letter shifted twice for one resize.
+     * `panels[1]` here names no heading of its own, so this isolates the
+     * defect from any legitimate heading-lift: its letter should simply
+     * track its panel through the push-then-shrink pass, at whatever offset
+     * it already had, not accumulate a second, spurious shift.
+     */
+    const { doc, newId, panels } = twoLetteredPanels(90, 5);
+    const bottom = panels[1]!;
+    const offsetBefore = letterOf(doc, bottom.id).frame.y - doc.nodes[bottom.id]!.frame.y;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, { memberIds: [panels[0]!.id], edge: 'top', title: 'Group' });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    // The panel really did move (the test above already proves the shrink
+    // engaged), so a passing offset check here is not vacuous.
+    expect(after.nodes[bottom.id]!.frame.y).not.toBeCloseTo(doc.nodes[bottom.id]!.frame.y, 3);
+    const offsetAfter = letterOf(after, bottom.id).frame.y - after.nodes[bottom.id]!.frame.y;
+    expect(offsetAfter).toBeCloseTo(offsetBefore, 6);
+  });
+
   it('lifts no letter for a caption that sits inside its panel', () => {
     // A montage cell caption is drawn in the panel's own grid gutter, below the
     // panel's top edge, so the panel letter is not in its way.
@@ -6704,6 +6736,109 @@ describe('group labels', () => {
     });
     expect(letterOf(after, panel.id).liftMm).toBeUndefined();
     expect(letterOf(after, panel.id).frame.y).toBeCloseTo(letterOf(doc, panel.id).frame.y, 6);
+  });
+
+  it('lifts only the letters in the heading’s own row, not every member wherever it ended up', () => {
+    /*
+     * Reported from real use of the AI layout helper, but reproducible with
+     * no AI involved at all: apply *any* smart-layout candidate other than
+     * the one a heading's members were originally positioned for, and a
+     * top-edge heading spanning members that end up in different rows used
+     * to lift *every* member toward its own band — including one nowhere
+     * near it, whose letter went as far as off the top of the page. The
+     * heading's own frame is the union of its members' boxes, so "below the
+     * heading's own y" was true for a member in a lower row too; only a
+     * member sharing the heading's own topmost row is one it is actually
+     * drawn above.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 150,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      addPanel(draft, newId, { frame: { x: 2, y: 20, width: 60, height: 40 }, name: 'Row 1 left' });
+      addPanel(draft, newId, { frame: { x: 70, y: 20, width: 60, height: 40 }, name: 'Row 1 right' });
+      addPanel(draft, newId, { frame: { x: 2, y: 100, width: 60, height: 40 }, name: 'Row 2' });
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+    const rowOneLeft = panels.find((p) => p.frame.y === 20 && p.frame.x === 2)!;
+    const rowOneRight = panels.find((p) => p.frame.y === 20 && p.frame.x === 70)!;
+    const rowTwo = panels.find((p) => p.frame.y === 100)!;
+
+    const after = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, {
+        memberIds: [rowOneLeft.id, rowOneRight.id, rowTwo.id],
+        edge: 'top',
+        title: 'Heading',
+      });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+
+    // The row the heading is genuinely drawn above is lifted...
+    expect(letterOf(after, rowOneLeft.id).liftMm).toBeGreaterThan(0);
+    expect(letterOf(after, rowOneRight.id).liftMm).toBeGreaterThan(0);
+    // ...and the member in a different row is not touched at all: its letter
+    // stays exactly where its own panel puts it, not lifted toward a band
+    // drawn nowhere near it.
+    expect(letterOf(after, rowTwo.id).liftMm).toBeUndefined();
+    expect(letterOf(after, rowTwo.id).frame.y).toBeCloseTo(letterOf(doc, rowTwo.id).frame.y, 6);
+  });
+
+  it('still lifts a heading’s member once it has been grouped with an unrelated panel', () => {
+    /*
+     * The specific case real use hit: grouping two panels a heading already
+     * names. `topLevelOwner` resolves a grouped panel's *top-level ancestor*
+     * to the group, not the panel — so a member that is now inside a group
+     * was silently dropped from `reflowPanelLetterLifts`'s consideration
+     * entirely, which read as the panel's letter no longer being lifted
+     * (`liftMm` reset to zero) even though the heading is still genuinely
+     * drawn above it. `panelOwning` resolves through any grouping to the
+     * panel itself.
+     */
+    const newId = createIdFactory();
+    const base = createDocument({
+      widthMm: 183,
+      heightMm: 150,
+      idFactory: newId,
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const doc = editDocument(base, (draft) => {
+      addPanel(draft, newId, { frame: { x: 2, y: 20, width: 60, height: 40 }, name: 'Headed' });
+      addPanel(draft, newId, { frame: { x: 70, y: 20, width: 60, height: 40 }, name: 'Also headed' });
+      addPanel(draft, newId, { frame: { x: 2, y: 100, width: 60, height: 40 }, name: 'Elsewhere' });
+      relabelPanels(draft, newId, { fontSizePt: 8, offsetMm: 4 });
+    });
+    const panels = Object.values(doc.nodes).filter((n) => n.type === 'panel');
+    const headed = panels.find((p) => p.frame.x === 2 && p.frame.y === 20)!;
+    const alsoHeaded = panels.find((p) => p.frame.x === 70)!;
+    const elsewhere = panels.find((p) => p.frame.y === 100)!;
+
+    const withHeading = editDocument(doc, (draft) => {
+      addGroupLabel(draft, newId, {
+        memberIds: [headed.id, alsoHeaded.id],
+        edge: 'top',
+        title: 'Heading',
+      });
+      reserveSpaceForGroupLabels(draft);
+      reflowGroupLabels(draft);
+    });
+    const liftBeforeGrouping = letterOf(withHeading, headed.id).liftMm;
+    expect(liftBeforeGrouping).toBeGreaterThan(0);
+
+    // Group the headed panel with the unrelated one elsewhere on the page —
+    // `addGroup` does not move either panel (round 21's own guarantee), so
+    // the heading's real geometric relationship to `headed` is unchanged.
+    const grouped = editDocument(withHeading, (draft) => {
+      addGroup(draft, newId, [headed.id, elsewhere.id]);
+      reflowGroupLabels(draft);
+    });
+
+    expect(letterOf(grouped, headed.id).liftMm).toBeCloseTo(liftBeforeGrouping!, 6);
   });
 
   it('knows which headings could be overlaid on their content', () => {

@@ -42,6 +42,7 @@ import {
   GROUP_LABEL_OVERLAY_PAD_MM,
   panelLetterHeightMm,
 } from './grouplabel.js';
+import { panelOwning } from './ownership.js';
 import { ptToMm } from './units.js';
 import {
   absoluteFrame,
@@ -2777,13 +2778,50 @@ function reflowPanelLetterLifts(draft: FigureDocument): void {
     if (label.type !== 'group-label') continue;
     if (label.edge !== 'top' || label.placement === 'overlay') continue;
 
-    for (const memberId of label.memberIds) {
-      const ownerId = topLevelOwner(draft.nodes, memberId);
-      if (!ownerId) continue;
-      const owner = draft.nodes[ownerId];
-      if (owner?.type !== 'panel') continue;
+    /*
+     * `panelOwning`, not `topLevelOwner`: a member that is itself a panel
+     * already grouped with another — reachable the moment two headed panels
+     * are grouped, which is exactly what exposed this — has a top-level
+     * ancestor that is the *group*, not the panel, so `topLevelOwner` silently
+     * dropped it from consideration here (while still correctly finding it
+     * for the panel-frame-relative purposes `reserveSpaceForGroupLabels`
+     * uses `topLevelOwner` for, which is why that call site is untouched).
+     * `panelOwning` walks through any grouping to the panel itself, whatever
+     * it is nested inside; `absoluteFrame`, not `.frame`, is what then reads
+     * correctly for it, since a grouped panel's own `.frame` is relative to
+     * the group rather than the page.
+     */
+    const owners = label.memberIds
+      .map((memberId) => {
+        const owner = panelOwning(draft.nodes, memberId);
+        if (!owner) return null;
+        const frame = absoluteFrame(draft.nodes, owner.id);
+        return frame ? { ownerId: owner.id, frame } : null;
+      })
+      .filter((entry): entry is { ownerId: NodeId; frame: RectMm } => entry !== null);
+    if (owners.length === 0) continue;
 
-      const gap = owner.frame.y - label.frame.y;
+    /*
+     * A heading captions the row it is actually drawn above, not every
+     * member wherever a *later* layout pass happened to leave it. A
+     * heading's own frame is the union of its members' boxes
+     * (`groupLabelFrame`), so once a rearrangement scatters those members
+     * across rows the naive "below the heading's own y" test — everything
+     * this function used to check — fires for members the heading's drawn
+     * band never actually reaches. `rowBands` (the identical row-adjacency
+     * tolerance `readingOrder`/`layoutUnits` already share) picks out only
+     * the members sharing the heading's own topmost row; a member a
+     * rearrangement moved to a different row keeps its letter exactly where
+     * its own panel is, instead of being lifted toward a band drawn nowhere
+     * near it. The general-purpose form of the fix round 56 made narrowly
+     * for `sampleDocument.ts`'s own construction — that round deliberately
+     * left this function's own test unchanged, "a separate, larger change";
+     * this is that change, done once here rather than by re-deriving every
+     * heading's membership on every apply.
+     */
+    const [headingRow] = rowBands(owners, (entry) => entry.frame.y);
+    for (const { ownerId, frame } of headingRow ?? []) {
+      const gap = frame.y - label.frame.y;
       if (gap <= 1e-6) continue;
       liftByPanel.set(ownerId, Math.max(liftByPanel.get(ownerId) ?? 0, gap));
     }
@@ -2998,9 +3036,13 @@ export function reserveSpaceForScaleBars(draft: FigureDocument): void {
      */
     const height = Math.max(MIN_TILE_MM, owner.frame.height - shortfall);
     if (height >= owner.frame.height - EPS) continue;
-    const snapshot = snapshotPanelAbsolutePositions(draft.nodes, owner.id);
+    // `resizePanel` already carries the label along by its own dx/dy shim,
+    // correct here because `owner` is always the top-level panel
+    // `topLevelOwner` resolved above — a second, explicit
+    // `syncPanelLabelsFromSnapshot` pass would shift the label a second time
+    // for the same move. See `pushPanelsFrom`'s shrink loop for the case
+    // that actually happened this way and the same fix.
     resizePanel(draft, owner.id, { ...owner.frame, height });
-    syncPanelLabelsFromSnapshot(draft, snapshot);
   }
 
   // The bars themselves follow whatever just moved.
@@ -3119,9 +3161,21 @@ function pushPanelsFrom(
         y: panel.frame.y - shift,
         height: Math.max(MIN_TILE_MM, panel.frame.height - take),
       };
-      const before = snapshotPanelAbsolutePositions(draft.nodes, panel.id);
+      /*
+       * Reported from real use: a heading's row shrink moved a panel back up
+       * by `shift` and its letter up by *twice* `shift`, landing the letter
+       * well above — sometimes overlapping — the row above it. `resizePanel`
+       * already carries the label along by its own dx/dy shim, computed
+       * from `panel.frame` — correct here because this function moves only
+       * top-level panels, whose `.frame` already is page space (see this
+       * function's own doc comment). The `snapshotPanelAbsolutePositions`/
+       * `syncPanelLabelsFromSnapshot` pair a few lines up, in the push loop,
+       * needs to exist for the reason its own doc comment gives — it
+       * mutates `panel.frame` directly, bypassing `resizePanel` entirely —
+       * but calling it *again* here, after `resizePanel` has already moved
+       * the label once, moved it a second time for the same resize.
+       */
       resizePanel(draft, panel.id, next);
-      syncPanelLabelsFromSnapshot(draft, before);
     }
     shift += take;
   }
