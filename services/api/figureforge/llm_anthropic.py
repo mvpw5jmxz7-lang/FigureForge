@@ -6,10 +6,12 @@ model are actually settled. Behind the same `LlmClient.complete(prompt,
 schema) -> dict` seam `layout_assistant.py` calls against the stub, so
 nothing above this module needs to change when this backend is turned on.
 
-`ANTHROPIC_API_KEY` is read only inside `__init__`, and this module is
+`ANTHROPIC_API_KEY` is read only inside `__init__`, and only as a fallback —
+a caller (`main.py`'s `_llm_client`) may instead pass a key straight through,
+which is how a user's own in-app key reaches this class. This module is
 imported only from inside `main.py`'s backend selector — never at module
-load — so a deployment running the stub is entirely unaffected by the key's
-absence.
+load — so a deployment running the stub is entirely unaffected by either
+source's absence.
 
 Not exercised by this round's automated tests: doing so would need a real
 key and would cost real money on every CI run, which is exactly why this
@@ -39,13 +41,13 @@ import anthropic
 
 
 class AnthropicLlmClient:
-    def __init__(self, model: str = "claude-sonnet-5") -> None:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
+    def __init__(self, model: str = "claude-sonnet-5", api_key: str | None = None) -> None:
+        resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not resolved_key:
             raise RuntimeError(
                 "AI_LAYOUT_ASSISTANT_BACKEND=anthropic but ANTHROPIC_API_KEY is not set."
             )
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.Anthropic(api_key=resolved_key)
         self._model = model
 
     def complete(self, prompt: str, schema: dict) -> dict:

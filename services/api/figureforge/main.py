@@ -432,7 +432,16 @@ async def umap(request: UmapRequest) -> UmapResponse:
 MAX_LAYOUT_PANELS = 60
 
 
-def _llm_client() -> LlmClient:
+def _llm_client(client_supplied_key: str | None = None) -> LlmClient:
+    # A key pasted into the app by the user is unambiguous intent to use the
+    # real backend, regardless of how this server's own env var is set —
+    # bringing your own key should not also require the operator to have
+    # opted the server into the anthropic backend.
+    if client_supplied_key:
+        from .llm_anthropic import AnthropicLlmClient
+
+        return AnthropicLlmClient(api_key=client_supplied_key)
+
     backend = os.getenv("AI_LAYOUT_ASSISTANT_BACKEND", "stub")
     if backend == "stub":
         return StubLlmClient()
@@ -497,6 +506,7 @@ def _panel_summaries(panels: list[PanelSummaryIn]) -> list[PanelSummary]:
 
 class SuggestGroupingRequest(BaseModel):
     panels: list[PanelSummaryIn] = Field(min_length=1, max_length=MAX_LAYOUT_PANELS)
+    apiKey: str | None = None
 
 
 class GroupSuggestionOut(BaseModel):
@@ -512,7 +522,7 @@ class SuggestGroupingResponse(BaseModel):
 async def layout_suggest_grouping(request: SuggestGroupingRequest) -> SuggestGroupingResponse:
     try:
         outcome = await _run_llm_task(
-            suggest_grouping, _panel_summaries(request.panels), _llm_client()
+            suggest_grouping, _panel_summaries(request.panels), _llm_client(request.apiKey)
         )
     except HTTPException:
         raise
@@ -535,6 +545,7 @@ async def layout_suggest_grouping(request: SuggestGroupingRequest) -> SuggestGro
 class InterpretInstructionRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=500)
     panels: list[PanelSummaryIn] = Field(min_length=1, max_length=MAX_LAYOUT_PANELS)
+    apiKey: str | None = None
 
 
 class LayoutInstructionOut(BaseModel):
@@ -552,7 +563,7 @@ async def layout_interpret(request: InterpretInstructionRequest) -> LayoutInstru
             interpret_instruction,
             request.instruction,
             _panel_summaries(request.panels),
-            _llm_client(),
+            _llm_client(request.apiKey),
         )
     except HTTPException:
         raise
@@ -571,6 +582,40 @@ async def layout_interpret(request: InterpretInstructionRequest) -> LayoutInstru
         panelId=outcome.panel_id,
         direction=outcome.direction,
     )
+
+
+class TestApiKeyRequest(BaseModel):
+    apiKey: str = Field(min_length=1)
+
+
+def _probe_anthropic_key(api_key: str) -> None:
+    # A minimal, cheap call — not through AnthropicLlmClient.complete(),
+    # which expects a tool-use schema round trip a bare key check gets no
+    # benefit from.
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    client.messages.create(
+        model="claude-sonnet-5",
+        max_tokens=1,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+
+@app.post("/layout/test-key")
+async def layout_test_key(request: TestApiKeyRequest) -> dict:
+    import anthropic
+
+    try:
+        await _run_llm_task(_probe_anthropic_key, request.apiKey)
+    except anthropic.AuthenticationError as error:
+        raise HTTPException(
+            status_code=401, detail="That key was rejected by Anthropic."
+        ) from error
+    except Exception as error:  # noqa: BLE001 - surface the cause to the UI
+        logger.exception("API key test failed")
+        raise HTTPException(status_code=502, detail=f"Could not verify the key: {error}") from error
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

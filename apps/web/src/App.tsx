@@ -25,6 +25,7 @@ import {
 } from './api.js';
 import { useAssets, type AssetStore } from './assets.js';
 import { httpLayoutAssistant, type LayoutAssistant } from './aiLayoutAssistant.js';
+import { localStorageApiKeyStore, type ApiKeyStore } from './apiKeyStore.js';
 import { flattenCropsForExport } from './exportImages.js';
 import { usePointCloudRasters } from './pointRasters.js';
 import { openAuthorisedPath } from './desktopFiles.js';
@@ -143,11 +144,14 @@ export interface AppProps {
    * choice.
    */
   layoutAssistant?: LayoutAssistant;
+  /** Where a user's own Anthropic key is remembered. Defaults to `localStorage`. */
+  apiKeyStore?: ApiKeyStore;
 }
 
 export function App({
   fileSystem = browserProjectFileSystem,
   layoutAssistant = httpLayoutAssistant(),
+  apiKeyStore = localStorageApiKeyStore(),
 }: AppProps = {}) {
   const api = useDocument(blankDocument);
   useUndoShortcuts(api);
@@ -1039,6 +1043,7 @@ export function App({
           api={api}
           theme={theme}
           layoutAssistant={layoutAssistant}
+          apiKeyStore={apiKeyStore}
           selectedIds={selectedIds}
           onSelectionChange={selectNodes}
           onError={setError}

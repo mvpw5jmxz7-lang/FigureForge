@@ -212,7 +212,12 @@ now streamed rather than built whole in memory; a quality checker that
 repairs what it honestly can and explains what it cannot; canvas selection,
 copy/paste, rotation and draw-order control; data import with format
 detection and live preview across fifteen
-table layouts.
+table layouts; and an AI layout helper (narrative panel grouping plus
+natural-language group/resize instructions) that runs on a deterministic
+built-in fallback by default and against a real Anthropic backend when a
+user supplies their own API key through an in-app settings control — the key
+is stored client-side only and never touches the server's own configuration
+or a saved figure.
 
 **Phase 8 (Electron shell), stages 1–3 done:** the app runs inside a real
 Electron shell that supervises the Python service as a health-gated child
@@ -223,9 +228,8 @@ the shell itself produced; and the project archive streams to and from disk
 instead of being built whole in memory, on the browser as well as the
 desktop (measured: a 200 MB save's peak memory fell from 526 MB to 337 MB).
 **Not yet built:** stage 4 (packaging — electron-builder, a bundled
-interpreter, an installer, code signing) and phase 9 (the AI layout
-assistant). The desktop app currently only runs from a checkout
-(`make desktop`), not as a downloadable installer.
+interpreter, an installer, code signing). The desktop app currently only
+runs from a checkout (`make desktop`), not as a downloadable installer.
 
 Run `make acceptance` to see the whole web pipeline execute, or
 `make desktop-smoke` for the Electron shell.

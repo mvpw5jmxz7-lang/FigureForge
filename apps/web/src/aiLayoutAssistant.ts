@@ -56,11 +56,22 @@ export type LayoutInstruction =
   | { kind: 'resize'; panelId: NodeId; direction: 'bigger' | 'smaller'; reason: string }
   | { kind: 'unsupported'; reason: string };
 
+/**
+ * `apiKey` is optional on both methods and passed per call, not captured at
+ * construction: the key is mutable runtime state a user can add, change or
+ * remove while the app is open (see `apiKeyStore.ts`), so baking it into
+ * `httpLayoutAssistant()`'s own construction would go stale. Absent, the
+ * server's own configured backend (the stub by default) is used unchanged.
+ */
 export interface LayoutAssistant {
-  suggestGrouping(panels: readonly PanelSummary[]): Promise<GroupingSuggestion>;
+  suggestGrouping(
+    panels: readonly PanelSummary[],
+    apiKey?: string,
+  ): Promise<GroupingSuggestion>;
   interpretInstruction(
     instruction: string,
     panels: readonly PanelSummary[],
+    apiKey?: string,
   ): Promise<LayoutInstruction>;
 }
 
@@ -163,14 +174,18 @@ function fromWireInstruction(wire: LayoutInstructionResult): LayoutInstruction {
  */
 export function httpLayoutAssistant(): LayoutAssistant {
   return {
-    async suggestGrouping(panels) {
-      const result = await suggestPanelGroupingOverHttp({ panels: panels.map(toWirePanel) });
+    async suggestGrouping(panels, apiKey) {
+      const result = await suggestPanelGroupingOverHttp({
+        panels: panels.map(toWirePanel),
+        ...(apiKey ? { apiKey } : {}),
+      });
       return validateGroupingSuggestion(panels, { groups: result.groups });
     },
-    async interpretInstruction(instruction, panels) {
+    async interpretInstruction(instruction, panels, apiKey) {
       const result = await interpretLayoutInstructionOverHttp({
         instruction,
         panels: panels.map(toWirePanel),
+        ...(apiKey ? { apiKey } : {}),
       });
       return validateLayoutInstruction(panels, fromWireInstruction(result));
     },

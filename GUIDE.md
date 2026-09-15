@@ -39,9 +39,9 @@ real ones.
 
 The core pipeline — data in, chart, statistics, quality check, publication-
 ready export — is complete. A couple of things are still open (there's no
-downloadable installer yet, and there's no AI layout assistant); section 2
-below is honest about exactly what to expect, so you can tell the difference
-between "this is broken" and "this hasn't been built yet."
+downloadable installer yet); section 2 below is honest about exactly what to
+expect, so you can tell the difference between "this is broken" and "this
+hasn't been built yet."
 
 ---
 
@@ -123,15 +123,29 @@ between "this is broken" and "this hasn't been built yet."
   example (statistics, brackets, group titles and a microscopy montage
   already in place) to explore. It
   can't be overwritten; **Save as…** turns it into a figure of your own.
+- **An AI layout helper**, on the Smart Layout tab beside **Smart layout**
+  itself. Click **Suggest panel groups** to get a suggested grouping of
+  panels that narratively belong together (with a short reason for each), or
+  type a plain instruction like "give the heatmap more room" or "keep the
+  montage near panel c" and have it turned into a grouping or a size nudge
+  the layout search can act on — nothing changes until you approve a
+  suggestion. It never invents millimetres or moves a panel itself; the
+  actual arrangement is still the same measured, deterministic search Smart
+  layout always runs. By default this uses a small built-in fallback (simple
+  keyword matching) so the buttons work out of the box; for real AI-powered
+  suggestions, paste your own Anthropic API key into the box the tab shows
+  you — it walks you through getting one from Anthropic's own console,
+  step by step, including the billing setup a key needs before it works.
+  Your key is stored only in your browser (never on FigureForge's own
+  server, and never saved into a figure file) and is sent straight to
+  Anthropic only when you use the feature; **Test** confirms it works before
+  you rely on it, and **Remove** clears it at any time.
 
 ### Not finished yet — please don't report these as bugs
 
 - **A standalone desktop app.** Right now this only runs as a website you open
   in your browser (see below) — there's no downloadable, double-click-to-
   install application yet.
-- **No AI layout assistant.** Layout is manual (with auto-layout, templates
-  and smart guides to help) — there's no "arrange this for me automatically
-  using AI" feature.
 - **No autosave.** FigureForge doesn't save your work in the background. If
   you have unsaved changes the browser will warn you before you close the tab,
   but there's no recovery after a crash or a forced quit. Save often,

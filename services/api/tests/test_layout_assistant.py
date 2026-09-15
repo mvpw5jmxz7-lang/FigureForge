@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -302,6 +303,84 @@ class TestRoutes:
             json={"instruction": "x", "panels": [self._panel("p1", "a", "bar-dot", "D")]},
         )
         assert response.status_code == 503
+
+    def test_a_client_supplied_key_bypasses_the_stub_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An apiKey in the body must reach AnthropicLlmClient even when the
+        server's own AI_LAYOUT_ASSISTANT_BACKEND is left at 'stub' (the
+        default) — pasting a key is unambiguous intent, no operator opt-in
+        required. Mocked end to end; no real network call."""
+        seen_keys: list[str | None] = []
+
+        class FakeAnthropicClient:
+            def __init__(self, model: str = "claude-sonnet-5", api_key: str | None = None):
+                seen_keys.append(api_key)
+
+            def complete(self, prompt: str, schema: dict) -> dict:
+                return {"groups": []}
+
+        import figureforge.llm_anthropic as llm_anthropic_module
+
+        monkeypatch.setattr(llm_anthropic_module, "AnthropicLlmClient", FakeAnthropicClient)
+
+        response = client.post(
+            "/layout/suggest-grouping",
+            json={
+                "panels": [
+                    self._panel("p1", "a", "bar-dot", "Cohort 1"),
+                    self._panel("p2", "b", "heatmap", "Cohort 1"),
+                ],
+                "apiKey": "sk-ant-test-key",
+            },
+        )
+        assert response.status_code == 200
+        assert seen_keys == ["sk-ant-test-key"]
+
+
+class TestTestKeyRoute:
+    """POST /layout/test-key — mocked throughout, no real key or network."""
+
+    def test_a_working_key_reports_ok(self, monkeypatch: pytest.MonkeyPatch):
+        import figureforge.main as main_module
+
+        def fake_probe(api_key: str) -> None:
+            assert api_key == "sk-ant-good"
+
+        monkeypatch.setattr(main_module, "_probe_anthropic_key", fake_probe)
+        response = client.post("/layout/test-key", json={"apiKey": "sk-ant-good"})
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+
+    def test_an_authentication_error_is_reported_as_401(self, monkeypatch: pytest.MonkeyPatch):
+        import anthropic
+
+        import figureforge.main as main_module
+
+        def fake_probe(api_key: str) -> None:
+            raise anthropic.AuthenticationError(
+                "invalid x-api-key",
+                response=httpx.Response(401, request=httpx.Request("POST", "https://x")),
+                body=None,
+            )
+
+        monkeypatch.setattr(main_module, "_probe_anthropic_key", fake_probe)
+        response = client.post("/layout/test-key", json={"apiKey": "sk-ant-bad"})
+        assert response.status_code == 401
+
+    def test_any_other_failure_is_reported_as_502(self, monkeypatch: pytest.MonkeyPatch):
+        import figureforge.main as main_module
+
+        def fake_probe(api_key: str) -> None:
+            raise RuntimeError("network unreachable")
+
+        monkeypatch.setattr(main_module, "_probe_anthropic_key", fake_probe)
+        response = client.post("/layout/test-key", json={"apiKey": "sk-ant-x"})
+        assert response.status_code == 502
+
+    def test_a_blank_key_is_refused_with_422(self):
+        response = client.post("/layout/test-key", json={"apiKey": ""})
+        assert response.status_code == 422
 
 
 class TestRunLlmTask:

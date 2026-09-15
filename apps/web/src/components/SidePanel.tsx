@@ -1,6 +1,6 @@
 /** Right-hand inspector: data, statistics, quality and layers. */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   CONTINUOUS_X_PLOT_TYPES,
   DISTRIBUTION_PLOT_TYPES,
@@ -89,7 +89,8 @@ import {
   type QualityReport,
 } from '@figureforge/render';
 import type { Theme } from '@figureforge/theme';
-import { analyze, ApiError, runPca, runUmap, runVolcanoTest } from '../api.js';
+import { analyze, ApiError, runPca, runUmap, runVolcanoTest, testApiKey } from '../api.js';
+import type { ApiKeyStore } from '../apiKeyStore.js';
 import { ColorChip } from './ColorChip.js';
 import { DataGrid } from './DataGrid.js';
 import { InspectorTab } from './Inspector.js';
@@ -454,6 +455,7 @@ export interface SidePanelProps {
   api: DocumentApi;
   theme: Theme;
   layoutAssistant: LayoutAssistant;
+  apiKeyStore: ApiKeyStore;
   selectedIds: NodeId[];
   onSelectionChange: (ids: NodeId[]) => void;
   onError: (message: string | null) => void;
@@ -3174,6 +3176,7 @@ function SmartLayoutTab({
   exportDpi,
   onSelectionChange,
   layoutAssistant,
+  apiKeyStore,
   onError,
   setBusy,
 }: SidePanelProps) {
@@ -3233,6 +3236,65 @@ function SmartLayoutTab({
   const [instructionText, setInstructionText] = useState('');
   const [assistantBusy, setAssistantBusy] = useState<'grouping' | 'instruction' | null>(null);
 
+  // A user's own Anthropic key, if they have set one. Loaded once into local
+  // state and never re-read from the store after a mutation — Save/Remove
+  // update both together, matching the working-directory control's own
+  // load-once idiom (App.tsx). Null while nothing is stored.
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyTestBusy, setKeyTestBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void apiKeyStore.load().then((stored) => {
+      if (live) setApiKey(stored);
+    });
+    return () => {
+      live = false;
+    };
+  }, [apiKeyStore]);
+
+  const saveKey = (): void => {
+    const trimmed = keyDraft.trim();
+    if (!trimmed) return;
+    void apiKeyStore.save(trimmed);
+    setApiKey(trimmed);
+    setKeyDraft('');
+    setEditingKey(false);
+  };
+
+  const changeKey = (): void => {
+    setKeyDraft('');
+    setEditingKey(true);
+  };
+
+  const removeKey = (): void => {
+    void apiKeyStore.clear();
+    setApiKey(null);
+    setKeyDraft('');
+    setEditingKey(false);
+  };
+
+  const testKey = async (): Promise<void> => {
+    const trimmed = keyDraft.trim();
+    if (!trimmed) return;
+    setKeyTestBusy(true);
+    onError(null);
+    try {
+      await testApiKey(trimmed);
+      onError('That key works.');
+    } catch (error) {
+      onError(
+        error instanceof ApiError
+          ? `That key was rejected: ${error.message}`
+          : `Could not verify the key. (${String(error)})`,
+      );
+    } finally {
+      setKeyTestBusy(false);
+    }
+  };
+
   // The suggestion checklist is real structured state (it needs checkboxes),
   // but every status line — success, decline, or failure — goes through the
   // same shared `onError` channel PCA/UMAP/the volcano test already use:
@@ -3242,7 +3304,7 @@ function SmartLayoutTab({
     setBusy('Suggesting panel groups');
     onError(null);
     try {
-      const suggestion = await layoutAssistant.suggestGrouping(panelSummaries);
+      const suggestion = await layoutAssistant.suggestGrouping(panelSummaries, apiKey ?? undefined);
       setGroupSuggestion(suggestion);
       setCheckedGroups(new Set(suggestion.groups.map((_, index) => index)));
       if (suggestion.groups.length === 0) {
@@ -3283,7 +3345,11 @@ function SmartLayoutTab({
     setBusy('Interpreting layout instruction');
     onError(null);
     try {
-      const instruction = await layoutAssistant.interpretInstruction(text, panelSummaries);
+      const instruction = await layoutAssistant.interpretInstruction(
+        text,
+        panelSummaries,
+        apiKey ?? undefined,
+      );
       if (instruction.kind === 'group') {
         api.commit('Group panels (AI suggestion)', (draft) => {
           addGroup(draft, api.newId, instruction.panelIds);
@@ -3346,6 +3412,86 @@ function SmartLayoutTab({
           size nudge the search above can act on. It never places a panel itself — nothing changes
           until you approve a suggestion or a checked group.
         </p>
+
+        {apiKey && !editingKey ? (
+          <div className="field-row">
+            <span className="muted small">
+              Using your key ({apiKey.slice(0, 7)}...{apiKey.slice(-4)})
+            </span>
+            <div className="finding-actions">
+              <button onClick={changeKey}>Change</button>
+              <button onClick={removeKey}>Remove</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="muted small">
+              <p>
+                New to this? An Anthropic API key is separate from a claude.ai login or Pro
+                subscription — it&rsquo;s a developer credential, billed separately (typically a
+                few cents per use), from a different part of Anthropic&rsquo;s site.
+              </p>
+              <ol>
+                <li>
+                  Go to{' '}
+                  <a
+                    href="https://console.anthropic.com/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    console.anthropic.com
+                  </a>{' '}
+                  and sign up or log in (a Google or email account works).
+                </li>
+                <li>
+                  Under <strong>Settings → Billing</strong>, add a payment method — some starting
+                  credit is required before a key will work. A figure typically costs a fraction of
+                  a cent to a few cents to lay out.
+                </li>
+                <li>
+                  Under <strong>Settings → API Keys</strong>, click <strong>Create Key</strong>, and
+                  copy the value it shows you — it starts with <code>sk-ant-</code> and is shown
+                  only once, so copy it before closing that page.
+                </li>
+                <li>Paste it into the box below and click Test to confirm it works.</li>
+              </ol>
+            </div>
+            <div className="field-row">
+              <input
+                type="password"
+                value={keyDraft}
+                placeholder="sk-ant-…"
+                onChange={(event) => setKeyDraft(event.target.value)}
+              />
+              <div className="finding-actions">
+                <button disabled={keyDraft.trim().length === 0} onClick={saveKey}>
+                  Save
+                </button>
+                <button
+                  disabled={keyDraft.trim().length === 0 || keyTestBusy}
+                  onClick={() => void testKey()}
+                >
+                  {keyTestBusy ? 'Testing…' : 'Test'}
+                </button>
+                {apiKey && (
+                  <button
+                    onClick={() => {
+                      setKeyDraft('');
+                      setEditingKey(false);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="muted small">
+              Stored only in this browser — never sent anywhere except directly to Anthropic when
+              you use this feature. Browser storage isn&rsquo;t a secure vault: anyone with script
+              access to this page (e.g. a malicious extension) could read it.
+            </p>
+          </>
+        )}
 
         <div className="finding-actions">
           <button disabled={assistantBusy !== null} onClick={() => void suggestGroups()}>

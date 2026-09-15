@@ -144,6 +144,8 @@ export interface AiPanelSummary {
 
 export interface SuggestPanelGroupingRequest {
   panels: AiPanelSummary[];
+  /** A user's own Anthropic key, if they have set one. See `apiKeyStore.ts`. */
+  apiKey?: string;
 }
 
 export interface AiGroupSuggestion {
@@ -170,6 +172,8 @@ export async function suggestPanelGrouping(
 export interface InterpretLayoutInstructionRequest {
   instruction: string;
   panels: AiPanelSummary[];
+  /** A user's own Anthropic key, if they have set one. See `apiKeyStore.ts`. */
+  apiKey?: string;
 }
 
 /**
@@ -196,6 +200,22 @@ export async function interpretLayoutInstruction(
   });
   if (!response.ok) throw await failure(response);
   return (await response.json()) as LayoutInstructionResult;
+}
+
+/**
+ * Verifies a user-supplied Anthropic key with one cheap, minimal call —
+ * distinct from `suggestPanelGrouping`/`interpretLayoutInstruction` so a bad
+ * key is reported plainly (401) rather than conflated with "the model
+ * declined this request" (422/500).
+ */
+export async function testApiKey(apiKey: string): Promise<{ ok: true }> {
+  const response = await fetch(`${base()}/layout/test-key`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as { ok: true };
 }
 
 export interface VolcanoTestRequest {

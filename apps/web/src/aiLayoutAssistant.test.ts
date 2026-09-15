@@ -132,10 +132,27 @@ describe('httpLayoutAssistant', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toContain('/layout/suggest-grouping');
-    const body = JSON.parse(init!.body as string) as { panels: unknown[] };
+    const body = JSON.parse(init!.body as string) as { panels: unknown[]; apiKey?: string };
     expect(body.panels).toHaveLength(3);
+    // No key was passed, so the wire shape omits the field entirely rather
+    // than sending an explicit undefined/empty value.
+    expect(body).not.toHaveProperty('apiKey');
     // The invented id was filtered by the client, not merely trusted from the wire.
     expect(result.groups).toEqual([{ panelIds: ['p1', 'p2'], rationale: 'x' }]);
+  });
+
+  it('includes a supplied apiKey in the request body', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => ({
+      ok: true,
+      json: async () => ({ groups: [] }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await httpLayoutAssistant().suggestGrouping(PANELS, 'sk-ant-mine');
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init!.body as string) as { apiKey?: string };
+    expect(body.apiKey).toBe('sk-ant-mine');
   });
 
   it('posts an instruction to /layout/interpret and validates the reply', async () => {

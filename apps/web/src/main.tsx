@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 import { httpLayoutAssistant } from './aiLayoutAssistant.js';
+import { localStorageApiKeyStore } from './apiKeyStore.js';
 import { desktopProjectFileSystem } from './desktopFiles.js';
 import { browserProjectFileSystem } from './projectFiles.js';
 import { isDesktop } from './shell.js';
@@ -19,9 +20,10 @@ const fileSystem = isDesktop() ? desktopProjectFileSystem : browserProjectFileSy
 // file stays the one place every injected dependency the app depends on is
 // visible in one look.
 const layoutAssistant = httpLayoutAssistant();
+const apiKeyStore = localStorageApiKeyStore();
 
 createRoot(container).render(
   <StrictMode>
-    <App fileSystem={fileSystem} layoutAssistant={layoutAssistant} />
+    <App fileSystem={fileSystem} layoutAssistant={layoutAssistant} apiKeyStore={apiKeyStore} />
   </StrictMode>,
 );
